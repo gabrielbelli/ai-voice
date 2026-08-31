@@ -92,6 +92,7 @@ that invents confidence.
 | `STT_LANGUAGE` | unset | Leave unset if you code-switch. See below |
 | `STT_THREADS` | `4` | Must match your CPU limit. See below |
 | `STT_VAD` | `1` | Silence removal |
+| `STT_HOTWORDS` | `1` | `0` disables decode-time biasing, for A/B tests |
 | `STT_MARKER` | `<{a}\|{b}>` | Disagreement format |
 | `STT_GLOSSARY` | `/etc/stt-stack/glossary.txt` | See below |
 

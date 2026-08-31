@@ -38,6 +38,10 @@ GLOSSARY_PATH = os.getenv("STT_GLOSSARY", "/etc/stt-stack/glossary.txt")
 THREADS = int(os.getenv("STT_THREADS", "4"))
 VAD_ENABLED = os.getenv("STT_VAD", "1") not in {"0", "false", "no"}
 MARKER = os.getenv("STT_MARKER", "<{a}|{b}>")
+# Off switch for the glossary's decode-time biasing, so a benchmark can
+# isolate what the vocabulary contributes from what the model does. Text
+# repair is unaffected — only the hotwords passed to Whisper.
+HOTWORDS_ENABLED = os.getenv("STT_HOTWORDS", "1") not in {"0", "false", "no"}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("stt-stack")
@@ -57,7 +61,9 @@ async def lifespan(app: FastAPI):
     # replacement never sees, because the wrong word was never in the list.
     # Measured on real recordings, hotwords fixed every technical term and the
     # post-decode replacement never had to fire.
-    hotwords = ", ".join(hotword_list) or None
+    hotwords = (", ".join(hotword_list) or None) if HOTWORDS_ENABLED else None
+    if not HOTWORDS_ENABLED:
+        log.info("hotwords DISABLED by STT_HOTWORDS")
 
     primary, secondary = asr.build(THREADS, hotwords)
     state["primary"] = primary
@@ -101,6 +107,7 @@ def health() -> dict[str, object]:
         "primary": os.getenv("STT_PRIMARY", "large-v3"),
         "secondary": os.getenv("STT_SECONDARY", "istupakov/parakeet-tdt-0.6b-v3-onnx"),
         "vad": VAD_ENABLED,
+        "hotwords": HOTWORDS_ENABLED,
         "threads": THREADS,
     }
 
