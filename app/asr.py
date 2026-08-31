@@ -43,10 +43,15 @@ class Primary:
             model_id, device="cpu", compute_type=compute_type, cpu_threads=threads
         )
 
-    def transcribe(self, samples: np.ndarray) -> str:
+    def transcribe(self, samples: np.ndarray, language: str | None = None) -> str:
         segments, _ = self._model.transcribe(
             samples,
-            language=self.language,
+            # None means autodetect, and autodetect is the right default for a
+            # speaker who code-switches. Pinning the wrong language does not
+            # degrade the transcript, it TRANSLATES it: English speech under
+            # language="pt" comes back as fluent Portuguese, which reads as a
+            # working transcript and silently is not one.
+            language=language or self.language,
             beam_size=5,
             # The default temperature ladder, kept on purpose. Pinning
             # temperature=0 disables Whisper's retry on low-confidence output,
@@ -67,7 +72,10 @@ class Secondary:
 
         self._model = onnx_asr.load_model(model_id, quantization=quantisation)
 
-    def transcribe(self, samples: np.ndarray) -> str:
+    def transcribe(self, samples: np.ndarray, language: str | None = None) -> str:
+        # onnx-asr has no language argument; Parakeet v3 detects on its own.
+        # Accepted and ignored so both recognisers share one signature.
+        del language
         return self._model.recognize(samples, sample_rate=SAMPLE_RATE).strip()
 
 
@@ -76,6 +84,7 @@ def build(threads: int, hotwords: str | None) -> tuple[Primary, Secondary | None
         model_id=os.getenv("STT_PRIMARY", "large-v3"),
         compute_type=os.getenv("STT_PRIMARY_COMPUTE", "int8"),
         threads=threads,
+        # Unset by default. See the note in Primary.transcribe.
         language=os.getenv("STT_LANGUAGE") or None,
         hotwords=hotwords,
     )

@@ -89,7 +89,7 @@ that invents confidence.
 | `STT_PRIMARY` | `large-v3` | Any faster-whisper model |
 | `STT_PRIMARY_COMPUTE` | `int8` | `int8`, `int8_float32`, `float32` |
 | `STT_SECONDARY` | `istupakov/parakeet-tdt-0.6b-v3-onnx` | Empty disables consensus |
-| `STT_LANGUAGE` | unset | Pin it — autodetect is unreliable on short clips |
+| `STT_LANGUAGE` | unset | Leave unset if you code-switch. See below |
 | `STT_THREADS` | `4` | Must match your CPU limit. See below |
 | `STT_VAD` | `1` | Silence removal |
 | `STT_MARKER` | `<{a}\|{b}>` | Disagreement format |
@@ -102,6 +102,29 @@ the list.
 
 For Brazilian Portuguese, `alefiury/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx`
 drops in via `STT_SECONDARY`.
+
+## Language
+
+Leave `STT_LANGUAGE` unset unless every clip is in one language.
+
+Pinning the wrong language does not degrade the transcript — it **translates**
+it. English speech sent with `language=pt` comes back as fluent Portuguese
+that reads like a working transcript and silently is not one:
+
+```text
+spoken     Look, there is a big problem here. Small tasks and more operational...
+pinned pt  Veja, há um grande problema aqui, tarefas pequenas e mais operacionais...
+```
+
+Parakeet is unaffected — it detects on its own and has no language argument —
+so the consensus `agreement` score collapses toward zero when this happens.
+A near-zero score on speech that clearly transcribed is the signature.
+
+Override per request when you do know:
+
+```bash
+curl -F file=@clip.wav -F language=en http://localhost:8000/transcribe
+```
 
 ## Volume ownership
 
@@ -160,7 +183,6 @@ services:
     volumes: ["stt-models:/models"]
     environment:
       STT_THREADS: "4"
-      STT_LANGUAGE: "pt"
     cpuset: "0-3"
     mem_limit: 6g
 volumes:

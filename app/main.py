@@ -23,7 +23,7 @@ from io import BytesIO
 
 import numpy as np
 import soundfile as sf
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from . import asr, consensus, glossary
@@ -116,7 +116,10 @@ def _decode(raw: bytes) -> np.ndarray:
 
 
 @app.post("/transcribe", response_model=Transcript)
-async def transcribe(file: UploadFile = File(...)) -> Transcript:
+async def transcribe(
+    file: UploadFile = File(...),
+    language: str | None = Form(default=None),
+) -> Transcript:
     if "primary" not in state:
         raise HTTPException(503, "models still loading")
 
@@ -131,7 +134,7 @@ async def transcribe(file: UploadFile = File(...)) -> Transcript:
         samples, _kept = state["vad"].speech_only(samples)  # type: ignore[attr-defined]
     speech_seconds = samples.size / SAMPLE_RATE
 
-    primary_text = state["primary"].transcribe(samples)  # type: ignore[attr-defined]
+    primary_text = state["primary"].transcribe(samples, language)  # type: ignore[attr-defined]
 
     secondary_text: str | None = None
     disagreements: list[dict[str, str]] = []
@@ -139,7 +142,7 @@ async def transcribe(file: UploadFile = File(...)) -> Transcript:
     text = primary_text
 
     if state.get("secondary") is not None:
-        secondary_text = state["secondary"].transcribe(samples)  # type: ignore[attr-defined]
+        secondary_text = state["secondary"].transcribe(samples, language)  # type: ignore[attr-defined]
         text, disagreements = consensus.merge(primary_text, secondary_text, MARKER)
         score = round(consensus.agreement(primary_text, secondary_text), 3)
 
