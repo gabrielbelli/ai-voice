@@ -46,14 +46,22 @@ SOURCES: dict[str, list[dict]] = {
         {"id": "mls-pt", "dataset": "facebook/multilingual_librispeech",
          "config": "portuguese", "split": "test", "text_key": "transcript",
          "style": "read"},
-        # Unscripted Brazilian speech. The most realistic pt-BR source here
-        # and the one whose result should carry the most weight.
-        {"id": "coraa", "dataset": "gabrielrstan/CORAA-v1.1", "config": "default",
+        # Unscripted interviews and conversation, Brazilian varieties, with
+        # per-clip annotations for hesitation, filled pauses and background
+        # noise. The closest public corpus to real dictation and the one whose
+        # result should carry the most weight.
+        {"id": "coraa", "dataset": "Racoci/CORAA-v1.1", "config": "default",
          "split": "test", "text_key": "text", "style": "spontaneous"},
-        # Common Voice pt is majority EUROPEAN Portuguese. Kept as a contrast
-        # source, not as a pt-BR measurement — read it that way.
-        {"id": "cv-pt", "dataset": "mozilla-foundation/common_voice_17_0",
-         "config": "pt", "split": "test", "text_key": "sentence", "style": "crowd"},
+        # Oral-history interviews, elderly speakers, low formality. Harder
+        # than CORAA and a good check that the pipeline degrades gracefully
+        # rather than hallucinating over disfluency.
+        {"id": "coraa-mupe", "dataset": "nilc-nlp/CORAA-MUPE-ASR",
+         "config": "default", "split": "test", "text_key": "normalized_text",
+         "style": "spontaneous"},
+        # TEDx talks: prepared but delivered live, so fluent yet unscripted.
+        # Sits between read and conversational speech.
+        {"id": "mtedx-pt", "dataset": "dominguesm/mTEDx-ptbr", "config": "default",
+         "split": "test", "text_key": "transcription", "style": "spontaneous"},
     ],
 }
 

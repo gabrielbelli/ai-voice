@@ -117,15 +117,21 @@ def _decode(raw: bytes) -> np.ndarray:
     return audio.mean(axis=1)
 
 
+# Deliberately `def`, not `async def`. The body is blocking CPU work lasting
+# tens of seconds; declared async it would run ON the event loop and starve
+# every other request, /health included. A container healthcheck then fails
+# during any sustained load and the orchestrator restarts a perfectly healthy
+# service mid-request. As a plain `def`, FastAPI runs it in a threadpool and
+# the loop stays free to answer.
 @app.post("/transcribe", response_model=Transcript)
-async def transcribe(
+def transcribe(
     file: UploadFile = File(...),
     language: str | None = Form(default=None),
 ) -> Transcript:
     if "primary" not in state:
         raise HTTPException(503, "models still loading")
 
-    samples = _decode(await file.read())
+    samples = _decode(file.file.read())
     if samples.size == 0:
         raise HTTPException(400, "audio contains no samples")
     audio_seconds = samples.size / SAMPLE_RATE

@@ -30,12 +30,39 @@ SAMPLE_RATE = 16_000
 
 # ---------------------------------------------------------------- fetch ----
 
-def fetch(per_source: int, seed: int) -> None:
+def _decode_row(entry: dict) -> np.ndarray | None:
+    """Decode one audio cell to 16 kHz mono float32.
+
+    datasets 4.x decodes audio through torchcodec, so `Audio(decode=False)`
+    hands back raw bytes instead and the decoding happens here. That keeps the
+    torch stack out of a benchmark client whose only other job is HTTP.
+    """
+    import io
+    import soundfile as sf
+    import soxr
+
+    data = entry.get("bytes")
+    src = io.BytesIO(data) if data else entry.get("path")
+    if src is None:
+        return None
+    try:
+        x, rate = sf.read(src, dtype="float32", always_2d=True)
+    except Exception:
+        return None
+    x = x.mean(axis=1)
+    if rate != SAMPLE_RATE:
+        x = soxr.resample(x, rate, SAMPLE_RATE)
+    return x.astype(np.float32)
+
+
+def fetch(per_source: int, seed: int, only: list[str]) -> None:
     from datasets import Audio, load_dataset
     import soundfile as sf
 
     CACHE.mkdir(exist_ok=True)
     for locale, srcs in SOURCES.items():
+        if only and locale not in only:
+            continue
         for src in srcs:
             out = CACHE / locale / src["id"]
             if (out / "manifest.json").is_file():
@@ -46,7 +73,7 @@ def fetch(per_source: int, seed: int) -> None:
             try:
                 ds = load_dataset(src["dataset"], src["config"],
                                   split=src["split"], streaming=True)
-                ds = ds.cast_column("audio", Audio(sampling_rate=SAMPLE_RATE))
+                ds = ds.cast_column("audio", Audio(decode=False))
             except Exception as exc:  # noqa: BLE001 - one bad source must not stop the rest
                 print(f"    SKIPPED: {exc}")
                 continue
@@ -62,7 +89,9 @@ def fetch(per_source: int, seed: int) -> None:
                 text = (row.get(src["text_key"]) or "").strip()
                 if not text:
                     continue
-                a = np.asarray(row["audio"]["array"], dtype=np.float32)
+                a = _decode_row(row["audio"])
+                if a is None:
+                    continue
                 # Very short clips measure endpointing, not recognition; very
                 # long ones dominate the wall clock for no extra information.
                 if not (1.0 <= a.size / SAMPLE_RATE <= 20.0):
@@ -96,7 +125,8 @@ def normalise(text: str, locale: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
-def run(url: str, label: str, conditions: list[str], limit: int | None) -> None:
+def run(url: str, label: str, conditions: list[str], limit: int | None,
+        only: list[str]) -> None:
     import requests
     import soundfile as sf
     from jiwer import cer, wer
@@ -106,11 +136,14 @@ def run(url: str, label: str, conditions: list[str], limit: int | None) -> None:
     results = []
 
     for locale in sorted(SOURCES):
+        if only and locale not in only:
+            continue
         for sdir in sorted((CACHE / locale).glob("*")) if (CACHE / locale).is_dir() else []:
             man_path = sdir / "manifest.json"
             if not man_path.is_file():
                 continue
             man = json.load(open(man_path))
+            print(f"  {locale}/{sdir.name}: starting", flush=True)
             rows = man["rows"][:limit] if limit else man["rows"]
             pool = [sf.read(sdir / r["file"], dtype="float32")[0] for r in rows[:8]]
 
@@ -159,7 +192,8 @@ def run(url: str, label: str, conditions: list[str], limit: int | None) -> None:
                 })
                 last = results[-1]
                 print(f"  {locale:6} {sdir.name:18} {cond:16} "
-                      f"WER={last['wer']:.3f} CER={last['cer']:.3f} rtf={last['rtf']}")
+                      f"WER={last['wer']:.3f} CER={last['cer']:.3f} rtf={last['rtf']}",
+                      flush=True)
 
     out = RUNS / f"{label}.json"
     json.dump(results, open(out, "w"), indent=1)
@@ -197,6 +231,7 @@ if __name__ == "__main__":
     f = sub.add_parser("fetch")
     f.add_argument("--per-source", type=int, default=100)
     f.add_argument("--seed", type=int, default=0)
+    f.add_argument("--locales", nargs="*", default=[], help="e.g. pt-BR")
 
     r = sub.add_parser("run")
     r.add_argument("--url", default="http://localhost:8000")
@@ -204,14 +239,15 @@ if __name__ == "__main__":
     r.add_argument("--conditions", nargs="*", default=[],
                    help="subset of the degradation matrix; default all")
     r.add_argument("--limit", type=int, default=None)
+    r.add_argument("--locales", nargs="*", default=[], help="e.g. pt-BR")
 
     p = sub.add_parser("report")
     p.add_argument("labels", nargs="*")
 
     a = ap.parse_args()
     if a.cmd == "fetch":
-        fetch(a.per_source, a.seed)
+        fetch(a.per_source, a.seed, a.locales)
     elif a.cmd == "run":
-        run(a.url, a.label, a.conditions, a.limit)
+        run(a.url, a.label, a.conditions, a.limit, a.locales)
     else:
         report(a.labels)

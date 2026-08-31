@@ -1,4 +1,9 @@
+# datasets is used only to enumerate and stream rows. Audio is decoded here
+# with soundfile rather than by datasets, because datasets 4.x routes audio
+# decoding through torchcodec, which pulls the whole torch stack into what is
+# otherwise a small HTTP client.
 datasets==4.4.1
-jiwer==4.0.0
 soundfile==0.13.1
+soxr==1.0.0
+jiwer==4.0.0
 requests==2.32.5
