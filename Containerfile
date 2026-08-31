@@ -19,12 +19,18 @@
 
 FROM python:3.13-slim-trixie
 
-# libsndfile is soundfile's only non-Python dependency. ffmpeg is deliberately
-# absent: the service takes 16 kHz mono and rejects anything else rather than
-# resampling, so a client sending 44.1 kHz is told, not quietly degraded.
+# ffmpeg is deliberately absent: the service takes 16 kHz mono and rejects
+# anything else rather than resampling, so a client sending 44.1 kHz is told,
+# not quietly degraded.
+# libsndfile is soundfile's only non-Python dependency. util-linux supplies
+# setpriv, which the entrypoint uses to drop privileges; it is normally already
+# present in the slim base, and naming it here means a base change cannot
+# silently remove it. The `command -v` line fails the build rather than the
+# container if it ever goes missing.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libsndfile1 \
- && rm -rf /var/lib/apt/lists/*
+ && apt-get install -y --no-install-recommends libsndfile1 util-linux \
+ && rm -rf /var/lib/apt/lists/* \
+ && command -v setpriv
 
 WORKDIR /srv
 
@@ -33,6 +39,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
 COPY glossary.txt /etc/stt-stack/glossary.txt
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # HF_HOME points at the volume so models survive container replacement.
 # Without it every restart re-downloads more than a gigabyte.
@@ -47,12 +54,17 @@ ENV HF_HOME=/models \
     PYTHONUNBUFFERED=1
 
 # uid 1000, created rather than reused: the slim base has no non-root account
-# and nothing here wants root. /models must be writable or the first-run
-# download fails.
+# and nothing here wants root.
+#
+# There is no USER instruction. The container starts as root so the entrypoint
+# can take ownership of a bind-mounted /models — a bind mount arrives with the
+# host directory's ownership and overrides anything set here — and then drops
+# to uid 1000 before exec'ing uvicorn. Nothing in the service ever runs as
+# root. Set `user:` in compose to skip the chown entirely if you would rather
+# manage ownership on the host.
 RUN useradd --create-home --uid 1000 stt \
  && mkdir -p /models \
  && chown stt:stt /models
-USER stt
 
 VOLUME ["/models"]
 EXPOSE 8000
@@ -62,4 +74,5 @@ EXPOSE 8000
 # contain it. Pass it at run time:
 #   docker run --health-cmd "python -c \
 #     \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health')\"" ...
-ENTRYPOINT ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

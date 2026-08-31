@@ -103,6 +103,29 @@ the list.
 For Brazilian Portuguese, `alefiury/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx`
 drops in via `STT_SECONDARY`.
 
+## Volume ownership
+
+A bind mount arrives with the **host** directory's ownership, which overrides
+anything the image sets. On a NAS that usually means root, and the service
+runs as uid 1000.
+
+The container handles this itself: it starts as root, takes ownership of
+`/models` if it does not already have it, and drops to uid 1000 before running
+anything. Nothing in the service runs as root.
+
+To manage ownership on the host instead, chown the directory and pin the user
+— the entrypoint then skips the chown entirely:
+
+```bash
+chown -R 1000:1000 /mnt/tank/apps/stt-stack/models
+```
+
+```yaml
+    user: "1000:1000"
+```
+
+Named volumes need none of this; Docker creates them with the right owner.
+
 ## Limiting CPU use
 
 Set the container's CPU limit **and** `STT_THREADS` to the same number. A
