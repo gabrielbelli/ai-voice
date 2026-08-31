@@ -12,7 +12,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/parakeet-stt
+  IMAGE_NAME: ${{ github.repository_owner }}/stt-stack
   # buildah's overlay driver leaves overlayfs bookkeeping xattrs on directories
   # a COPY merges into. vfs produces none. Same reason as the FreeBSD images.
   STORAGE_DRIVER: vfs
@@ -57,7 +57,7 @@ jobs:
       - name: Check the runtime imports on this architecture
         run: |
           buildah run --user root "$(buildah from localhost/build:${{ matrix.arch }})" -- \
-            python -c "import onnx_asr, onnxruntime, soundfile; print('onnxruntime', onnxruntime.__version__)"
+            python -c "import onnx_asr, onnxruntime, soundfile, faster_whisper, ctranslate2; print('ok', onnxruntime.__version__, ctranslate2.__version__)"
 
       - name: Log in to the registry
         if: github.event_name != 'pull_request'

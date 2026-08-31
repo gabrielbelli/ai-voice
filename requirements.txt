@@ -1,7 +1,12 @@
-# Pinned. ONNX Runtime only — no torch, no NeMo. That is the whole point of
-# this image: the torch wheel alone is larger than everything here combined,
-# and nothing in the inference path needs it.
+# CPU only. No torch, no CUDA, no NeMo.
+#
+# Two inference runtimes on purpose: CTranslate2 carries Whisper because it is
+# the only one of the two that accepts a vocabulary at decode time, and ONNX
+# Runtime carries Parakeet and Silero. Together they are still a fraction of
+# what a single torch wheel would cost.
+faster-whisper==1.2.1
 onnx-asr[cpu,hub]==0.12.0
+huggingface-hub==0.36.0
 fastapi==0.121.2
 uvicorn[standard]==0.38.0
 python-multipart==0.0.20

@@ -1,11 +1,16 @@
-"""CPU-only speech-to-text over HTTP.
+"""Self-hosted speech-to-text. One container, the whole pipeline.
 
-One endpoint, one model, no cleanup stage. The transcript is returned raw
-apart from glossary repair — deliberately. A local LLM small enough to sit
-beside this on a CPU box is not reliable enough to rewrite a technical
-transcript: it summarises, inverts meaning, and leaks its own reasoning. The
-consumer of this text (an editor, an agent, a person) is better placed to
-resolve ambiguity than a 4B model is.
+    audio -> VAD -> primary ASR -> secondary ASR -> consensus -> glossary -> text
+
+There is no LLM cleanup stage, deliberately. A model small enough to sit
+beside two recognisers on a CPU box is not reliable enough to rewrite a
+technical transcript: tested at 4B with an explicit prompt forbidding it, the
+cleanup stage still inverted meaning, reversed pronouns, deleted content and
+leaked its own reasoning. The consensus pass replaces it — flagging the words
+worth doubting instead of inventing confidence about them.
+
+The stages are separable on purpose. Splitting this into services later is a
+matter of moving each module behind a socket, not restructuring the pipeline.
 """
 
 from __future__ import annotations
@@ -17,27 +22,25 @@ from contextlib import asynccontextmanager
 from io import BytesIO
 
 import numpy as np
-import onnx_asr
 import soundfile as sf
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from . import glossary
+from . import asr, consensus, glossary
 
-# Parakeet expects 16 kHz mono. Anything else is resampled by the caller or
-# rejected here — silently resampling in-process would hide a client bug that
-# degrades every transcript.
 SAMPLE_RATE = 16_000
 
-MODEL_ID = os.getenv("STT_MODEL", "istupakov/parakeet-tdt-0.6b-v3-onnx")
-QUANT = os.getenv("STT_QUANTISATION", "int8")
-GLOSSARY_PATH = os.getenv("STT_GLOSSARY", "/etc/parakeet-stt/glossary.txt")
-# Threads are the one knob worth exposing. ONNX Runtime scales sub-linearly
-# past about 8; the default of 4 is chosen to leave a small host usable.
+GLOSSARY_PATH = os.getenv("STT_GLOSSARY", "/etc/stt-stack/glossary.txt")
+# The one knob that matters on a shared host. ONNX Runtime and CTranslate2
+# both size their pools from the host core count, not the cgroup, so a
+# container CPU limit without this leaves threads fighting for their own
+# slice. See the README.
 THREADS = int(os.getenv("STT_THREADS", "4"))
+VAD_ENABLED = os.getenv("STT_VAD", "1") not in {"0", "false", "no"}
+MARKER = os.getenv("STT_MARKER", "<{a}|{b}>")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("parakeet-stt")
+log = logging.getLogger("stt-stack")
 
 state: dict[str, object] = {}
 
@@ -45,42 +48,62 @@ state: dict[str, object] = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     os.environ.setdefault("OMP_NUM_THREADS", str(THREADS))
-    log.info("loading %s (%s), %d threads", MODEL_ID, QUANT, THREADS)
     started = time.monotonic()
-    state["model"] = onnx_asr.load_model(MODEL_ID, quantization=QUANT)
-    state["rules"] = glossary.compile_rules(glossary.load(GLOSSARY_PATH))
-    log.info("ready in %.1fs", time.monotonic() - started)
+
+    terms = glossary.load(GLOSSARY_PATH)
+    state["rules"] = glossary.compile_rules(terms)
+    # Whisper takes the glossary at decode time, which beats repairing the
+    # text afterwards: biasing the decoder can recover a word that string
+    # replacement never sees, because the wrong word was never in the list.
+    hotwords = ", ".join(sorted(set(terms.values()))) or None
+
+    primary, secondary = asr.build(THREADS, hotwords)
+    state["primary"] = primary
+    state["secondary"] = secondary
+
+    if VAD_ENABLED:
+        from .vad import Vad  # noqa: PLC0415
+
+        state["vad"] = Vad()
+        log.info("vad ready")
+
+    log.info("ready in %.1fs, %d threads", time.monotonic() - started, THREADS)
     yield
     state.clear()
 
 
 app = FastAPI(
-    title="parakeet-stt",
-    description="CPU-only speech-to-text. Raw transcript plus glossary repair.",
+    title="stt-stack",
+    description="VAD, two ASR models, disagreement marking and glossary repair.",
     lifespan=lifespan,
 )
 
 
 class Transcript(BaseModel):
     text: str
+    primary: str
+    secondary: str | None
+    disagreements: list[dict[str, str]]
+    agreement: float | None
+    repaired: list[str]
     audio_seconds: float
+    speech_seconds: float
     compute_seconds: float
     realtime_factor: float
-    repaired: list[str]
 
 
 @app.get("/health")
 def health() -> dict[str, object]:
     return {
-        "status": "ok" if "model" in state else "loading",
-        "model": MODEL_ID,
-        "quantisation": QUANT,
+        "status": "ok" if "primary" in state else "loading",
+        "primary": os.getenv("STT_PRIMARY", "large-v3"),
+        "secondary": os.getenv("STT_SECONDARY", "istupakov/parakeet-tdt-0.6b-v3-onnx"),
+        "vad": VAD_ENABLED,
         "threads": THREADS,
     }
 
 
 def _decode(raw: bytes) -> np.ndarray:
-    """Read any container soundfile understands, downmix, and require 16 kHz."""
     try:
         audio, rate = sf.read(BytesIO(raw), dtype="float32", always_2d=True)
     except Exception as exc:  # noqa: BLE001 - the client needs the reason
@@ -94,32 +117,50 @@ def _decode(raw: bytes) -> np.ndarray:
 
 @app.post("/transcribe", response_model=Transcript)
 async def transcribe(file: UploadFile = File(...)) -> Transcript:
-    if "model" not in state:
-        raise HTTPException(503, "model still loading")
+    if "primary" not in state:
+        raise HTTPException(503, "models still loading")
 
     samples = _decode(await file.read())
     if samples.size == 0:
         raise HTTPException(400, "audio contains no samples")
-
-    started = time.monotonic()
-    text = state["model"].recognize(samples, sample_rate=SAMPLE_RATE)  # type: ignore[attr-defined]
-    compute = time.monotonic() - started
-
-    text, repaired = glossary.apply(text.strip(), state["rules"])  # type: ignore[arg-type]
     audio_seconds = samples.size / SAMPLE_RATE
 
+    started = time.monotonic()
+
+    if "vad" in state:
+        samples, _kept = state["vad"].speech_only(samples)  # type: ignore[attr-defined]
+    speech_seconds = samples.size / SAMPLE_RATE
+
+    primary_text = state["primary"].transcribe(samples)  # type: ignore[attr-defined]
+
+    secondary_text: str | None = None
+    disagreements: list[dict[str, str]] = []
+    score: float | None = None
+    text = primary_text
+
+    if state.get("secondary") is not None:
+        secondary_text = state["secondary"].transcribe(samples)  # type: ignore[attr-defined]
+        text, disagreements = consensus.merge(primary_text, secondary_text, MARKER)
+        score = round(consensus.agreement(primary_text, secondary_text), 3)
+
+    text, repaired = glossary.apply(text, state["rules"])  # type: ignore[arg-type]
+    compute = time.monotonic() - started
+
     log.info(
-        "%.1fs audio in %.2fs (%.1fx realtime), repaired=%s",
-        audio_seconds,
-        compute,
-        audio_seconds / compute if compute else 0.0,
-        repaired or "none",
+        "%.1fs audio, %.1fs speech, %.2fs compute (%.1fx), agreement=%s, disagreements=%d",
+        audio_seconds, speech_seconds, compute,
+        audio_seconds / compute if compute else 0.0, score, len(disagreements),
     )
 
     return Transcript(
         text=text,
+        primary=primary_text,
+        secondary=secondary_text,
+        disagreements=disagreements,
+        agreement=score,
+        repaired=repaired,
         audio_seconds=round(audio_seconds, 2),
+        speech_seconds=round(speech_seconds, 2),
         compute_seconds=round(compute, 2),
         realtime_factor=round(audio_seconds / compute, 1) if compute else 0.0,
-        repaired=repaired,
     )
