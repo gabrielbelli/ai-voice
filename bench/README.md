@@ -4,12 +4,20 @@ Measures WER as a function of **recording condition**, not as a single number
 on studio audio.
 
 ```bash
-pip install -r requirements.txt
-python bench.py fetch                                  # cache samples once
-python bench.py run --url http://orko:8000 --label whisper-only
-python bench.py run --url http://orko:8000 --label whisper+parakeet
-python bench.py report
+cd bench
+python3 -m venv .venv
+./.venv/bin/pip install -r requirements.txt
+
+./.venv/bin/python bench.py fetch                      # cache samples once
+./.venv/bin/python bench.py run --url http://orko:8000 --label whisper-only
+./.venv/bin/python bench.py run --url http://orko:8000 --label whisper+parakeet
+./.venv/bin/python bench.py report
 ```
+
+The venv is deliberate: `datasets` pulls a large dependency tree that has no
+business in a system interpreter, and pinning it here keeps a benchmark run
+reproducible independently of whatever else the machine has installed.
+`.venv/`, `cache/` and `runs/` are all git-ignored.
 
 Fetch is separate from run so every configuration sees byte-identical audio.
 A benchmark whose inputs move cannot tell you whether a change helped.
