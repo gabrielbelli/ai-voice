@@ -50,6 +50,64 @@ quietly getting worse transcripts.
 For Brazilian Portuguese, `alefiury/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx`
 is a fine-tune of the same architecture and drops in via `STT_MODEL`.
 
+## Limiting CPU use
+
+Set the container's CPU limit **and** `STT_THREADS` to the same number. A limit
+on its own does not help: ONNX Runtime sizes its thread pool from the host's
+core count, so on a 22-core box it still spawns 22 threads and then fights the
+cgroup for time slices. More threads than allotted CPU is slower than fewer,
+not merely capped.
+
+```bash
+podman run -p 8000:8000 -v parakeet-models:/models \
+  --cpus 4 -e STT_THREADS=4 \
+  ghcr.io/gabrielbelli/parakeet-stt:pre
+```
+
+Pin to specific cores instead when the host is shared, so the service cannot
+be scheduled onto whatever else is busy:
+
+```bash
+podman run -p 8000:8000 -v parakeet-models:/models \
+  --cpuset-cpus 0-3 -e STT_THREADS=4 \
+  ghcr.io/gabrielbelli/parakeet-stt:pre
+```
+
+Compose:
+
+```yaml
+services:
+  stt:
+    image: ghcr.io/gabrielbelli/parakeet-stt:pre
+    ports: ["8000:8000"]
+    volumes: ["parakeet-models:/models"]
+    environment:
+      STT_THREADS: "4"
+    cpuset: "0-3"
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 4G
+volumes:
+  parakeet-models:
+```
+
+Memory is worth capping too. Steady state is about 1.5 GB with the `int8`
+model loaded; 4 GB leaves room for a long clip without letting a runaway
+request take the host down.
+
+Check what the limit actually did — `realtime_factor` in every response is the
+measurement:
+
+```bash
+curl -s -F file=@clip.wav localhost:8000/transcribe | python3 -m json.tool
+```
+
+If it drops when you raise `STT_THREADS`, you have crossed the point where
+coordination costs more than the extra cores return. That happens around 8 on
+most hosts, earlier on older ones.
+
 ## Performance
 
 Rough figures, `int8`, one 15-second clip:
