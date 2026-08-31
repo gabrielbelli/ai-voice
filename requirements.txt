@@ -1,0 +1,8 @@
+# Pinned. ONNX Runtime only — no torch, no NeMo. That is the whole point of
+# this image: the torch wheel alone is larger than everything here combined,
+# and nothing in the inference path needs it.
+onnx-asr[cpu,hub]==0.12.0
+fastapi==0.121.2
+uvicorn[standard]==0.38.0
+python-multipart==0.0.20
+soundfile==0.13.1

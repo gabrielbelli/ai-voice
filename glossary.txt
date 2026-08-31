@@ -1,0 +1,20 @@
+# heard = intended
+#
+# Applied to the transcript after decoding, whole words, case-insensitive.
+# Parakeet takes no hotwords, so this is where vocabulary correction happens.
+#
+# Add an entry only for a term that has actually misfired. Every rule here is
+# a chance to corrupt a sentence where the word was right all along.
+
+cloud code = Claude Code
+todd code = Claude Code
+entropic = Anthropic
+ghost paper = Ghost Pepper
+comet = commit
+theory dashboard = Theoria dashboard
+ldr = TLDR
+dts = STT
+tex to speak = text-to-speech
+open sauce = open source
+11 labs = ElevenLabs
+eleven labs = ElevenLabs
