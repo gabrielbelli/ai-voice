@@ -93,12 +93,27 @@ that invents confidence.
 | `STT_THREADS` | `4` | Must match your CPU limit. See below |
 | `STT_VAD` | `1` | Silence removal |
 | `STT_MARKER` | `<{a}\|{b}>` | Disagreement format |
-| `STT_GLOSSARY` | `/etc/stt-stack/glossary.txt` | `heard = intended`, one per line |
+| `STT_GLOSSARY` | `/etc/stt-stack/glossary.txt` | See below |
 
-The glossary feeds Whisper as `hotwords` at decode time *and* repairs the text
-afterwards. Decoder biasing is the stronger of the two — it can recover a word
-that string replacement never sees, because the wrong spelling was never in
-the list.
+### Glossary
+
+Two line forms, because they are two different jobs:
+
+```text
+catalaxy = Catallaxy    a replacement AND a hotword
+Catallaxy               a hotword only
+```
+
+Use the bare form when the likely mishearing is an ordinary word. "Belli" is
+heard as "belly", but a `belly = Belli` rule would corrupt any sentence that
+genuinely says belly. Biasing the decoder is safe; rewriting is not.
+
+Decoder biasing is much the stronger of the two. Measured against real
+recordings, hotwords alone fixed every technical term — `commit` (heard as
+"comet"), `Theoria` ("theory"), `FreeBSD` ("free BSD"), `Belli` ("Belly") —
+and the post-decode replacement never had to fire. It can also recover a word
+string replacement never sees, because the wrong spelling was never in the
+list.
 
 For Brazilian Portuguese, `alefiury/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx`
 drops in via `STT_SECONDARY`.

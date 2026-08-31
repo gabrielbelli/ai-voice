@@ -37,25 +37,37 @@ DEFAULT_GLOSSARY: dict[str, str] = {
 }
 
 
-def load(path: str | Path | None) -> dict[str, str]:
-    """Merge a `heard = intended` file over the defaults.
+def load(path: str | Path | None) -> tuple[dict[str, str], list[str]]:
+    """Read the glossary file. Returns (replacements, hotwords).
+
+    Two line forms, because they are two different jobs:
+
+        catalaxy = Catallaxy    a replacement AND a hotword
+        Catallaxy               a hotword only
+
+    The bare form exists for terms whose likely mishearing is an ordinary
+    word. "Belli" is heard as "belly", but a `belly = Belli` rule would
+    corrupt any sentence that genuinely says belly. Biasing the decoder toward
+    Belli is safe; rewriting the text afterwards is not.
 
     Lines that are blank or start with # are ignored. A missing file is not an
     error — the defaults are a usable glossary on their own.
     """
     terms = dict(DEFAULT_GLOSSARY)
-    if not path:
-        return terms
-    p = Path(path)
-    if not p.is_file():
-        return terms
-    for line in p.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        heard, intended = line.split("=", 1)
-        terms[heard.strip().lower()] = intended.strip()
-    return terms
+    hotwords: list[str] = []
+    if path:
+        p = Path(path)
+        if p.is_file():
+            for line in p.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    heard, intended = line.split("=", 1)
+                    terms[heard.strip().lower()] = intended.strip()
+                else:
+                    hotwords.append(line)
+    return terms, sorted(set(list(terms.values()) + hotwords))
 
 
 def compile_rules(terms: dict[str, str]) -> list[tuple[re.Pattern[str], str]]:
