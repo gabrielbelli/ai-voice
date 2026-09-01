@@ -43,13 +43,16 @@ def wav(seconds: float = 2.0, rate: int = 16_000, channels: int = 1) -> bytes:
     return buffer.getvalue()
 
 
+# Numbered from 1, as faster-whisper numbers them (transcribe.py:1352
+# increments before it yields). The wire has to be 0-based anyway — see
+# test_segment_ids_start_at_zero.
 SEGMENTS = (
-    asr.Segment(id=0, seek=0, start=0.0, end=1.0, text=" First piece.",
+    asr.Segment(id=1, seek=0, start=0.0, end=1.0, text=" First piece.",
                 tokens=(1, 2), temperature=0.0, avg_logprob=-0.2,
                 compression_ratio=1.1, no_speech_prob=0.01,
                 words=(asr.Word("First", 0.0, 0.5, -0.1),
                        asr.Word("piece.", 0.5, 1.0, -0.3))),
-    asr.Segment(id=1, seek=100, start=1.0, end=2.0, text=" Second piece.",
+    asr.Segment(id=2, seek=100, start=1.0, end=2.0, text=" Second piece.",
                 tokens=(3, 4), temperature=0.0, avg_logprob=-0.3,
                 compression_ratio=1.2, no_speech_prob=0.02,
                 words=(asr.Word("Second", 1.0, 1.5, -0.2),
@@ -299,6 +302,24 @@ def test_verbose_json_carries_segments_by_default(whisper: TestClient) -> None:
                 "avg_logprob", "compression_ratio", "no_speech_prob"}
     assert required <= set(body["segments"][0])
     assert len(body["segments"]) == 2
+
+
+def test_segment_ids_start_at_zero(whisper: TestClient) -> None:
+    """Both engines number from 0, whatever the recogniser numbered from.
+
+    faster-whisper's first segment is id 1; the specification's own
+    verbose_json example is id 0, and so is the engine whose segments are cut
+    from word timings here. One service answering 0-based or 1-based depending
+    on a startup env var is a difference a client indexes by.
+    """
+    body = post(whisper, response_format="verbose_json").json()
+    assert [s["id"] for s in body["segments"]] == [0, 1]
+
+
+def test_parakeet_segment_ids_start_at_zero(parakeet: TestClient) -> None:
+    body = post(parakeet, response_format="verbose_json").json()
+    assert [s["id"] for s in body["segments"]] == list(
+        range(len(body["segments"])))
 
 
 def test_verbose_json_carries_words_when_asked(whisper: TestClient) -> None:

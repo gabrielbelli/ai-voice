@@ -277,7 +277,10 @@ the smaller unit. `/transcribe` names every rule that fired in `repaired`.
 **`seek` is not remapped.** With the VAD on, the recogniser sees speech runs
 concatenated, and every start and end is mapped back onto the clip you sent.
 `seek` indexes a decoder window rather than naming a moment, so it is passed
-through as the decoder reported it.
+through as the decoder reported it. `id` is *not* passed through: faster-whisper
+numbers its segments from 1 and the specification's own example numbers from 0,
+so both engines are renumbered from 0 here rather than answering the same field
+differently depending on which one is loaded.
 
 **Two conventions chosen by fiat.** `vtt` is served as `text/vtt; charset=utf-8`
 — the specification declares no content type for it, and a browser needs that

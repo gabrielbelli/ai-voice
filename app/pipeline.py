@@ -309,7 +309,7 @@ def _place_segments(segments: tuple[asr.Segment, ...], speech: vad.Speech,
     """
     placed: list[asr.Segment] = []
     words: list[asr.Word] = []
-    for segment in segments:
+    for index, segment in enumerate(segments):
         segment_words = tuple(
             asr.Word(word=glossary.apply(word.word, rules)[0],
                      start=speech.original(word.start),
@@ -320,7 +320,14 @@ def _place_segments(segments: tuple[asr.Segment, ...], speech: vad.Speech,
         words.extend(segment_words)
         text = glossary.apply(segment.text, rules)[0]
         placed.append(asr.Segment(
-            id=segment.id,
+            # Renumbered from 0, not passed through. faster-whisper increments
+            # before it yields (transcribe.py:1352), so its first segment is
+            # id 1, while the specification's own verbose_json example starts
+            # at 0 and so does the engine that has its segments cut here. One
+            # service answering the same field 0-based or 1-based depending on
+            # a startup env var is exactly the kind of difference a client
+            # indexes by and only discovers on the other deployment.
+            id=index,
             seek=segment.seek,
             start=speech.original(segment.start),
             end=speech.original(segment.end),
