@@ -5,3 +5,6 @@ models
 *.md
 !README.md
 __pycache__
+# The conformance suite runs in CI, not in the image.
+tests
+conftest.py

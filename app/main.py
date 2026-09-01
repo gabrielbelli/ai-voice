@@ -14,12 +14,15 @@ arithmetic allows: short text is waited on and returned as audio, anything
 longer gets 202 and a Location header pointing at the native job. The native
 routes stay the ones to prefer — realtime_factor, per-segment pauses and the
 queue position have no field in the OpenAI shape and are dropped there.
+
+Authentication, the /v1 error envelope, the health contract and the logging
+setup are voice_common's. What is left in this file is the queue, which is the
+whole reason this service exists separately from tts-stack.
 """
 
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import threading
 import time
@@ -28,15 +31,16 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from queue import Queue
 
-import numpy as np
 import soundfile as sf
-from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.exception_handlers import request_validation_exception_handler
-from fastapi.exceptions import RequestValidationError
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
+from voice_common import auth, logging as voice_logging
+from voice_common.audio import pcm_bytes
+from voice_common.errors import error_response, install_errors
+from voice_common.health import install_health
+from voice_common.models import OpenAISpeechRequest, Segment
 
-from . import auth
 from .synth import SAMPLE_RATE, Synth
 
 OUT_DIR = Path(os.getenv("TTS_OUTPUT_DIR", "/output"))
@@ -66,8 +70,12 @@ SYNC_TIMEOUT = float(os.getenv("TTS_OPENAI_SYNC_TIMEOUT", "180"))
 # image that already carries torch, to serve a format nobody asked for yet.
 MEDIA_TYPES = {"wav": "audio/wav", "flac": "audio/flac", "pcm": "audio/pcm"}
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("tts-long")
+# The same one line of configuration this always had, plus the TTS_LOG_LEVEL
+# switch it never had: getting DEBUG out of a running container used to mean
+# editing the source and rebuilding a 6.5 GB image, which is exactly the moment
+# that is impossible. Unset still means INFO, so nothing changes for anyone who
+# has not asked for it.
+log = voice_logging.setup("tts-long", "TTS")
 
 jobs: dict[str, dict] = {}
 queue: Queue = Queue()
@@ -104,8 +112,10 @@ def _worker() -> None:
             if job["format"] == "pcm":
                 # OpenAI's "pcm" is 24 kHz 16-bit mono little-endian, which is
                 # exactly what Chatterbox emits — no resampling, just a cast.
-                path.write_bytes(
-                    (np.clip(audio, -1.0, 1.0) * 32767).astype("<i2").tobytes())
+                # The clip-before-scale that keeps a single overshoot from
+                # wrapping into a click is voice_common.audio.pcm_bytes, byte
+                # for byte the expression tts-stack also had.
+                path.write_bytes(pcm_bytes(audio))
             else:
                 sf.write(path, audio, SAMPLE_RATE)
             duration = audio.size / SAMPLE_RATE
@@ -141,7 +151,6 @@ async def lifespan(app: FastAPI):
     # One worker on purpose. The model is 6.5 GB and generation is sequential,
     # so a second job would double memory and slow both.
     threading.Thread(target=_worker, daemon=True).start()
-    auth.log_state(log)
     log.info("ready, %d threads, idle timeout %.0fs (model loads on first job)",
              THREADS, IDLE_TIMEOUT)
     yield
@@ -155,16 +164,26 @@ app = FastAPI(
     description="Chatterbox long-form speech, CPU, as a job queue.",
     lifespan=lifespan,
 )
-auth.install(app)
 
+# Installed on the app rather than route by route, so a route added later is
+# covered without anyone having to remember to ask for it. TTS_API_KEYS is a
+# parameter of the shared middleware precisely so that no operator-visible
+# variable had to be renamed for this service to stop keeping its own copy —
+# a copy that, among other things, could never authenticate a key with an
+# accent in it and answered 401 to a probe written `/health/`.
+auth.install(app, "TTS_API_KEYS")
 
-class Segment(BaseModel):
-    text: str
-    pause_after: float = Field(default=0.0, ge=0.0, le=10.0)
+# The /v1 error envelope and the handler that puts a rejected body into it.
+# The native routes keep FastAPI's own `{"detail": ...}` and its 422: /jobs is
+# the older contract and something out there already parses it.
+install_errors(app)
 
 
 class JobRequest(BaseModel):
     text: str | None = None
+    # voice_common.models.Segment: the same `text` and the same 0.0–10.0
+    # second `pause_after`, which is a published part of both this API and
+    # tts-stack's and no longer free to drift in one of them.
     segments: list[Segment] | None = None
     language: str = DEFAULT_LANG
     exaggeration: float = Field(default=DEF_EXAGGERATION, ge=0.0, le=1.0)
@@ -172,14 +191,20 @@ class JobRequest(BaseModel):
     temperature: float = Field(default=DEF_TEMPERATURE, ge=0.1, le=1.5)
 
 
-@app.get("/health")
-async def health() -> dict[str, object]:
-    # `async def`, so this is answered on the event loop and never queues for
-    # an AnyIO worker thread. It used to be a sync route sharing that pool
-    # (40 threads) with /v1/audio/speech, which held a thread for up to
-    # TTS_OPENAI_SYNC_TIMEOUT seconds each: 40 concurrent speech requests
-    # starved the pool, /health stopped answering, and an orchestrator
-    # restarted a service that was merely busy. Nothing below blocks.
+def _health() -> dict[str, object]:
+    """The body, unchanged. The route and its auth exemption are shared.
+
+    install_health registers `/health` AND exempts exactly that string from
+    authentication, so a rename can no longer lock the container healthcheck
+    out — the two used to be independent literals in two modules.
+
+    It also makes the route `async def`, which this service had already paid to
+    learn: a sync route runs on AnyIO's forty-thread pool, shared with
+    /v1/audio/speech, which held a thread for up to TTS_OPENAI_SYNC_TIMEOUT
+    seconds each. Forty concurrent speech requests starved the pool, /health
+    stopped answering, and an orchestrator restarted a service that was merely
+    busy. Nothing below blocks.
+    """
     synth: Synth = state["synth"]  # type: ignore[assignment]
     return {
         "status": "ok",
@@ -188,6 +213,9 @@ async def health() -> dict[str, object]:
         "queued": queue.qsize(),
         "running": sum(1 for j in jobs.values() if j["status"] == "running"),
     }
+
+
+install_health(app, _health)
 
 
 def _estimate(words: int) -> int:
@@ -265,19 +293,36 @@ def get_audio(job_id: str) -> FileResponse:
 # to prefer, for the reasons in the module docstring.
 
 
-class SpeechRequest(BaseModel):
+class SpeechRequest(OpenAISpeechRequest):
+    """OpenAI's /v1/audio/speech body, with the parts that are Chatterbox's.
+
+    `model`, `input`, `voice` and the `extra="allow"` rule come from
+    voice_common.models.OpenAISpeechRequest. That last one is why the base
+    class exists: OpenAI keeps adding fields — `instructions`,
+    `stream_format` — and a service whose whole purpose is answering OpenAI's
+    clients must not reject one for speaking a newer version of the dialect it
+    claims to speak. This service got that behaviour by never having said
+    `extra="forbid"`, which was luck; now it is the base class's decision.
+
+    `response_format` and the speed range are deliberately NOT in the base.
+    Both are properties of this image: there is no encoder here beyond
+    libsndfile, and Chatterbox has no rate control at all, so speed is refused
+    below rather than clamped the way tts-stack clamps it into Kokoro's range.
+    """
+
+    # "tts-1" rather than the base's "default", because that is what this
+    # service has always answered with and something may be reading it back.
     model: str = "tts-1"
-    input: str
     # Accepted and ignored. Chatterbox clones from a reference clip and has no
     # named voices, so mapping 'alloy' onto anything would be an invention. The
-    # field stays because OpenAI clients require it and would refuse to send
-    # the request without one.
+    # field keeps its non-null default, unlike the base's `str | None`, because
+    # OpenAI clients require it and would refuse to send the request without
+    # one.
     voice: str = "alloy"
     # OpenAI defaults this to mp3; there is no mp3 encoder in this image, so
     # the default here is wav. Clients that never send the field get audio
     # they can play either way.
     response_format: str = "wav"
-    speed: float = 1.0
     # Not OpenAI fields. Accepted because the OpenAI shape has no room for the
     # knobs that decide how this reads, and extra_body is how openai-python
     # passes vendor options through.
@@ -285,50 +330,6 @@ class SpeechRequest(BaseModel):
     exaggeration: float = Field(default=DEF_EXAGGERATION, ge=0.0, le=1.0)
     cfg_weight: float = Field(default=DEF_CFG_WEIGHT, ge=0.0, le=1.0)
     temperature: float = Field(default=DEF_TEMPERATURE, ge=0.1, le=1.5)
-
-
-def _error(status: int, message: str, code: str,
-           type_: str = "invalid_request_error") -> JSONResponse:
-    """The OpenAI error envelope. openai-python reads the message off this."""
-    return JSONResponse(status_code=status,
-                        content={"error": {"message": message, "type": type_,
-                                           "code": code}})
-
-
-# Codes openai-python surfaces as `.code` on the exception it raises. Kept
-# distinct so a caller can tell "you left out `input`" from "9 is not a valid
-# exaggeration" without parsing the message.
-_VALIDATION_CODES = {"missing": "missing_required_parameter"}
-
-
-@app.exception_handler(RequestValidationError)
-async def _validation_error(request: Request, exc: RequestValidationError) -> Response:
-    """Put a rejected body into the OpenAI envelope, but only under /v1.
-
-    A body pydantic rejects never reaches openai_speech, so every envelope
-    that route is careful to build was bypassed and the client got FastAPI's
-    `{"detail": [...]}` with a 422. openai-python reads no message off that
-    shape and raises a bare APIStatusError, which is the same silence a
-    missing `input` deserved a sentence for.
-
-    The native routes keep FastAPI's own handler untouched: /jobs is a
-    compatibility boundary, and something out there already parses `detail`.
-    """
-    if not request.url.path.startswith("/v1/"):
-        return await request_validation_exception_handler(request, exc)
-    errors = exc.errors()
-    if not errors:  # Nothing pydantic could locate. Say so rather than guess.
-        return _error(400, "request body is not valid", "invalid_value")
-    first = errors[0]
-    if first["type"] == "json_invalid":
-        # loc is ("body", <character offset>) here, and naming a field "12" is
-        # worse than not naming one.
-        return _error(400, "request body is not valid JSON", "invalid_value")
-    # loc[0] is always "body"; the rest names the field, with ints for list
-    # indices — segments.0.text.
-    field = ".".join(str(part) for part in first["loc"][1:]) or "body"
-    return _error(400, f"{field}: {first['msg']}",
-                  _VALIDATION_CODES.get(first["type"], "invalid_value"))
 
 
 @app.post("/v1/audio/speech")
@@ -353,20 +354,23 @@ async def openai_speech(req: SpeechRequest) -> Response:
     """
     text = req.input.strip()
     if not text:
-        return _error(400, "input must not be empty", "invalid_input")
+        return error_response(400, "input must not be empty",
+                              code="invalid_input")
     if req.response_format not in MEDIA_TYPES:
-        return _error(400, f"response_format '{req.response_format}' is not "
-                           f"available: this image has no encoder beyond "
-                           f"libsndfile, so only "
-                           f"{', '.join(sorted(MEDIA_TYPES))} are produced.",
-                      "unsupported_value")
+        return error_response(400, f"response_format '{req.response_format}' is "
+                                   f"not available: this image has no encoder "
+                                   f"beyond libsndfile, so only "
+                                   f"{', '.join(sorted(MEDIA_TYPES))} are "
+                                   f"produced.",
+                              code="unsupported_value")
     if abs(req.speed - 1.0) > 1e-6:
         # Silently ignoring it would return audio of the wrong length, which
         # is worse than refusing: Chatterbox has no rate control, and
         # resampling to fake one shifts the pitch with it.
-        return _error(400, "speed is not supported: Chatterbox has no rate "
-                           "control and resampling would shift pitch.",
-                      "unsupported_value")
+        return error_response(400, "speed is not supported: Chatterbox has no "
+                                   "rate control and resampling would shift "
+                                   "pitch.",
+                              code="unsupported_value")
 
     # `async def` and an asyncio wait, not a sync route blocking on a
     # threading.Event. A sync route holds one of AnyIO's 40 worker threads for
@@ -395,8 +399,9 @@ async def openai_speech(req: SpeechRequest) -> Response:
                 return FileResponse(job["path"],
                                     media_type=MEDIA_TYPES[req.response_format],
                                     filename=f"{job_id}.{req.response_format}")
-            return _error(500, job.get("error", "synthesis failed"),
-                          "synthesis_failed", type_="server_error")
+            return error_response(500, job.get("error", "synthesis failed"),
+                                  type_="server_error",
+                                  code="synthesis_failed")
 
     # Either too long to wait for, or the wait ran out. The job is untouched
     # and still queued, so nothing has been wasted — Location points at where

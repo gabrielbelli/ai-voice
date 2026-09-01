@@ -69,10 +69,19 @@ curl -s localhost:8002/jobs/<id>/audio --output out.wav
 
 ## Segments and pauses
 
-Same contract as tts-stack. `segments` carries explicit `pause_after` values,
-and the silence is **generated here, not asked of the model** — no TTS model
+Same contract as tts-stack — the same class, now, rather than the same idea
+written out twice: `text` and a `pause_after` of 0.0 to 10.0 seconds come from
+`voice_common.models.Segment`, so the published range cannot drift in one
+service and not the other.
+
+The silence is **generated here, not asked of the model** — no TTS model
 reliably produces a beat you can act inside. Punctuation buys a breath; an
 instruction needs a gap.
+
+A field that is not `text` or `pause_after` is now a **422** rather than
+silently ignored. tts-stack documented a per-segment `voice` for as long as it
+was quietly dropped and gave the caller the default voice with nothing to read
+that said why; a typo belongs in an error, not in the audio.
 
 ## OpenAI-compatible API
 
@@ -184,29 +193,42 @@ Set `TTS_API_KEYS` to a comma-separated list of accepted keys. Send one as
 docker run -p 8002:8002 -e TTS_API_KEYS='sk-alpha,sk-beta' ... tts-long
 ```
 
-**Unset or empty means authentication is disabled**, and the startup log says
-so at WARNING:
+**Unset means authentication is disabled**, and the startup log says so at
+WARNING:
 
 ```text
-WARNING TTS_API_KEYS is unset or empty: every request is accepted without a key, including /v1/audio/speech
+WARNING TTS_API_KEYS is unset: authentication is DISABLED and every request is accepted, including /v1. Set TTS_API_KEYS to a comma-separated list of keys to require Authorization: Bearer.
 ```
 
 That is deliberate. This already runs on a LAN with callers that have no key,
 and an upgrade that started refusing them would turn a feature into an outage.
 Refusing to boot is the tidier position and the worse one.
 
+A `TTS_API_KEYS` that is *set* but names no key — `''`, `','`, `'  '`, `',,'`
+— **refuses to start**. All four are reached by ordinary accident: `-e
+TTS_API_KEYS=$SECRET` with `SECRET` unset hands the container an empty value.
+Unset means "I am not using this"; a value that is present and yields nothing
+means someone meant to configure keys, and reading that as "off" turns an
+operator's intent to require keys into a service open to anyone. *(The empty
+string used to disable authentication silently. It now exits with the sentence
+above.)*
+
 Keys are compared with `hmac.compare_digest`, and every configured key is
 compared even after one matches — short-circuiting would leak which key was
 presented through the response time. A LAN is not a threat-free network.
 
-`/health` stays open, because the image's `HEALTHCHECK` calls it and has no
-key. Everything else needs one, `/docs` and `/openapi.json` included.
+A key with non-ASCII characters in it authenticates. It is compared against
+the bytes the client actually put on the wire, because Starlette decodes a
+header as latin-1 and re-encoding that as UTF-8 produced different bytes for
+every accented key — so the *correct* key came back as "Incorrect API key
+provided". Startup warns about such a key anyway: it works only with clients
+that send the header as UTF-8, which HTTP does not guarantee.
 
-A `TTS_API_KEYS` that is *set* but contains no key — `','` is the one that
-happens — **refuses to start**. Empty means "I am not using this"; a value
-with separators and nothing between them means someone meant to configure
-keys, and quietly running open on that reading is how a service ends up
-unauthenticated with a warning in its log saying the variable was never set.
+`/health` stays open, because the image's `HEALTHCHECK` calls it and has no
+key — and so does `/health/`, with the trailing slash. The check runs before
+routing, so FastAPI's 307 to `/health` never happens and a probe written that
+way used to go permanently 401 the day keys were configured. Everything else
+needs a key, `/docs` and `/openapi.json` included.
 
 ## TLS
 
@@ -237,9 +259,17 @@ permanently, and then the next one is not checked either. Use a real one from
 your internal CA or Let's Encrypt, or terminate TLS in a reverse proxy in
 front of this and leave the container on HTTP.
 
-The flags are assembled in `entrypoint.sh`, so this applies to the image — and
-only to the uvicorn command it knows how to add them to. If you run uvicorn
-directly, pass `--ssl-certfile` and `--ssl-keyfile` yourself.
+The flags are assembled in `voice-entrypoint.sh`, which
+[voice-common](https://github.com/gabrielbelli/voice-common) installs into
+`/usr/local/bin`, so this applies to the image — and only to the uvicorn
+command it knows how to add them to. If you run uvicorn directly, pass
+`--ssl-certfile` and `--ssl-keyfile` yourself.
+
+The certificate and the key are also checked for readability **as uid 1000**,
+the user the server drops to, rather than as root. A key mounted `0600
+root:root` reads fine to the entrypoint and not at all to the process that
+opens it, and uvicorn's failure at that point is a traceback rather than a
+sentence.
 
 ## Configuration
 
@@ -250,7 +280,8 @@ directly, pass `--ssl-certfile` and `--ssl-keyfile` yourself.
 | `TTS_EXAGGERATION` | `0.3` | Stock is 0.5 and reads as over-cheerful |
 | `TTS_CFG_WEIGHT` | `0.3` | Lower is slower, more deliberate |
 | `TTS_TEMPERATURE` | `0.6` | Stock 0.8 varies more than an explanation wants |
-| `TTS_API_KEYS` | *(unset)* | Comma-separated accepted keys. Unset or empty means **no auth**; set but containing no key refuses to start |
+| `TTS_API_KEYS` | *(unset)* | Comma-separated accepted keys. Unset means **no auth**; set but naming no key (`''`, `','`) refuses to start |
+| `TTS_LOG_LEVEL` | `INFO` | Root log level. An unrecognised name warns and falls back to `INFO` rather than refusing to start |
 | `TTS_TLS_CERT` | *(unset)* | PEM certificate. Both this and the key are needed for HTTPS; half a pair refuses to start |
 | `TTS_TLS_KEY` | *(unset)* | PEM private key. Only applied to the `uvicorn` command; overriding `CMD` with TLS set refuses to start |
 | `TTS_OPENAI_SYNC_MAX_CHARS` | `300` | Longest `/v1/audio/speech` input answered synchronously; `0` always returns 202 |
@@ -272,6 +303,29 @@ used on purpose: the CUDA wheels add several gigabytes, and the GPU this would
 otherwise target is a GTX 1060 — Pascal, whose FP16 runs at 1/64 rate. It
 would not help even where one exists, and 6.5 GB does not fit in 6 GB of VRAM
 at fp32 regardless.
+
+## Shared code
+
+Authentication, the OpenAI error envelope, the `/health` contract, `Segment`,
+the PCM byte cast and the entrypoint all live in
+[voice-common](https://github.com/gabrielbelli/voice-common), pinned by SHA in
+`requirements.txt` and shared with tts-stack and stt-stack. Three
+hand-vendored copies of that code had drifted by 170 to 197 lines and carried
+three *different* bugs, two of which were this service's: a key with an accent
+in it could never authenticate, and `GET /health/` answered 401.
+
+`tests/test_conformance.py` is four lines and runs the suite the package
+ships against this repo's own `app.main:app`, so a bad voice-common bump fails
+here rather than on the host. It needs no model and no torch:
+
+```bash
+pip install -r requirements.txt pytest
+python -m pytest tests
+```
+
+What stays here is what is actually this service's: the job queue, the
+synchronous/202 split on `/v1/audio/speech`, the Chatterbox knobs and the
+watermarker stub.
 
 ## Licence
 

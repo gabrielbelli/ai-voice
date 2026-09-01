@@ -22,10 +22,15 @@ import threading
 import time
 
 import numpy as np
+from voice_common.audio import SAMPLE_RATE, splice
 
 log = logging.getLogger("tts-long.synth")
 
-SAMPLE_RATE = 24_000
+# Re-exported so app.main keeps importing it from here. The constant itself is
+# voice_common.audio's: 24 kHz is OpenAI's headerless `pcm` rate and the native
+# rate of both Chatterbox and Kokoro, so it is a wire fact rather than a
+# property of this model file.
+__all__ = ["SAMPLE_RATE", "Synth"]
 
 
 def _stub_watermarker() -> None:
@@ -118,14 +123,14 @@ class Synth:
         Pauses are generated here rather than asked of the model. No TTS model
         reliably produces a beat you can act inside — punctuation buys a
         breath, an instruction needs a gap.
+
+        The splicing itself is voice_common.audio.splice, which tts-stack also
+        calls: a segment whose text is empty contributes its pause and nothing
+        else, and a request of nothing but pauses returns silence rather than
+        raising.
         """
-        parts: list[np.ndarray] = []
-        for text, pause_after in segments:
-            if text.strip():
-                parts.append(self.speak(text, language, exaggeration,
-                                        cfg_weight, temperature, reference))
-            if pause_after > 0:
-                parts.append(np.zeros(int(SAMPLE_RATE * pause_after), dtype=np.float32))
-        if not parts:
-            return np.zeros(0, dtype=np.float32)
-        return np.concatenate(parts)
+        return splice([
+            (self.speak(text, language, exaggeration, cfg_weight, temperature,
+                        reference) if text.strip() else None,
+             pause_after)
+            for text, pause_after in segments])

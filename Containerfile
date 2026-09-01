@@ -37,11 +37,21 @@ RUN apt-get update \
 WORKDIR /srv
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# voice-common ships voice-entrypoint.sh through setuptools `script-files`, so
+# it lands in /usr/local/bin alongside the interpreter and rides the same pin
+# as the auth code. Checked here rather than discovered at run time, the way
+# setpriv is above: a wheel that stopped installing the script would otherwise
+# produce an image that builds and then cannot start.
+RUN pip install --no-cache-dir -r requirements.txt \
+ && command -v voice-entrypoint.sh
 
 COPY app/ ./app/
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
+# VOICE_TLS_PREFIX and VOICE_CHOWN_DIRS parameterise the shared entrypoint.
+# They are image settings rather than operator settings: the prefix is what
+# keeps the operator-visible TTS_TLS_CERT and TTS_TLS_KEY names exactly as they
+# were, and the directory list is the two volumes declared below.
+#
 # HF_HOME on the volume so the ~3 GB of weights survive container replacement.
 # librosa pulls numba, which JIT-compiles on first use and caches the result
 # next to its own installed source — read-only for a non-root user, so the
@@ -51,7 +61,9 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 # privileges with setpriv, which changes the uid but leaves HOME=/root.
 # chatterbox pulls spacy-pkuseg, which downloads a model into $HOME/.pkuseg
 # on first use and dies with EACCES when that is root's home.
-ENV HOME=/home/tts \
+ENV VOICE_TLS_PREFIX=TTS \
+    VOICE_CHOWN_DIRS="/models /output" \
+    HOME=/home/tts \
     NUMBA_CACHE_DIR=/tmp/numba \
     HF_HOME=/models \
     TTS_OUTPUT_DIR=/output \
@@ -90,5 +102,5 @@ EXPOSE 8002
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD ["python", "-c", "import os,ssl,urllib.request as u; s='https' if os.getenv('TTS_TLS_CERT') else 'http'; u.urlopen(f'{s}://127.0.0.1:8002/health', timeout=8, context=ssl._create_unverified_context()).read()"]
 
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["voice-entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002"]
