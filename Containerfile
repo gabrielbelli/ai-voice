@@ -44,7 +44,12 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 # next to its own installed source — read-only for a non-root user, so the
 # first job dies with "no locator available for file .../librosa/...". Point
 # the cache somewhere writable instead.
-ENV NUMBA_CACHE_DIR=/tmp/numba \
+# HOME is set explicitly because the entrypoint starts as root and drops
+# privileges with setpriv, which changes the uid but leaves HOME=/root.
+# chatterbox pulls spacy-pkuseg, which downloads a model into $HOME/.pkuseg
+# on first use and dies with EACCES when that is root's home.
+ENV HOME=/home/tts \
+    NUMBA_CACHE_DIR=/tmp/numba \
     HF_HOME=/models \
     TTS_OUTPUT_DIR=/output \
     TTS_THREADS=8 \
