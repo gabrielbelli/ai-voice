@@ -27,8 +27,18 @@ if [ -n "${TTS_TLS_CERT:-}" ] || [ -n "${TTS_TLS_KEY:-}" ]; then
         # fine here and not at all in the process that will open it, and
         # uvicorn's failure at that point is a traceback rather than a sentence.
         if [ "$(id -u)" = "0" ]; then
-            setpriv --reuid=1000 --regid=1000 --init-groups test -r "$f" || {
-                echo "entrypoint: $f is not readable by uid 1000" >&2
+            # setpriv's own failures — missing binary, no CAP_SETUID, no uid
+            # 1000 in this image — also exit non-zero, and reporting one of
+            # those as "not readable" sends an operator to inspect a file
+            # whose permissions were fine all along. `test -r` says nothing on
+            # failure and setpriv always explains itself, so its output is the
+            # thing that tells the two apart.
+            why=$(setpriv --reuid=1000 --regid=1000 --init-groups test -r "$f" 2>&1) || {
+                if [ -n "$why" ]; then
+                    echo "entrypoint: could not check $f as uid 1000: $why" >&2
+                else
+                    echo "entrypoint: $f is not readable by uid 1000" >&2
+                fi
                 exit 1
             }
         elif [ ! -r "$f" ]; then

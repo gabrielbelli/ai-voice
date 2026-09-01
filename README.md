@@ -63,6 +63,29 @@ the gaps.
 So the model is not the interesting variable. Write for the ear and place the
 pauses; any competent voice will then do.
 
+A segment may name its own `voice`, and uses the request's when it does not. A
+voice is a 510 KB embedding over weights that are already resident, so
+alternating between two costs nothing:
+
+```json
+{
+  "voice": "bm_george",
+  "segments": [
+    {"text": "The reviewer asked:",             "pause_after": 0.4},
+    {"text": "why is this not in the volume?",  "pause_after": 0.6, "voice": "af_nova"},
+    {"text": "Because it is 310 megabytes."}
+  ]
+}
+```
+
+`language` stays a property of the request rather than the segment, so a
+segment in another language wants its own request.
+
+**Unknown fields are rejected, not ignored.** `/speak` answers `422` for a
+field it does not recognise, at the top level or inside a segment. A misspelt
+`pause_after` was previously dropped in silence and heard as a missing pause.
+`/v1/audio/speech` is deliberately the other way round — see below.
+
 ## Voices
 
 54 voices, all sharing one 310 MB model. **A voice is a 510 KB embedding**, so
@@ -123,10 +146,17 @@ anything; send any non-empty string when authentication is off.
 | `response_format` | `mp3` (default), `opus`, `aac`, `flac`, `wav`, `pcm`. `pcm` is headerless 24 kHz 16-bit mono, which is Kokoro's own rate — nothing is resampled |
 | `speed` | Accepted across OpenAI's 0.25–4.0 and **clamped to 0.5–2.0**, where Kokoro's duration predictor still tracks punctuation. A client asking for 4.0 wants fast speech, not a 400 it cannot act on |
 
+Unknown fields are accepted and ignored here, unlike on `/speak`. OpenAI keeps
+adding them — `instructions`, `stream_format` — and a service whose entire
+purpose is to answer OpenAI's clients must not reject one for speaking a newer
+version of the dialect it claims to speak.
+
 Errors come back in OpenAI's envelope, `{"error": {"message", "type", "code"}}`,
 because `openai-python` reads `error.message` and renders FastAPI's
 `{"detail": …}` as a bare status code. The native routes keep FastAPI's shape:
-clients are already written against it.
+clients are already written against it. That covers a failure to encode as well
+as a failure to synthesise: `ffmpeg` missing or failing is a `500` with a
+message on both routes, in each route's own shape.
 
 ### Which route to prefer
 
@@ -136,6 +166,7 @@ clients are already written against it.
 |---|---|---|
 | Segments with pauses | yes | no field for it |
 | Per-segment voice | yes | no |
+| Unknown fields | `422` | accepted and ignored |
 | `language` override | yes | inferred from the voice |
 | `X-Realtime-Factor` | yes | sent, but clients ignore it |
 | Speed range | 0.5–2.0, rejected outside | 0.25–4.0, clamped |
@@ -185,20 +216,34 @@ curl -X POST localhost:8001/speak \
   -d '{"text":"Authenticated."}' --output out.wav
 ```
 
-- **Unset or empty means every request is accepted**, and the service says so
-  at `WARNING` on every start. It neither refuses to boot nor runs open in
+- **Unset means every request is accepted**, and the service says so at
+  `WARNING` on every start. It neither refuses to boot nor runs open in
   silence. This service already runs on a LAN with no keys anywhere, and an
   upgrade that starts rejecting every existing caller is a worse outage than a
   warning nobody reads.
+- **Set but naming no key refuses to start.** `TTS_API_KEYS=`, `,` and `,,  ,`
+  all exit with a sentence saying so. Unset is a choice; set to nothing is an
+  accident — `-e TTS_API_KEYS=$SECRET` with `SECRET` unset hands the container
+  an empty value — and it used to leave the service open to anyone under a
+  warning that claimed the variable was unset.
 - One list, no per-key identity or scopes. Rotation is: add the new key, move
   the callers, drop the old one.
+- Surrounding whitespace is trimmed from each key, so `k1, k2` works as
+  written. A key is therefore never surrounded by spaces, which is just as
+  well: HTTP strips a field value's trailing whitespace, so one could not be
+  presented even if it were configured.
+- Non-ASCII keys work — the comparison is done on the bytes that crossed the
+  wire, and the configured key is encoded as UTF-8 to match. HTTP does not
+  require a client to send UTF-8, though, so a start with one logs a warning
+  and an ASCII key avoids the question.
 - Keys are compared with `hmac.compare_digest` against every configured key,
   with no early exit on a match. `==` returns at the first differing byte and
   leaks the matching prefix; stopping at the match would leak how far down the
   list a valid key sits.
-- **`/health` is never authenticated.** Container healthchecks have no key and
-  no way to be given one. Everything else needs one, `/docs` and
-  `/openapi.json` included.
+- **`/health` is never authenticated**, `/health/` included. Container
+  healthchecks have no key and no way to be given one, and a probe written
+  with the trailing slash must not go permanently unhealthy the moment keys
+  are set. Everything else needs one, `/docs` and `/openapi.json` included.
 - Enforcement is middleware, not a per-route dependency, so a route added later
   is protected without anyone remembering to ask.
 
@@ -241,6 +286,7 @@ What the entrypoint does with the pair, before it drops privileges:
 |---|---|
 | Only one of the two variables set | Exits. Half a configuration must not become a silent downgrade to plain HTTP |
 | Either file unreadable **by uid 1000** | Exits with the path. Readability is tested as the user that will open the file, not as root — a key mounted `0600 root:root` reads fine for the entrypoint and not at all for uvicorn |
+| `setpriv` itself cannot run | Exits quoting what `setpriv` said. Its own failure is not a permissions problem, and reporting it as one sends an operator to inspect a file whose mode was fine |
 | Both set and readable | Appends `--ssl-certfile` and `--ssl-keyfile` to whatever command was given |
 
 The flags are appended to the command rather than read in Python, so an
@@ -263,7 +309,7 @@ start, so a renewed certificate needs a container restart.
 | `TTS_LANGUAGE` | `en-us` | `en-us`, `en-gb`, `pt-br`, … |
 | `TTS_THREADS` | `4` | Must match your CPU limit — see below |
 | `TTS_MODEL_DIR` | `/models` | Volume for weights |
-| `TTS_API_KEYS` | unset | Comma-separated accepted keys. Unset means no authentication |
+| `TTS_API_KEYS` | unset | Comma-separated accepted keys. Unset means no authentication; set but naming none refuses to start |
 | `TTS_TLS_CERT` | unset | PEM certificate chain. Both TLS variables or neither |
 | `TTS_TLS_KEY` | unset | PEM private key, readable by uid 1000 |
 

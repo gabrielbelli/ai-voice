@@ -68,18 +68,23 @@ class Synth:
             raise RuntimeError(f"unexpected sample rate {rate}")
         return audio.astype(np.float32)
 
-    def speak_segments(self, segments: list[tuple[str, float]], voice: str,
+    def speak_segments(self, segments: list[tuple[str, float, str]],
                        language: str, speed: float) -> np.ndarray:
-        """Synthesise each segment and insert real silence between them.
+        """Synthesise each (text, pause_after, voice) and splice in silence.
 
         Pauses are generated here rather than asked of the model, because no
         TTS model reliably produces a beat you can act inside. Punctuation
         buys a breath; an instruction needs a gap. Measured by ear on the same
         voice and words, inserted silence is what separates audio that sounds
         like instructions from audio that sounds like narration.
+
+        The voice arrives per segment, already resolved by the caller. It used
+        to be one voice for the whole call, which quietly made a documented
+        per-segment `voice` a lie; there was never a cost to honouring it, a
+        voice being a 510 KB embedding over weights that are already resident.
         """
         parts: list[np.ndarray] = []
-        for text, pause_after in segments:
+        for text, pause_after, voice in segments:
             if text.strip():
                 parts.append(self.speak(text, voice, language, speed))
             if pause_after > 0:

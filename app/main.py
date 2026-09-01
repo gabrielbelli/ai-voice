@@ -8,10 +8,10 @@ not here — it needs 5.3 GB and runs below realtime, so it belongs behind a
 separate service that can be started on demand.
 
 Two request shapes reach the same synthesiser. `/speak` is the native one and
-the one to prefer: it takes segments with explicit pauses and returns the
-realtime factor in headers. `/v1/audio/speech` is OpenAI's shape, kept
-alongside so existing clients need only a base URL change; it can express
-neither of those things.
+the one to prefer: it takes segments with explicit pauses and a voice each,
+and returns the realtime factor in headers. `/v1/audio/speech` is OpenAI's
+shape, kept alongside so existing clients need only a base URL change; it can
+express none of those things.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from . import auth
 from .openai_api import (VOICE_ALIASES, error_response, language_for_voice,
@@ -115,11 +115,25 @@ async def _validation_error(request: Request, exc: RequestValidationError):
 
 
 class Segment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     text: str
     pause_after: float = Field(default=0.0, ge=0.0, le=10.0)
+    # A voice is a 510 KB embedding against 310 MB of shared weights, so
+    # changing it between segments costs nothing once the model is loaded.
+    # Absent means the request's voice. The phonemiser language is not
+    # inferred from it: `language` stays a property of the request, as it has
+    # always been on this route.
+    voice: str | None = None
 
 
 class SpeakRequest(BaseModel):
+    # Unknown fields are rejected rather than dropped. A per-segment `voice`
+    # was documented for as long as it was silently ignored, and the caller
+    # got the default voice back with nothing to read that said why. A typo
+    # belongs in a 422, not in the audio.
+    model_config = ConfigDict(extra="forbid")
+
     text: str | None = None
     segments: list[Segment] | None = None
     voice: str | None = None
@@ -135,6 +149,11 @@ class SpeechRequest(BaseModel):
     "tts-1" would break every client that sends it while claiming to honour it
     would be a lie. `voice` is optional, unlike upstream, because a service
     with a configured default voice has an answer when the field is absent.
+
+    Unknown fields are accepted and ignored here, unlike on /speak: OpenAI
+    keeps adding them — `instructions`, `stream_format` — and a service whose
+    whole purpose is to answer OpenAI's clients must not reject one for
+    speaking a newer version of the dialect it claims to speak.
     """
 
     model: str = "kokoro"
@@ -230,12 +249,24 @@ def speak(req: SpeakRequest) -> Response:
             400, f"unknown voice {(req.voice or DEFAULT_VOICE)!r}; see GET /voices")
     language = req.language or DEFAULT_LANG
 
+    # Each segment may name its own voice, resolved the same way and falling
+    # back to the request's. Resolved here rather than in the synthesiser so
+    # that an unknown name is a 400 naming the segment, not a failure part way
+    # through a long synthesis.
+    segments: list[tuple[str, float, str]] = []
+    for index, segment in enumerate(req.segments or ()):
+        seg_voice = resolve_voice(segment.voice, synth.voices, voice)  # type: ignore[attr-defined]
+        if seg_voice is None:
+            raise HTTPException(
+                400,
+                f"unknown voice {segment.voice!r} in segment {index}; "
+                "see GET /voices")
+        segments.append((segment.text, segment.pause_after, seg_voice))
+
     started = time.monotonic()
     try:
-        if req.segments:
-            audio = synth.speak_segments(  # type: ignore[attr-defined]
-                [(s.text, s.pause_after) for s in req.segments],
-                voice, language, req.speed)
+        if segments:
+            audio = synth.speak_segments(segments, language, req.speed)  # type: ignore[attr-defined]
         else:
             audio = synth.speak(req.text or "", voice, language, req.speed)  # type: ignore[attr-defined]
     except Exception as exc:  # noqa: BLE001 - the client needs the reason
@@ -243,7 +274,13 @@ def speak(req: SpeakRequest) -> Response:
 
     compute = time.monotonic() - started
     duration = audio.size / SAMPLE_RATE
-    data, mime = _encode(audio, req.format)
+    # Handled for the same reason synthesis is: ffmpeg can be missing or can
+    # fail, and outside the handler that reached the caller as a 500 with
+    # nothing in it to act on.
+    try:
+        data, mime = _encode(audio, req.format)
+    except Exception as exc:  # noqa: BLE001 - the client needs the reason
+        raise HTTPException(500, f"encoding to {req.format} failed: {exc}") from exc
     log.info("%.1fs audio in %.2fs (%.1fx) voice=%s",
              duration, compute, duration / compute if compute else 0.0, voice)
 
@@ -285,7 +322,15 @@ def openai_speech(req: SpeechRequest) -> Response:
 
     compute = time.monotonic() - started
     duration = audio.size / SAMPLE_RATE
-    data, mime = _encode(audio, req.response_format)
+    # Handled, not left to FastAPI: an ffmpeg that is missing or fails used to
+    # return the plain "Internal Server Error" body, which openai-python shows
+    # as a bare status code. Every other error on this route is an envelope
+    # and this one has to be as well.
+    try:
+        data, mime = _encode(audio, req.response_format)
+    except Exception as exc:  # noqa: BLE001 - the client needs the reason
+        return error_response(500, f"encoding to {req.response_format} failed: {exc}",
+                              "server_error", "encoding_failed")
     log.info("%.1fs audio in %.2fs (%.1fx) voice=%s openai",
              duration, compute, duration / compute if compute else 0.0, voice)
 
