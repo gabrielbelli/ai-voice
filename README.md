@@ -95,6 +95,12 @@ with open("clip.wav", "rb") as clip:
 `response_format` takes `json`, `text`, `verbose_json`, `srt` and `vtt`. The
 same 16 kHz mono rule applies; the audio is not resampled here either.
 
+Errors on this route are OpenAI's envelope, and a rejected body is a **400**
+carrying `error.message` — that is what the real API answers, and what a client
+written against it branches on. This route answered 422 until the shared
+package below took the handler over. The native `/transcribe` is untouched: its
+FastAPI `{"detail": [...]}` bodies are a contract that already has clients.
+
 ### Which route to prefer
 
 **`/transcribe`, wherever you control the client.** It is the same pipeline,
@@ -135,46 +141,53 @@ docker run -p 8000:8000 -v stt-models:/models \
   ghcr.io/gabrielbelli/stt-stack:pre
 ```
 
-**Unset or empty means no authentication**, and the service says so at every
-startup:
+**Unset means no authentication**, and the service says so at every startup:
 
 ```text
-WARNING STT_API_KEYS is unset: every request is accepted. Set it to a
-comma-separated list of keys to require Authorization: Bearer
+WARNING STT_API_KEYS is unset: authentication is DISABLED and every request is
+accepted, including /v1. Set STT_API_KEYS to a comma-separated list of keys to
+require Authorization: Bearer.
 ```
 
 That is deliberate. This already runs on a LAN, and an upgrade that refused to
 start, or refused every request, would break a working deployment in order to
 protect it. Open is allowed; quietly open is not.
 
-**Set to separators alone is a different thing, and refuses to start.**
-`STT_API_KEYS=" , , "` parses to no keys at all, and announcing it as "unset"
-would report a typo as a decision — whoever wrote it wanted authentication and
-would have got none:
+**Set to nothing, or to separators alone, is a different thing and refuses to
+start.** `STT_API_KEYS=" , , "` and `STT_API_KEYS=""` parse to no keys at all,
+and announcing either as "unset" would report a typo as a decision — whoever
+wrote it wanted authentication and would have got none. `-e
+STT_API_KEYS=$SECRET` with `SECRET` unset reaches this by ordinary accident:
 
 ```text
-ValueError: STT_API_KEYS=' , , ' contains separators and whitespace but no key.
+STT_API_KEYS=' , , ' is set but names no key: it is empty, or only commas and
+whitespace. Set it to a comma-separated list of keys, or unset it entirely to
+run without authentication.
 ```
 
 `/health` is the only unauthenticated route. Container healthchecks call it and
 have no key, and requiring one turns a working service into a restart loop.
 
-`/openapi.json`, `/docs` and `/redoc` need the key like everything else. They
-are served by this app rather than by FastAPI's built-ins precisely so the key
-check reaches them; an unauthenticated schema is a free map of the service. In
-a browser the two pages then render empty, because the browser sends no bearer
-token when it fetches the schema — read the schema with `curl` and a key.
+`/openapi.json`, `/docs` and `/redoc` need the key like everything else — an
+unauthenticated schema is a free map of the service — and so does any path that
+does not exist, because the check runs ahead of routing. In a browser the two
+pages then render empty, because the browser sends no bearer token when it
+fetches the schema; read the schema with `curl` and a key.
 
 Rejections are 401 in OpenAI's envelope, which is the shape openai-python
 reads — with FastAPI's default `{"detail": ...}` it reports "unknown error":
 
 ```json
-{"error": {"message": "invalid API key", "type": "invalid_request_error", "code": "invalid_api_key"}}
+{"error": {"message": "Incorrect API key provided. Send it as 'Authorization: Bearer <key>'.", "type": "invalid_request_error", "code": "invalid_api_key"}}
 ```
 
 Keys are compared with `hmac.compare_digest`, and every configured key is
 compared rather than stopping at the first match, so neither a key's value nor
-its position in the list leaks through the response time.
+its position in the list leaks through the response time. The comparison is
+done on the bytes the client put on the wire, so a key containing an accent
+authenticates — provided the client sends the header as UTF-8, which HTTP does
+not guarantee and the service warns about at startup. ASCII keys avoid the
+question.
 
 The list is read once, at startup: rotating a key is a restart.
 
@@ -201,19 +214,23 @@ relative symlinks into `../../archive/<domain>/`. Mount the `live` directory
 alone and the symlinks arrive intact with their targets left outside the
 container, where they resolve to nothing and uvicorn exits on a missing file.
 
-Setting only one variable is a configuration error rather than a fallback: the
-container says so on stderr and serves plain HTTP. Half-configured TLS that
-silently works is the failure worth shouting about.
+Setting only one variable is a configuration error, and the container refuses
+to start. It used to warn and serve plain HTTP, which is the failure that
+hides: the operator reads "TLS is configured" from their own compose file and
+believes it, while a bearer token crosses the LAN in the clear on every
+request. Failing to start is the loud version.
 
 Overriding the container's `command:` with TLS configured is refused outright.
 Only uvicorn is given the certificate, so any other command would serve plain
 HTTP with the deployment believing otherwise — the same silent failure, and
 the one thing worse than being told is not being told.
 
-Both files must be readable by uid 1000, which is what the service drops to.
-Certbot leaves `archive/` mode `0700` and the private key `0600`, both owned by
-root, so the straight mount above needs either those permissions widened or a
-deploy hook that copies the pair somewhere owned by uid 1000.
+Both files must be readable by uid 1000, which is what the service drops to,
+and the entrypoint checks that **as uid 1000** before starting rather than
+leaving uvicorn to fail on it with a traceback. Certbot leaves `archive/` mode
+`0700` and the private key `0600`, both owned by root, so the straight mount
+above needs either those permissions widened or a deploy hook that copies the
+pair somewhere owned by uid 1000.
 
 **Nothing here generates a certificate.** A self-signed certificate that
 appears by magic is one every client is eventually told to stop verifying,
@@ -273,6 +290,7 @@ transcript is the product.
 | `STT_HOTWORDS` | `1` | `0` disables decode-time biasing entirely, for A/B tests. See below |
 | `STT_GLOSSARY` | `/etc/stt-stack/glossary.txt` | See below |
 | `STT_API_KEYS` | unset | Comma-separated accepted keys. Unset means no auth |
+| `STT_LOG_LEVEL` | `INFO` | `DEBUG`, `WARNING`, … An unrecognised value falls back to `INFO` |
 | `STT_TLS_CERT` | unset | PEM certificate. With `STT_TLS_KEY`, serves HTTPS |
 | `STT_TLS_KEY` | unset | PEM private key, readable by uid 1000 |
 
@@ -409,6 +427,28 @@ in about 3 seconds. Whisper large-v3 runs at 0.5–0.9× realtime on the same CP
 and dominates any wait it is part of, which is why the default engine is the
 other one. Choosing Whisper buys decode-time vocabulary and clean-read-speech
 accuracy, and costs an order of magnitude in latency.
+
+## Shared code
+
+The API keys and the 401, OpenAI's error envelope, the `/health` route, the log
+level switch and the container entrypoint all come from
+[voice-common](https://github.com/gabrielbelli/voice-common), which this
+service shares with `tts-stack` and `tts-long`. Each of those used to be a
+hand-vendored copy in every repo; the three copies of `auth.py` alone differed
+by 170–197 lines and had drifted into three *different* defects, one per copy.
+
+It is pinned by SHA in `requirements.txt`, so a change there does not force a
+rebuild here. What keeps the pin honest is `tests/test_conformance.py`: the
+package ships its own pytest suite and this repo runs it against the app it
+actually builds, so a bad bump fails at the build rather than in production.
+
+```bash
+python -m venv .venv && ./.venv/bin/pip install -r requirements.txt pytest httpx
+./.venv/bin/python -m pytest tests -q
+```
+
+Everything particular to speech-to-text stays here: the recognisers, the VAD,
+the glossary, the 16 kHz input rule and both routes.
 
 ## Licence
 

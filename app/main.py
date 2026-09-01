@@ -11,34 +11,38 @@ everything the run measured; /v1/audio/transcriptions is OpenAI-compatible and
 returns the subset that specification has fields for, so existing clients work
 unchanged. Prefer the native one where you control the client — see
 openai_api.py for what the compatible shape has to drop.
+
+The wire contract around those two routes — the API keys, the 401, OpenAI's
+error envelope, the health route and the log configuration — comes from
+voice_common, which this service shares with tts-stack and tts-long. Three
+hand-vendored copies of that code had drifted into three different defects;
+the package docstrings carry the detail. Everything below this line is what is
+genuinely particular to speech-to-text.
 """
 
 from __future__ import annotations
 
-import logging
 import os
 import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 
-from fastapi import Depends, FastAPI, File, Form, UploadFile
-from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, File, Form, UploadFile
 from pydantic import BaseModel
+from voice_common import auth, errors, health
+from voice_common import logging as voice_logging
 
-from . import auth, openai_api, pipeline
+from . import openai_api, pipeline
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("stt-stack")
+# STT_LOG_LEVEL comes with this: until now the only way to get DEBUG out of a
+# running container was to edit the source and rebuild the image.
+log = voice_logging.setup("stt-stack", "STT")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    del app
     started = time.monotonic()
-    # Before the model loads, so the warning about unauthenticated access is
-    # on screen even if loading then fails and the service never serves.
-    auth.announce()
-
     pipeline.start()
 
     log.info("ready in %.1fs, model=%s, %d threads",
@@ -51,40 +55,47 @@ app = FastAPI(
     title="stt-stack",
     description="VAD, one recogniser, glossary repair. Parakeet by default.",
     lifespan=lifespan,
-    # Re-registered below, behind the key. FastAPI attaches its own three as
-    # plain Starlette routes, which no router dependency ever reaches, so with
-    # STT_API_KEYS set every real route was closed and the schema was still
-    # being handed out — a free map of the service to anything that can reach
-    # the port.
-    openapi_url=None,
-    docs_url=None,
-    redoc_url=None,
 )
-auth.install(app)
-openai_api.install(app)
+
+# ApiError and the /v1 validation handler, both rendered in OpenAI's envelope.
+errors.install_errors(app)
+
+
+def _health_details() -> dict[str, object]:
+    """The per-service half of /health. Must not block: it runs on the loop.
+
+    Every value here is a module constant or a dict lookup, so it does not.
+    `status` is overridden while the model is still loading — that is the one
+    field voice_common fills in itself, and the one this service has to
+    contradict.
+    """
+    loaded = pipeline.loaded()
+    return {
+        "status": "ok" if loaded else "loading",
+        "model": pipeline.MODEL,
+        "model_id": os.getenv("STT_MODEL_ID", ""),
+        "accepts_vocabulary": bool(getattr(loaded, "accepts_vocabulary", False)),
+        "hotwords": pipeline.HOTWORDS_ENABLED,
+        "vad": pipeline.VAD_ENABLED,
+        "threads": pipeline.THREADS,
+    }
+
+
+# Registers GET /health AND exempts exactly that path from the key check, so
+# the route and the exemption can never come to name different strings.
+# Container healthchecks call it and have no key; requiring one would turn a
+# working service into a restart loop.
+health.install_health(app, details=_health_details)
+
+# Everything else needs the key, /openapi.json, /docs and /redoc included: a
+# schema dump is a free map of the service. This is middleware rather than a
+# per-route dependency, which is what lets FastAPI's own three pages be used
+# again — they are plain Starlette routes that no router dependency reaches,
+# so this file used to re-register all three by hand just to get the check in
+# front of them. Middleware also cannot be forgotten on a route added later.
+auth.install(app, "STT_API_KEYS")
+
 app.include_router(openai_api.router)
-
-
-@app.get("/openapi.json", include_in_schema=False,
-         dependencies=[Depends(auth.require_key)])
-def openapi() -> JSONResponse:
-    return JSONResponse(app.openapi())
-
-
-# Both pages fetch /openapi.json from the browser, which sends no bearer
-# token, so with keys configured they render empty. That is the honest
-# outcome: the schema is what needed protecting, and the page without it
-# leaks nothing.
-@app.get("/docs", include_in_schema=False,
-         dependencies=[Depends(auth.require_key)])
-def docs() -> HTMLResponse:
-    return get_swagger_ui_html(openapi_url="/openapi.json", title="stt-stack")
-
-
-@app.get("/redoc", include_in_schema=False,
-         dependencies=[Depends(auth.require_key)])
-def redoc() -> HTMLResponse:
-    return get_redoc_html(openapi_url="/openapi.json", title="stt-stack")
 
 
 class Transcript(BaseModel):
@@ -98,29 +109,11 @@ class Transcript(BaseModel):
     realtime_factor: float
 
 
-# Deliberately unauthenticated, even when STT_API_KEYS is set. Container
-# healthchecks call this and have no key; requiring one turns a working
-# service into a restart loop.
-@app.get("/health")
-def health() -> dict[str, object]:
-    loaded = pipeline.loaded()
-    return {
-        "status": "ok" if loaded else "loading",
-        "model": pipeline.MODEL,
-        "model_id": os.getenv("STT_MODEL_ID", ""),
-        "accepts_vocabulary": bool(getattr(loaded, "accepts_vocabulary", False)),
-        "hotwords": pipeline.HOTWORDS_ENABLED,
-        "vad": pipeline.VAD_ENABLED,
-        "threads": pipeline.THREADS,
-    }
-
-
 # Deliberately `def`, not `async def`. pipeline.run is blocking CPU work;
 # declared async it would run ON the event loop and starve every other
 # request, /health included, so a container healthcheck fails under load and
 # the orchestrator restarts a service that is working correctly.
-@app.post("/transcribe", response_model=Transcript,
-          dependencies=[Depends(auth.require_key)])
+@app.post("/transcribe", response_model=Transcript)
 def transcribe(
     file: UploadFile = File(...),
     language: str | None = Form(default=None),

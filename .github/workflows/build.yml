@@ -18,7 +18,28 @@ env:
   STORAGE_DRIVER: vfs
 
 jobs:
+  # voice-common ships the assertions for the wire contract this service shares
+  # with tts-stack and tts-long, and they run here against the app this repo
+  # actually builds. That is what makes the SHA pin in requirements.txt safe to
+  # bump: a bad one fails here rather than in production. No model is
+  # downloaded — the suite never runs the app's lifespan.
+  conformance:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'   # the version the image is built on
+
+      - name: Install
+        run: pip install -r requirements.txt pytest httpx
+
+      - name: Run voice-common's conformance suite
+        run: python -m pytest tests -q
+
   build:
+    needs: conformance
     # Native runners per architecture rather than qemu. This image has RUN
     # instructions (apt, pip), and emulated arm64 pip installs take tens of
     # minutes where a native runner takes two.

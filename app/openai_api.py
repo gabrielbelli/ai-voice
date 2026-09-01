@@ -28,68 +28,30 @@ faked:
   temperature  Meaningless for Parakeet, and for Whisper the default fallback
                ladder is a deliberate reliability choice — pinning a single
                temperature disables the retry on low-confidence output.
+
+Errors on this surface are voice_common's, not this module's. A body pydantic
+rejects never reaches the handler below, so the envelope the handler is
+careful to build was bypassed and the caller got FastAPI's {"detail": [...]}
+— which openai-python reports as a bare "unknown error". voice_common.errors
+installs the handler that reshapes those, and answers 400 rather than the 422
+this service used to send: 400 is what OpenAI answers, and a client written
+against the real API branches on it.
 """
 
 from __future__ import annotations
 
-from fastapi import (
-    APIRouter,
-    Depends,
-    FastAPI,
-    File,
-    Form,
-    HTTPException,
-    Request,
-    Response,
-    UploadFile,
-)
-from fastapi.exception_handlers import request_validation_exception_handler
-from fastapi.exceptions import RequestValidationError
+from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
+from voice_common.errors import ApiError
 
 from . import pipeline
-from .auth import ApiError, require_key
 
 FORMATS = ("json", "text", "verbose_json", "srt", "vtt")
 
-router = APIRouter(prefix="/v1", dependencies=[Depends(require_key)])
-
-
-def install(app: FastAPI) -> None:
-    """Render this route's validation failures in OpenAI's envelope too.
-
-    A request missing `file` never reaches the handler below, so the ApiError
-    path cannot shape it: FastAPI answers first, with {"detail": [...]}.
-    openai-python cannot read that and reports "unknown error", which tells
-    the caller nothing about the field it forgot.
-
-    Native routes keep FastAPI's body — same rule as everywhere else here,
-    that contract already has clients.
-    """
-
-    @app.exception_handler(RequestValidationError)
-    async def _validation(request: Request,
-                          exc: RequestValidationError) -> Response:
-        if not request.url.path.startswith("/v1"):
-            return await request_validation_exception_handler(request, exc)
-
-        # loc is ("body", "file"); the first element only ever repeats where
-        # the failure was, which the message already says.
-        detail = "; ".join(
-            f"{'.'.join(str(part) for part in err['loc'][1:]) or 'request'}: "
-            f"{err['msg']}"
-            for err in exc.errors()
-        ) or "invalid request"
-        return JSONResponse(
-            status_code=422,
-            content={
-                "error": {
-                    "message": detail,
-                    "type": "invalid_request_error",
-                    "code": None,
-                }
-            },
-        )
+# No auth dependency: the key check is voice_common's ASGI middleware, applied
+# to the whole app in main.py. A dependency has to be remembered on every
+# route added from here on; middleware cannot be forgotten.
+router = APIRouter(prefix="/v1")
 
 
 def _clock(seconds: float, decimal: str) -> str:
@@ -138,7 +100,7 @@ def transcriptions(
         raise ApiError(
             exc.status_code,
             str(exc.detail),
-            kind="invalid_request_error" if exc.status_code < 500 else "server_error",
+            type_="invalid_request_error" if exc.status_code < 500 else "server_error",
         ) from exc
 
     if response_format == "text":

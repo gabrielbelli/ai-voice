@@ -11,3 +11,17 @@ fastapi==0.121.2
 uvicorn[standard]==0.38.0
 python-multipart==0.0.20
 soundfile==0.13.1
+
+# The wire contract shared with tts-stack and tts-long: API keys and the 401,
+# OpenAI's error envelope, the /health route, the log level switch, and the
+# entrypoint that installs to /usr/local/bin. No `[audio]` extra here — that
+# one pulls numpy for the two TTS services, and nothing in this image imports
+# voice_common.audio.
+#
+# A tarball URL rather than git+https://, because python:3.13-slim-trixie has
+# no git binary and a git dependency would cost an extra apt layer. Pinned by
+# SHA rather than tag, because a tag can be moved and this URL cannot; the tag
+# is the readable half, in the comment.
+#
+# voice-common v1.0.0 — https://github.com/gabrielbelli/voice-common
+voice-common @ https://github.com/gabrielbelli/voice-common/archive/4429e64a97926d17e00e8a5982208e7ffecfab2e.tar.gz

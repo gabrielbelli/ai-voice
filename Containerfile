@@ -39,11 +39,19 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
 COPY glossary.txt /etc/stt-stack/glossary.txt
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # HF_HOME points at the volume so models survive container replacement.
 # Without it every restart re-downloads more than a gigabyte.
+#
+# VOICE_* configure voice-common's entrypoint, which pip installed to
+# /usr/local/bin alongside the Python code, so the TLS logic and the auth
+# logic can never be at different versions inside one image. The prefix keeps
+# every operator-visible variable — STT_TLS_CERT, STT_TLS_KEY — spelled
+# exactly as before. They are image settings, not knobs: an operator has no
+# reason to touch either.
 ENV HF_HOME=/models \
+    VOICE_TLS_PREFIX=STT \
+    VOICE_CHOWN_DIRS=/models \
     STT_MODEL=parakeet \
     STT_QUANTISATION=int8 \
     STT_GLOSSARY=/etc/stt-stack/glossary.txt \
@@ -75,5 +83,5 @@ EXPOSE 8000
 #
 # /health is exempt from STT_API_KEYS, so the probe needs no key. Under
 # STT_TLS_CERT it needs the https:// URL and a certificate it can verify.
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["voice-entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
