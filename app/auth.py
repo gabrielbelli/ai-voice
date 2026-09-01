@@ -11,9 +11,12 @@ Keys are compared with `hmac.compare_digest`. A LAN is not a threat-free
 network — anything that can reach the port can time the response — and a
 constant-time comparison of a short string costs nothing worth measuring.
 
-`/health` stays open because the container healthcheck calls it and has no
-key. Nothing else is exempt: `/docs` and `/openapi.json` need a key too when
-one is configured, which is inconvenient in a browser and correct.
+`/health` stays open because the image's HEALTHCHECK calls it and has no key.
+Nothing else is exempt: `/docs` and `/openapi.json` need a key too when one is
+configured, which is inconvenient in a browser and correct.
+
+An unset `TTS_API_KEYS` disables authentication; a *set* one that parses to no
+keys at all — `','` — refuses to start rather than quietly doing the same.
 """
 
 from __future__ import annotations
@@ -25,9 +28,31 @@ import os
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-KEYS = [k.strip() for k in os.getenv("TTS_API_KEYS", "").split(",") if k.strip()]
 
-# The healthcheck in the Containerfile has no credentials to offer.
+def _load_keys() -> list[str]:
+    """Parse TTS_API_KEYS, refusing a value that asks for auth and gives none.
+
+    Unset or blank means disabled, for the reason in the module docstring.
+    But `TTS_API_KEYS=','` is not blank: separators with nothing between them
+    survived the filter as an empty list, which disabled authentication and
+    then logged that the variable was unset — so an operator who fat-fingered
+    the value read a warning that told them their own configuration was not
+    there, on a service that was now open. A value that was set and yielded no
+    key is a mistake, and the only safe reading of it is to stop.
+    """
+    raw = os.getenv("TTS_API_KEYS", "")
+    keys = [k.strip() for k in raw.split(",") if k.strip()]
+    if raw.strip() and not keys:
+        raise RuntimeError(
+            f"TTS_API_KEYS is set to {raw!r}, which contains no key. Set it to "
+            "a comma-separated list of keys, or unset it to run without "
+            "authentication.")
+    return keys
+
+
+KEYS = _load_keys()
+
+# The HEALTHCHECK in the Containerfile has no credentials to offer.
 OPEN_PATHS = {"/health"}
 
 
@@ -84,5 +109,5 @@ def log_state(log: logging.Logger) -> None:
     if KEYS:
         log.info("api key auth enabled, %d key(s) accepted", len(KEYS))
     else:
-        log.warning("TTS_API_KEYS is unset: every request is accepted without "
-                    "a key, including /v1/audio/speech")
+        log.warning("TTS_API_KEYS is unset or empty: every request is accepted "
+                    "without a key, including /v1/audio/speech")

@@ -9,21 +9,32 @@ set -eu
 
 # TLS lives here rather than in the application because uvicorn takes the
 # certificate as command-line flags, and CMD is what the deployment overrides.
-# Both halves are required: a certificate without its key does not fail
-# usefully, it fails at bind time with the container already reported healthy.
+#
+# Every path out of a partial TLS configuration is `exit 1`, because the only
+# job this feature has is keeping bearer tokens off the LAN. Both of the older
+# fallbacks printed a line and then served plain HTTP: a cert with no key, and
+# a CMD that was not uvicorn. Neither is visible to the operator, who reads
+# "TLS is configured" from their own compose file and believes it — while a
+# key travels the network in the clear on every request. Failing to start is
+# the loud failure; serving plaintext is the one that hides.
 #
 # Nothing generates a certificate if none is supplied. A cert that appears by
 # magic is one nobody validates, and it would teach every client on this LAN to
 # pass --insecure permanently. Mount a real one, or terminate in front of this.
-if [ -n "${TTS_TLS_CERT:-}" ] && [ -n "${TTS_TLS_KEY:-}" ]; then
-    if [ "${1:-}" = "uvicorn" ]; then
-        set -- "$@" --ssl-certfile "$TTS_TLS_CERT" --ssl-keyfile "$TTS_TLS_KEY"
-        echo "entrypoint: serving HTTPS with $TTS_TLS_CERT"
-    else
-        echo "entrypoint: TLS is configured but the command is not uvicorn; ignoring"
+if [ -n "${TTS_TLS_CERT:-}" ] || [ -n "${TTS_TLS_KEY:-}" ]; then
+    if [ -z "${TTS_TLS_CERT:-}" ] || [ -z "${TTS_TLS_KEY:-}" ]; then
+        echo "entrypoint: TTS_TLS_CERT and TTS_TLS_KEY must both be set" >&2
+        exit 1
     fi
-elif [ -n "${TTS_TLS_CERT:-}" ] || [ -n "${TTS_TLS_KEY:-}" ]; then
-    echo "entrypoint: only one of TTS_TLS_CERT/TTS_TLS_KEY is set; serving plain HTTP"
+    if [ "${1:-}" != "uvicorn" ]; then
+        # The flags below are uvicorn's. Anything else cannot be given a
+        # certificate here, so refuse rather than run it in the clear.
+        echo "entrypoint: TLS is configured but the command is '${1:-}', not" \
+             "uvicorn; refusing to serve plain HTTP" >&2
+        exit 1
+    fi
+    set -- "$@" --ssl-certfile "$TTS_TLS_CERT" --ssl-keyfile "$TTS_TLS_KEY"
+    echo "entrypoint: serving HTTPS with $TTS_TLS_CERT"
 fi
 
 if [ "$(id -u)" = "0" ]; then

@@ -77,5 +77,18 @@ RUN useradd --create-home --uid 1000 tts \
 VOLUME ["/models", "/output"]
 EXPOSE 8002
 
+# /health is exempt from API key auth precisely so this can call it, and until
+# now nothing did — the exemption was justified by a healthcheck that did not
+# exist. It is also the check that would have caught /v1/audio/speech holding
+# every AnyIO worker thread while /health could not be served.
+#
+# python rather than curl, which is not in this image and is not worth a layer.
+# Scheme follows TTS_TLS_CERT because the entrypoint turns that into HTTPS, and
+# verification is off: this is loopback, asking whether the process still
+# answers, not who it claims to be. start-period is generous because the first
+# job downloads ~3 GB of weights and the container must not be killed over it.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD ["python", "-c", "import os,ssl,urllib.request as u; s='https' if os.getenv('TTS_TLS_CERT') else 'http'; u.urlopen(f'{s}://127.0.0.1:8002/health', timeout=8, context=ssl._create_unverified_context()).read()"]
+
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002"]

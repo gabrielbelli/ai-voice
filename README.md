@@ -47,6 +47,11 @@ First job downloads ~3 GB of weights. The model **loads lazily and unloads
 after ten minutes idle** — 6.5 GB resident is not something to leave sitting
 on a shared host between jobs.
 
+The image carries a `HEALTHCHECK` that polls `/health`, with a two-minute
+start period so that first download is not mistaken for a hung container.
+`/health` is answered on the event loop and never waits on the queue, so a
+service that is merely busy still reports healthy.
+
 ```bash
 # submit
 curl -s -X POST localhost:8002/jobs -H 'content-type: application/json' \
@@ -98,6 +103,7 @@ curl -s localhost:8002/v1/audio/speech \
 
 # long: returns a job
 curl -si localhost:8002/v1/audio/speech \
+  -H 'authorization: Bearer sk-your-key' \
   -H 'content-type: application/json' \
   -d '{"model":"tts-1","voice":"alloy","input":"<two thousand words>"}'
 # HTTP/1.1 202 Accepted
@@ -133,8 +139,13 @@ service knows, and the compatibility route drops it:
 |---|---|
 | `segments` with explicit `pause_after` | Flat `input` only |
 | `realtime_factor`, `compute_seconds`, `audio_seconds` | — |
-| `queued_ahead`, `estimated_seconds` on every poll | Only on a 202 |
+| `queued_ahead`, `estimated_seconds` when the job is accepted | The same two, but only when the answer is a 202 |
 | Always returns a job, never blocks | Blocks under the threshold |
+
+`queued_ahead` and `estimated_seconds` are returned **once, on the response
+that accepts the job**, and not on subsequent polls. `GET /jobs/<id>` returns
+the job's `status` and, once it is `done`, `audio_seconds`, `compute_seconds`
+and `realtime_factor` — a position in the queue is not among them.
 
 `/v1/audio/speech` exists so an OpenAI client works unmodified. It is the
 lossy route, not the good one.
@@ -158,6 +169,12 @@ Errors use OpenAI's envelope, so openai-python raises something readable:
 {"error": {"message": "...", "type": "invalid_request_error", "code": "invalid_api_key"}}
 ```
 
+That includes a body this route rejects before it reaches any of the checks
+above — a missing `input`, an `exaggeration` of 9 — which comes back as a
+**400** in the same envelope rather than FastAPI's `{"detail": [...]}` and a
+422. openai-python reads no message off that shape. The native `/jobs` routes
+keep the `detail` list and the 422: they are the older contract.
+
 ## Authentication
 
 Set `TTS_API_KEYS` to a comma-separated list of accepted keys. Send one as
@@ -171,7 +188,7 @@ docker run -p 8002:8002 -e TTS_API_KEYS='sk-alpha,sk-beta' ... tts-long
 so at WARNING:
 
 ```text
-WARNING TTS_API_KEYS is unset: every request is accepted without a key, including /v1/audio/speech
+WARNING TTS_API_KEYS is unset or empty: every request is accepted without a key, including /v1/audio/speech
 ```
 
 That is deliberate. This already runs on a LAN with callers that have no key,
@@ -182,15 +199,28 @@ Keys are compared with `hmac.compare_digest`, and every configured key is
 compared even after one matches — short-circuiting would leak which key was
 presented through the response time. A LAN is not a threat-free network.
 
-`/health` stays open, because the container healthcheck calls it and has no
+`/health` stays open, because the image's `HEALTHCHECK` calls it and has no
 key. Everything else needs one, `/docs` and `/openapi.json` included.
+
+A `TTS_API_KEYS` that is *set* but contains no key — `','` is the one that
+happens — **refuses to start**. Empty means "I am not using this"; a value
+with separators and nothing between them means someone meant to configure
+keys, and quietly running open on that reading is how a service ends up
+unauthenticated with a warning in its log saying the variable was never set.
 
 ## TLS
 
 Set both `TTS_TLS_CERT` and `TTS_TLS_KEY` to PEM paths and uvicorn serves
-HTTPS. Set neither and it serves plain HTTP, as before. Setting one alone logs
-a warning and serves plain HTTP — a certificate without its key would
-otherwise fail at bind time with the container already reported healthy.
+HTTPS. Set neither and it serves plain HTTP, as before.
+
+**Any half-configuration refuses to start.** Setting one of the two, or
+setting both while overriding `CMD` to something that is not uvicorn, used to
+print a line and serve plain HTTP — so an operator who had written the TLS
+variables into their compose file read them back, believed the port was
+encrypted, and sent a bearer token across the LAN in cleartext on every
+request. A container that will not start is noticed in seconds. Plaintext
+under a configuration that claims otherwise is noticed when someone else has
+the key.
 
 ```bash
 docker run -p 8002:8002 \
@@ -207,8 +237,9 @@ permanently, and then the next one is not checked either. Use a real one from
 your internal CA or Let's Encrypt, or terminate TLS in a reverse proxy in
 front of this and leave the container on HTTP.
 
-The flags are assembled in `entrypoint.sh`, so this applies to the image. If
-you run uvicorn directly, pass `--ssl-certfile` and `--ssl-keyfile` yourself.
+The flags are assembled in `entrypoint.sh`, so this applies to the image — and
+only to the uvicorn command it knows how to add them to. If you run uvicorn
+directly, pass `--ssl-certfile` and `--ssl-keyfile` yourself.
 
 ## Configuration
 
@@ -219,9 +250,9 @@ you run uvicorn directly, pass `--ssl-certfile` and `--ssl-keyfile` yourself.
 | `TTS_EXAGGERATION` | `0.3` | Stock is 0.5 and reads as over-cheerful |
 | `TTS_CFG_WEIGHT` | `0.3` | Lower is slower, more deliberate |
 | `TTS_TEMPERATURE` | `0.6` | Stock 0.8 varies more than an explanation wants |
-| `TTS_API_KEYS` | *(unset)* | Comma-separated accepted keys. Unset means **no auth** |
-| `TTS_TLS_CERT` | *(unset)* | PEM certificate. Both this and the key are needed for HTTPS |
-| `TTS_TLS_KEY` | *(unset)* | PEM private key |
+| `TTS_API_KEYS` | *(unset)* | Comma-separated accepted keys. Unset or empty means **no auth**; set but containing no key refuses to start |
+| `TTS_TLS_CERT` | *(unset)* | PEM certificate. Both this and the key are needed for HTTPS; half a pair refuses to start |
+| `TTS_TLS_KEY` | *(unset)* | PEM private key. Only applied to the `uvicorn` command; overriding `CMD` with TLS set refuses to start |
 | `TTS_OPENAI_SYNC_MAX_CHARS` | `300` | Longest `/v1/audio/speech` input answered synchronously; `0` always returns 202 |
 | `TTS_OPENAI_SYNC_TIMEOUT` | `180` | Seconds to wait before giving up and returning 202 instead |
 

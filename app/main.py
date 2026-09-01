@@ -18,6 +18,7 @@ queue position have no field in the OpenAI shape and are dropped there.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
@@ -29,7 +30,9 @@ from queue import Queue
 
 import numpy as np
 import soundfile as sf
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
@@ -69,9 +72,13 @@ log = logging.getLogger("tts-long")
 jobs: dict[str, dict] = {}
 queue: Queue = Queue()
 state: dict[str, object] = {}
-# Only the OpenAI route registers here, and only while it is blocked on a job.
+# Only the OpenAI route registers here, and only while it is waiting on a job.
 # Kept out of the job dict so nothing unserialisable can reach /jobs.
-events: dict[str, threading.Event] = {}
+#
+# An asyncio.Event rather than a threading one, paired with the loop that owns
+# it: the waiter is a coroutine on the event loop and the setter is the worker
+# thread, and asyncio primitives are not thread-safe to touch from outside.
+events: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Event]] = {}
 
 
 def _worker() -> None:
@@ -117,7 +124,13 @@ def _worker() -> None:
             # rather than leaving it to sit out the whole timeout.
             waiter = events.pop(job_id, None)
             if waiter is not None:
-                waiter.set()
+                loop, event = waiter
+                try:
+                    loop.call_soon_threadsafe(event.set)
+                except RuntimeError:
+                    # The loop shut down while this job ran. Nothing is waiting
+                    # on the other end any more, and the audio is on disk.
+                    pass
             queue.task_done()
 
 
@@ -160,7 +173,13 @@ class JobRequest(BaseModel):
 
 
 @app.get("/health")
-def health() -> dict[str, object]:
+async def health() -> dict[str, object]:
+    # `async def`, so this is answered on the event loop and never queues for
+    # an AnyIO worker thread. It used to be a sync route sharing that pool
+    # (40 threads) with /v1/audio/speech, which held a thread for up to
+    # TTS_OPENAI_SYNC_TIMEOUT seconds each: 40 concurrent speech requests
+    # starved the pool, /health stopped answering, and an orchestrator
+    # restarted a service that was merely busy. Nothing below blocks.
     synth: Synth = state["synth"]  # type: ignore[assignment]
     return {
         "status": "ok",
@@ -180,7 +199,7 @@ def _estimate(words: int) -> int:
 def _enqueue(*, text: str | None, segments: list[tuple[str, float]] | None,
              language: str, exaggeration: float, cfg_weight: float,
              temperature: float, fmt: str = "wav",
-             event: threading.Event | None = None) -> str:
+             waiter: tuple[asyncio.AbstractEventLoop, asyncio.Event] | None = None) -> str:
     job_id = str(uuid.uuid4())
     jobs[job_id] = {
         "id": job_id, "status": "queued", "created_at": time.time(),
@@ -190,8 +209,8 @@ def _enqueue(*, text: str | None, segments: list[tuple[str, float]] | None,
     }
     # Registered before the job is visible to the worker, or a fast job could
     # finish and find nothing to wake.
-    if event is not None:
-        events[job_id] = event
+    if waiter is not None:
+        events[job_id] = waiter
     queue.put(job_id)
     return job_id
 
@@ -276,8 +295,44 @@ def _error(status: int, message: str, code: str,
                                            "code": code}})
 
 
+# Codes openai-python surfaces as `.code` on the exception it raises. Kept
+# distinct so a caller can tell "you left out `input`" from "9 is not a valid
+# exaggeration" without parsing the message.
+_VALIDATION_CODES = {"missing": "missing_required_parameter"}
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error(request: Request, exc: RequestValidationError) -> Response:
+    """Put a rejected body into the OpenAI envelope, but only under /v1.
+
+    A body pydantic rejects never reaches openai_speech, so every envelope
+    that route is careful to build was bypassed and the client got FastAPI's
+    `{"detail": [...]}` with a 422. openai-python reads no message off that
+    shape and raises a bare APIStatusError, which is the same silence a
+    missing `input` deserved a sentence for.
+
+    The native routes keep FastAPI's own handler untouched: /jobs is a
+    compatibility boundary, and something out there already parses `detail`.
+    """
+    if not request.url.path.startswith("/v1/"):
+        return await request_validation_exception_handler(request, exc)
+    errors = exc.errors()
+    if not errors:  # Nothing pydantic could locate. Say so rather than guess.
+        return _error(400, "request body is not valid", "invalid_value")
+    first = errors[0]
+    if first["type"] == "json_invalid":
+        # loc is ("body", <character offset>) here, and naming a field "12" is
+        # worse than not naming one.
+        return _error(400, "request body is not valid JSON", "invalid_value")
+    # loc[0] is always "body"; the rest names the field, with ints for list
+    # indices — segments.0.text.
+    field = ".".join(str(part) for part in first["loc"][1:]) or "body"
+    return _error(400, f"{field}: {first['msg']}",
+                  _VALIDATION_CODES.get(first["type"], "invalid_value"))
+
+
 @app.post("/v1/audio/speech")
-def openai_speech(req: SpeechRequest) -> Response:
+async def openai_speech(req: SpeechRequest) -> Response:
     """OpenAI's speech endpoint, synchronous only where it can honestly be.
 
     OpenAI's contract is request/response. This service runs at 0.21x
@@ -313,20 +368,35 @@ def openai_speech(req: SpeechRequest) -> Response:
                            "control and resampling would shift pitch.",
                       "unsupported_value")
 
-    done = threading.Event() if len(text) <= SYNC_MAX_CHARS else None
+    # `async def` and an asyncio wait, not a sync route blocking on a
+    # threading.Event. A sync route holds one of AnyIO's 40 worker threads for
+    # the whole wait — up to TTS_OPENAI_SYNC_TIMEOUT seconds — and this
+    # service is slow by design, so 40 concurrent callers took every thread
+    # and /health, itself a sync route on that pool, stopped answering. An
+    # orchestrator then restarted a service that was only busy. Waiting on the
+    # event loop costs a coroutine instead, and nothing else queues behind it.
+    done = asyncio.Event() if len(text) <= SYNC_MAX_CHARS else None
     job_id = _enqueue(text=text, segments=None, language=req.language,
                       exaggeration=req.exaggeration, cfg_weight=req.cfg_weight,
                       temperature=req.temperature, fmt=req.response_format,
-                      event=done)
+                      waiter=(asyncio.get_running_loop(), done) if done else None)
 
-    if done is not None and done.wait(SYNC_TIMEOUT):
-        job = jobs[job_id]
-        if job["status"] == "done":
-            return FileResponse(job["path"],
-                                media_type=MEDIA_TYPES[req.response_format],
-                                filename=f"{job_id}.{req.response_format}")
-        return _error(500, job.get("error", "synthesis failed"),
-                      "synthesis_failed", type_="server_error")
+    if done is not None:
+        try:
+            await asyncio.wait_for(done.wait(), SYNC_TIMEOUT)
+        except TimeoutError:
+            # Deregister before falling through to the 202, so the worker does
+            # not later wake an event nobody is holding. `pop` is the whole
+            # handshake: if the worker got there first this is a no-op.
+            events.pop(job_id, None)
+        else:
+            job = jobs[job_id]
+            if job["status"] == "done":
+                return FileResponse(job["path"],
+                                    media_type=MEDIA_TYPES[req.response_format],
+                                    filename=f"{job_id}.{req.response_format}")
+            return _error(500, job.get("error", "synthesis failed"),
+                          "synthesis_failed", type_="server_error")
 
     # Either too long to wait for, or the wait ran out. The job is untouched
     # and still queued, so nothing has been wasted — Location points at where
