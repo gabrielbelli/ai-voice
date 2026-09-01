@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -142,6 +143,12 @@ def run(url: str, label: str, conditions: list[str], limit: int | None,
     rng = np.random.default_rng(0)
     results = []
 
+    # The benchmark is a client like any other. Point it at a service with
+    # STT_API_KEYS set and every request comes back 401 unless STT_API_KEY is
+    # exported here.
+    key = os.getenv("STT_API_KEY", "").strip()
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+
     local = None
     if engine == "parakeet":
         from parakeet_local import ParakeetLocal
@@ -187,6 +194,7 @@ def run(url: str, label: str, conditions: list[str], limit: int | None,
                         else:
                             resp = requests.post(f"{url}/transcribe",
                                                  files={"file": ("a.wav", buf, "audio/wav")},
+                                                 headers=headers,
                                                  timeout=600).json()
                     except Exception as exc:  # noqa: BLE001
                         print(f"    {cond}: request failed: {exc}")

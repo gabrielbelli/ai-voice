@@ -72,5 +72,8 @@ EXPOSE 8000
 # contain it. Pass it at run time:
 #   docker run --health-cmd "python -c \
 #     \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health')\"" ...
+#
+# /health is exempt from STT_API_KEYS, so the probe needs no key. Under
+# STT_TLS_CERT it needs the https:// URL and a certificate it can verify.
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

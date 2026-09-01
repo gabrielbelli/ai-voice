@@ -52,12 +52,10 @@ curl -F file=@clip.wav http://localhost:8000/transcribe
 
 ```json
 {
-  "text": "I need to make a commit on the <Theoria|theory> dashboard",
-  "primary": "I need to make a comet on the Theoria dashboard",
-  "secondary": "I need to make a commit on the theory dashboard",
-  "disagreements": [{"primary": "Theoria", "secondary": "theory"}],
-  "agreement": 0.889,
-  "repaired": ["commit"],
+  "text": "I need to make a commit on the Theoria dashboard",
+  "raw": "I need to make a comet on the theory dashboard",
+  "repaired": ["Theoria dashboard", "commit"],
+  "model": "parakeet",
   "audio_seconds": 4.1,
   "speech_seconds": 3.2,
   "compute_seconds": 2.4,
@@ -68,6 +66,137 @@ curl -F file=@clip.wav http://localhost:8000/transcribe
 Audio must be **16 kHz mono**. Anything else is rejected rather than resampled
 in-process, so a client sending 44.1 kHz finds out immediately instead of
 quietly getting worse transcripts.
+
+## OpenAI-compatible API
+
+`POST /v1/audio/transcriptions` speaks OpenAI's transcription shape, so
+anything already pointed at that endpoint works here by changing a base URL.
+
+```bash
+curl -H "Authorization: Bearer $STT_API_KEY" \
+     -F file=@clip.wav -F model=whisper-1 \
+     http://localhost:8000/v1/audio/transcriptions
+```
+
+```json
+{"text": "I need to make a commit on the Theoria dashboard"}
+```
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="...")
+
+with open("clip.wav", "rb") as clip:
+    print(client.audio.transcriptions.create(model="whisper-1", file=clip).text)
+```
+
+`response_format` takes `json`, `text`, `verbose_json`, `srt` and `vtt`. The
+same 16 kHz mono rule applies; the audio is not resampled here either.
+
+### Which route to prefer
+
+**`/transcribe`, wherever you control the client.** It is the same pipeline,
+and it returns what the OpenAI shape has no field for:
+
+| | `/transcribe` | `/v1/audio/transcriptions` |
+|---|---|---|
+| Transcript | yes | yes |
+| `repaired` — which glossary terms fired | yes | — |
+| `raw` — the transcript before repair | yes | — |
+| `realtime_factor` and the timings behind it | yes | — |
+| Works with an unmodified OpenAI client | — | yes |
+
+`repaired` is the one worth caring about. A silent substitution is worse than
+no substitution: if a glossary rule is wrong, you want to see it named, and on
+the compatible route you cannot.
+
+### What the compatible route cannot honour
+
+Documented rather than faked:
+
+| Field | Behaviour |
+|---|---|
+| `model` | Accepted, ignored. The engine is fixed at startup by `STT_MODEL`; loading a second one per request does not fit the memory this runs in |
+| `prompt` | Added to the glossary's hotwords **on Whisper only**. Parakeet has no decode-time vocabulary at all, so under the default engine it does nothing |
+| `temperature` | Accepted, ignored. Parakeet has no sampling temperature, and pinning one on Whisper disables its retry on low-confidence output |
+| `verbose_json` | No `segments`, and `language` echoes the request — neither engine reports segment timings or a detected language through this interface |
+| `srt`, `vtt` | One cue spanning the clip, for the same reason. True, if not very useful |
+
+## Authentication
+
+`STT_API_KEYS` is a comma-separated list of accepted keys. Clients send
+`Authorization: Bearer <key>`, which is what OpenAI clients already do.
+
+```bash
+docker run -p 8000:8000 -v stt-models:/models \
+  -e STT_API_KEYS="$(openssl rand -hex 32)" \
+  ghcr.io/gabrielbelli/stt-stack:pre
+```
+
+**Unset or empty means no authentication**, and the service says so at every
+startup:
+
+```text
+WARNING STT_API_KEYS is unset: every request is accepted. Set it to a
+comma-separated list of keys to require Authorization: Bearer
+```
+
+That is deliberate. This already runs on a LAN, and an upgrade that refused to
+start, or refused every request, would break a working deployment in order to
+protect it. Open is allowed; quietly open is not.
+
+`/health` is never authenticated. Container healthchecks call it and have no
+key, and requiring one turns a working service into a restart loop.
+
+Rejections are 401 in OpenAI's envelope, which is the shape openai-python
+reads — with FastAPI's default `{"detail": ...}` it reports "unknown error":
+
+```json
+{"error": {"message": "invalid API key", "type": "invalid_request_error", "code": "invalid_api_key"}}
+```
+
+Keys are compared with `hmac.compare_digest`, and every configured key is
+compared rather than stopping at the first match, so neither a key's value nor
+its position in the list leaks through the response time.
+
+The list is read once, at startup: rotating a key is a restart.
+
+The benchmark in `bench/` is a client like any other. Export `STT_API_KEY` for
+it when the service it points at has keys configured.
+
+## TLS
+
+Set both `STT_TLS_CERT` and `STT_TLS_KEY` to PEM files and the container
+serves HTTPS. Leave them unset and it serves plain HTTP, as before.
+
+```yaml
+services:
+  stt:
+    environment:
+      STT_TLS_CERT: /etc/stt-stack/tls/fullchain.pem
+      STT_TLS_KEY: /etc/stt-stack/tls/privkey.pem
+    volumes:
+      - /etc/letsencrypt/live/stt.example.net:/etc/stt-stack/tls:ro
+```
+
+Setting only one is a configuration error rather than a fallback: the
+container says so on stderr and serves plain HTTP. Half-configured TLS that
+silently works is the failure worth shouting about.
+
+Both files must be readable by uid 1000, which is what the service drops to.
+A root-owned `0600` key mounted straight out of `/etc/letsencrypt` will not
+be.
+
+**Nothing here generates a certificate.** A self-signed certificate that
+appears by magic is one every client is eventually told to stop verifying,
+which is worse than the plain HTTP it replaced. Use a real one — an internal
+CA, or Let's Encrypt over DNS-01 for a host with no public address — or
+terminate TLS at a reverse proxy in front of the container and leave both
+variables unset.
+
+Under TLS the healthcheck probe needs the `https://` URL and something that
+can verify the certificate.
 
 ## Why there is no second model
 
@@ -118,6 +247,9 @@ that invents confidence.
 | `STT_HOTWORDS` | `1` | `0` disables decode-time biasing, for A/B tests |
 | `STT_MARKER` | `<{a}\|{b}>` | Disagreement format |
 | `STT_GLOSSARY` | `/etc/stt-stack/glossary.txt` | See below |
+| `STT_API_KEYS` | unset | Comma-separated accepted keys. Unset means no auth |
+| `STT_TLS_CERT` | unset | PEM certificate. With `STT_TLS_KEY`, serves HTTPS |
+| `STT_TLS_KEY` | unset | PEM private key, readable by uid 1000 |
 
 ### Glossary
 

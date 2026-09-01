@@ -13,6 +13,27 @@
 # fix and nothing to drop.
 set -eu
 
+# TLS is opt-in and never invented. Point STT_TLS_CERT and STT_TLS_KEY at real
+# PEM files and uvicorn serves HTTPS; leave them unset and it serves plain HTTP
+# as before. Nothing here generates a self-signed certificate: one that appears
+# by magic is one every client is told to stop validating, which is worse than
+# the plain HTTP it replaced.
+#
+# Only uvicorn is given the flags. The image is also run with other commands —
+# the CI import check runs `python -c` against it — and appending unknown
+# arguments to those would break them.
+if [ "${1:-}" = "uvicorn" ]; then
+    if [ -n "${STT_TLS_CERT:-}" ] && [ -n "${STT_TLS_KEY:-}" ]; then
+        echo "entrypoint: serving HTTPS with $STT_TLS_CERT"
+        set -- "$@" --ssl-certfile "$STT_TLS_CERT" --ssl-keyfile "$STT_TLS_KEY"
+    elif [ -n "${STT_TLS_CERT:-}" ] || [ -n "${STT_TLS_KEY:-}" ]; then
+        # Half-configured TLS silently serving HTTP is the failure worth
+        # shouting about: everything works, and nothing is encrypted.
+        echo "entrypoint: STT_TLS_CERT and STT_TLS_KEY must BOTH be set;" \
+             "serving plain HTTP" >&2
+    fi
+fi
+
 if [ "$(id -u)" = "0" ]; then
     if [ ! -w /models ] || [ "$(stat -c %u /models)" != "1000" ]; then
         echo "entrypoint: taking ownership of /models for uid 1000"

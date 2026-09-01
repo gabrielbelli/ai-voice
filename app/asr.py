@@ -52,9 +52,13 @@ class Parakeet:
 
         self._model = onnx_asr.load_model(model_id, quantization=quantisation)
 
-    def transcribe(self, samples: np.ndarray, language: str | None = None) -> str:
-        # Parakeet v3 detects language itself and takes no hint.
-        del language
+    def transcribe(self, samples: np.ndarray, language: str | None = None,
+                   hotwords: str | None = None) -> str:
+        # Parakeet v3 detects language itself and takes no hint, and its TDT
+        # decoder has no vocabulary argument at all — a per-request prompt
+        # arriving from the OpenAI-compatible route cannot be honoured here,
+        # only documented.
+        del language, hotwords
         return self._model.recognize(samples, sample_rate=SAMPLE_RATE).strip()
 
 
@@ -73,7 +77,18 @@ class Whisper:
             model_id, device="cpu", compute_type=compute_type, cpu_threads=threads
         )
 
-    def transcribe(self, samples: np.ndarray, language: str | None = None) -> str:
+    def _vocabulary(self, extra: str | None) -> str | None:
+        """The configured glossary, plus whatever this request added.
+
+        A request prompt extends the deployment's vocabulary rather than
+        replacing it. The glossary is the list of terms this box is known to
+        mishear, measured; dropping it because a client named one extra proper
+        noun would trade a measured win for a guess.
+        """
+        return ", ".join(part for part in (self.hotwords, extra) if part) or None
+
+    def transcribe(self, samples: np.ndarray, language: str | None = None,
+                   hotwords: str | None = None) -> str:
         segments, _ = self._model.transcribe(
             samples,
             # None means autodetect, which is right for a speaker who
@@ -86,7 +101,7 @@ class Whisper:
             # temperature=0 disables Whisper's retry on low-confidence output.
             temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
             condition_on_previous_text=False,
-            hotwords=self.hotwords,
+            hotwords=self._vocabulary(hotwords),
             vad_filter=False,  # done once upstream, for whichever model runs
         )
         return " ".join(s.text.strip() for s in segments).strip()
