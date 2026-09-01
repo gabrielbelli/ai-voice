@@ -10,7 +10,16 @@ huggingface-hub==0.36.0
 fastapi==0.121.2
 uvicorn[standard]==0.38.0
 python-multipart==0.0.20
-soundfile==0.13.1
+
+# libav, for decoding. The specification lists nine input formats and
+# libsndfile read four of them: m4a, mp4 and webm — what an iOS client and a
+# browser MediaRecorder actually produce — were all rejected 400. PyAV bundles
+# ffmpeg in its wheel, so this replaces both soundfile and the libsndfile1 apt
+# package, and it resamples and downmixes on the way through.
+#
+# It is already here either way: faster-whisper requires av>=11 for its own
+# decoding. Pinned rather than inherited, because this service now imports it.
+av==18.1.0
 
 # The wire contract shared with tts-stack and tts-long: API keys and the 401,
 # OpenAI's error envelope, the /health route, the log level switch, and the

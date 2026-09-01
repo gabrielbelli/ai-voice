@@ -64,14 +64,22 @@ curl -F file=@clip.wav http://localhost:8000/transcribe
 }
 ```
 
-Audio must be **16 kHz mono**. Anything else is rejected rather than resampled
-in-process, so a client sending 44.1 kHz finds out immediately instead of
-quietly getting worse transcripts.
+**This route takes 16 kHz only.** Any container libav reads is fine — flac,
+mp3, m4a, mp4, ogg, wav, webm — and stereo is downmixed, but a clip at another
+sample rate is rejected rather than resampled, so a client sending 44.1 kHz
+finds out immediately instead of quietly getting worse transcripts. That rule
+is this route's alone: `/v1` resamples, because no OpenAI client anticipates
+it.
 
 ## OpenAI-compatible API
 
-`POST /v1/audio/transcriptions` speaks OpenAI's transcription shape, so
-anything already pointed at that endpoint works here by changing a base URL.
+Two routes speak OpenAI's audio shape, so anything already pointed at that API
+works here by changing a base URL:
+
+```text
+POST /v1/audio/transcriptions
+POST /v1/audio/translations
+```
 
 ```bash
 curl -H "Authorization: Bearer $STT_API_KEY" \
@@ -80,7 +88,8 @@ curl -H "Authorization: Bearer $STT_API_KEY" \
 ```
 
 ```json
-{"text": "I need to make a commit on the Theoria dashboard"}
+{"text": "I need to make a commit on the Theoria dashboard",
+ "usage": {"type": "duration", "seconds": 4}}
 ```
 
 ```python
@@ -92,14 +101,111 @@ with open("clip.wav", "rb") as clip:
     print(client.audio.transcriptions.create(model="whisper-1", file=clip).text)
 ```
 
-`response_format` takes `json`, `text`, `verbose_json`, `srt` and `vtt`. The
-same 16 kHz mono rule applies; the audio is not resampled here either.
+`response_format` takes `json`, `text`, `verbose_json`, `srt` and `vtt`. All
+nine input formats the specification lists are accepted — flac, mp3, mp4, mpeg,
+mpga, m4a, ogg, wav and webm — at any sample rate, in mono or stereo. Decoding
+is libav, and it resamples: **this route does not have the native route's
+16 kHz rule**, because no OpenAI client anticipates one and a 44.1 kHz mp3 is
+the ordinary case there.
 
-Errors on this route are OpenAI's envelope, and a rejected body is a **400**
-carrying `error.message` — that is what the real API answers, and what a client
-written against it branches on. This route answered 422 until the shared
-package below took the handler over. The native `/transcribe` is untouched: its
-FastAPI `{"detail": [...]}` bodies are a contract that already has clients.
+### Every field is honoured, or refused by name
+
+Nothing is accepted and dropped. A dropped field is a client believing
+something false about the transcript it just received, and this surface used to
+drop eleven of them — `timestamp_granularities[]`, `chunking_strategy`,
+`include[]`, `language`, `temperature`, `prompt`, `keywords[]`, `languages[]`,
+`stream`, both diarisation fields — each with a 200 and a body that gave no
+sign. `stream=true` was the worst: the client's event loop completed having
+seen no events and raised nothing.
+
+| Field | Behaviour |
+|---|---|
+| `file` | All nine formats, any rate, mono or stereo |
+| `model` | **Required**, and it does not choose an engine. See the deviation below |
+| `response_format` | `json`, `text`, `verbose_json`, `srt`, `vtt`. `diarized_json` is refused |
+| `timestamp_granularities[]` | Honoured. `segment` is the default, `word` adds word timings |
+| `chunking_strategy` | Honoured — `server_vad`'s `threshold`, `prefix_padding_ms` and `silence_duration_ms` tune the VAD this service already runs |
+| `stream` | Honoured on Whisper, refused on Parakeet. See below |
+| `language`, `prompt`, `keywords[]`, `temperature` | Honoured on Whisper, refused on Parakeet |
+| `include[]=logprobs` | Honoured on Parakeet, refused on Whisper |
+| `languages[]` | Refused: neither engine takes a candidate set |
+| `known_speaker_names[]`, `known_speaker_references[]` | Refused: nothing here diarises |
+| anything else | Refused by name. `CreateTranscriptionRequest` sets `additionalProperties: false` |
+
+Every refusal is a 400 in OpenAI's envelope, naming the field in `param` and
+saying which engine could do it:
+
+```json
+{"error": {"message": "Unsupported parameter: 'language' is not supported by the 'parakeet' engine, which detects the language itself and takes no hint. …", "type": "invalid_request_error", "param": "language", "code": "unsupported_parameter"}}
+```
+
+### What each engine can do
+
+The two recognisers are not interchangeable, and the compatibility layer
+answers for the difference rather than papering over it. `/health` reports
+`translations` and `streaming` for the engine that is loaded, so a client can
+find out without spending a request on a refusal.
+
+| | Parakeet (default) | Whisper |
+|---|---|---|
+| `stream=true` | refused — batch decoder | transcript deltas, one per window |
+| `/v1/audio/translations` | refused — no translate task | `task="translate"` |
+| `language` | refused — takes no hint | honoured |
+| `prompt`, `keywords[]` | refused — no decode-time vocabulary | joined into hotwords |
+| `temperature` | refused — no sampling temperature | honoured, and it disables the fallback ladder |
+| `include[]=logprobs` | per-token logprobs | refused — only a per-segment average exists |
+| `verbose_json.language` | `"unknown"` — no language ID in the image | the detected language, e.g. `"english"` |
+| `segments` | cut at the VAD's own pauses | Whisper's own, with its own `seek` and `no_speech_prob` |
+| `words` | from TDT token timings | from Whisper's word timestamps |
+
+### Streaming
+
+`stream=true` is genuinely incremental on Whisper and refused on Parakeet.
+
+faster-whisper yields each segment as CTranslate2 finishes the 30-second window
+it belongs to. Measured over HTTP with `tiny`/int8 on four threads, a 297-second
+clip:
+
+```text
+first delta   6.31 s
+last event   85.07 s      the first event is 7% of the way in
+```
+
+A clip shorter than one window has one window, so its first and last deltas
+arrive together — 2.6 s on a 14.2-second clip. That is the model's granularity
+showing through, not a shortcut here.
+
+Parakeet encodes the whole waveform and then runs a decode loop that emits
+nothing until it ends: 5.07 s to the first and only output on that same 14.2
+second clip. There is no partial transcript to send, so the field is refused
+rather than answered with one delta at the end. Cutting a finished transcript
+into timed deltas would be a lie a client builds timing assumptions on, and the
+specification itself notes that streaming is ignored for `whisper-1`, so a
+refusal has precedent.
+
+On the wire: bare `data:` frames, no `event:` name lines, every event
+terminated by a blank line including the last, and no `[DONE]` sentinel. The
+schema models the JSON payload only, and openai-python dispatches on the JSON
+`type`; the trailing blank line is the one that matters, because its decoder
+drops a final event ending in a single newline silently, with no error. The
+concatenation of every `transcript.text.delta` equals the `transcript.text.done`
+text exactly — glossary repair runs per segment as it is emitted, so a client
+that renders deltas and a client that waits for the terminal event see the same
+transcript.
+
+### Errors
+
+Every `/v1` error is OpenAI's envelope with all four keys — `type`, `message`,
+`param` and `code` — where `param` and `code` are present as `null` rather than
+missing. That includes a 404 on an unknown path and a 405 on a wrong method,
+both of which used to leak FastAPI's `{"detail": ...}`, which openai-python
+reports as a bare "unknown error". A rejected request is a **400**, which is
+what the real API answers and what a client written against it branches on.
+
+`STT_MAX_CONCURRENT` puts a ceiling on how many transcriptions run at once;
+past it, `/v1` answers **429** with `Retry-After` instead of queueing. It is
+unset by default — a limit picked here rather than measured on your host would
+start refusing work the service is doing happily today.
 
 ### Which route to prefer
 
@@ -112,23 +218,73 @@ and it returns what the OpenAI shape has no field for:
 | `repaired` — which glossary terms fired | yes | — |
 | `raw` — the transcript before repair | yes | — |
 | `realtime_factor` and the timings behind it | yes | — |
+| Segments, words, subtitles, streaming | — | yes |
 | Works with an unmodified OpenAI client | — | yes |
 
 `repaired` is the one worth caring about. A silent substitution is worse than
 no substitution: if a glossary rule is wrong, you want to see it named, and on
 the compatible route you cannot.
 
-### What the compatible route cannot honour
+### Deviations
 
-Documented rather than faked:
+What cannot be 1:1, why, and the measurement that forces it. Nothing here is
+hidden and nothing is faked.
 
-| Field | Behaviour |
-|---|---|
-| `model` | Accepted, ignored. The engine is fixed at startup by `STT_MODEL`; loading a second one per request does not fit the memory this runs in |
-| `prompt` | Added to the glossary's hotwords **on Whisper only**. Parakeet has no decode-time vocabulary at all, so under the default engine it does nothing. `STT_HOTWORDS=0` drops it on both engines |
-| `temperature` | Accepted, ignored. Parakeet has no sampling temperature, and pinning one on Whisper disables its retry on low-confidence output |
-| `verbose_json` | No `segments`, and `language` echoes the request — neither engine reports segment timings or a detected language through this interface |
-| `srt`, `vtt` | One cue spanning the clip, for the same reason. True, if not very useful |
+**`model` does not choose an engine.** It is required, as the specification
+requires it, and its value is not obeyed: Parakeet needs 1.4 GB resident and
+Whisper large-v3 2.9 GB, holding both does not fit the memory this is deployed
+under, and a cold load is minutes. Refusing `whisper-1` on a Parakeet
+deployment would reject every existing client — Open WebUI sends it, the
+example above sends it — to make a point about a name. So the request is
+answered and **every `/v1` response carries `x-stt-engine`** naming the engine
+that actually ran. Honesty rather than obedience.
+
+**No streaming, translation, `language`, `prompt`, `keywords[]` or
+`temperature` under Parakeet.** All six are refusals, not silences, and all six
+are properties of a TDT decoder that has no such mechanism. Deploy with
+`STT_MODEL=whisper` if you need them, and pay the order of magnitude in
+latency.
+
+**No diarisation.** `diarized_json`, `known_speaker_names[]` and
+`known_speaker_references[]` are refused. There is no speaker-embedding or
+clustering component in this image and neither engine produces speaker labels.
+
+**Two segment fields are synthesised under Parakeet.** `seek` is a Whisper
+30-second window offset and there are no windows — the encoder runs over the
+whole waveform — so it is `0`. `no_speech_prob` is a Whisper decoder output
+that a TDT decoder does not produce, so it is `0.0`; the VAD has already
+removed what it believed was silence. `tokens` is empty, because onnx-asr maps
+token ids to strings inside its decoder and returns only the strings, and an
+array of invented integers would be worse than an empty one.
+
+**Word timings mean slightly different things.** Whisper reports a start and an
+end per word. Parakeet's TDT decoder reports the frame at which each token was
+*emitted*, quantised to 0.08 s, so a word's `end` is its last token's
+timestamp and its `start` is the timestamp of the token before it. Words are
+therefore contiguous, with no invented gaps.
+
+**`usage` is the duration variant only** — `{"type": "duration", "seconds": N}`
+— because neither engine is billed by tokens or reports an input token count.
+The terminal streaming event omits `usage` entirely for the same reason: the
+schema pins it to the token variant there, and inventing `input_tokens` would
+be worse than an absent optional field.
+
+**Glossary repair happens on strings.** It is applied to the whole transcript,
+and separately to each segment and each word, so a rule spanning a boundary —
+`cloud code` split across two segments — fires in `text` and cannot fire inside
+the smaller unit. `/transcribe` names every rule that fired in `repaired`.
+
+**`seek` is not remapped.** With the VAD on, the recogniser sees speech runs
+concatenated, and every start and end is mapped back onto the clip you sent.
+`seek` indexes a decoder window rather than naming a moment, so it is passed
+through as the decoder reported it.
+
+**Two conventions chosen by fiat.** `vtt` is served as `text/vtt; charset=utf-8`
+— the specification declares no content type for it, and a browser needs that
+one before it will treat the body as a track. There is no `[DONE]` sentinel on
+the stream: nothing authoritative says the real API emits one, and both SDK
+decoders tolerate its absence.
+
 
 ## Authentication
 
@@ -288,6 +444,7 @@ transcript is the product.
 | `STT_THREADS` | `4` | Must match your CPU limit. See below |
 | `STT_VAD` | `1` | Silence removal |
 | `STT_HOTWORDS` | `1` | `0` disables decode-time biasing entirely, for A/B tests. See below |
+| `STT_MAX_CONCURRENT` | `0` | Transcriptions allowed at once. `0` is no limit; past a limit, `/v1` answers 429 with `Retry-After` |
 | `STT_GLOSSARY` | `/etc/stt-stack/glossary.txt` | See below |
 | `STT_API_KEYS` | unset | Comma-separated accepted keys. Unset means no auth |
 | `STT_LOG_LEVEL` | `INFO` | `DEBUG`, `WARNING`, … An unrecognised value falls back to `INFO` |
@@ -343,6 +500,11 @@ Parakeet is unaffected — it detects on its own and takes no language argument
 — so this trap exists on the Whisper path only. Nothing in the response marks
 it: a translated transcript reads exactly like a working one, which is the
 whole problem.
+
+On `/v1` the same field is refused under Parakeet rather than accepted. It used
+to be echoed back in `verbose_json` as `"language"`, so `language=pt` on English
+audio returned the English transcript alongside a claim that Portuguese had
+steered it — a field the request set, reported as a property of the output.
 
 Override per request when you do know:
 
@@ -441,6 +603,14 @@ It is pinned by SHA in `requirements.txt`, so a change there does not force a
 rebuild here. What keeps the pin honest is `tests/test_conformance.py`: the
 package ships its own pytest suite and this repo runs it against the app it
 actually builds, so a bad bump fails at the build rather than in production.
+
+That pin is also why `app/errors.py` exists. The specification requires `param`
+on every error and an envelope on 404 and 405, and voice-common emits neither
+yet; a fix there is not a fix here until the pin moves, so this service
+completes the envelope on its own — over the shared code rather than instead of
+it. `tests/test_parity.py` asserts the result, along with every other field on
+the compatible surface, against a recogniser that is not a model, so CI runs
+all of it without downloading 460 MB.
 
 ```bash
 python -m venv .venv && ./.venv/bin/pip install -r requirements.txt pytest httpx

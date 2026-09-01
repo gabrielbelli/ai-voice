@@ -19,16 +19,18 @@
 
 FROM python:3.13-slim-trixie
 
-# ffmpeg is deliberately absent: the service takes 16 kHz mono and rejects
-# anything else rather than resampling, so a client sending 44.1 kHz is told,
-# not quietly degraded.
-# libsndfile is soundfile's only non-Python dependency. util-linux supplies
-# setpriv, which the entrypoint uses to drop privileges; it is normally already
-# present in the slim base, and naming it here means a base change cannot
-# silently remove it. The `command -v` line fails the build rather than the
-# container if it ever goes missing.
+# No ffmpeg apt package and no libsndfile: decoding is PyAV, whose wheel
+# carries its own ffmpeg libraries, and which faster-whisper already required.
+# That is what lets /v1 accept all nine formats the specification lists —
+# libsndfile read four, and rejected the m4a and webm that an iOS client and a
+# browser MediaRecorder produce.
+#
+# util-linux supplies setpriv, which the entrypoint uses to drop privileges; it
+# is normally already present in the slim base, and naming it here means a base
+# change cannot silently remove it. The `command -v` line fails the build
+# rather than the container if it ever goes missing.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libsndfile1 util-linux \
+ && apt-get install -y --no-install-recommends util-linux \
  && rm -rf /var/lib/apt/lists/* \
  && command -v setpriv
 
