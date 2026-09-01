@@ -7,6 +7,13 @@ that waits for the audio would time out long before it arrived.
 So /jobs accepts work and returns immediately with an id. One job runs at a
 time — the model is 6.5 GB and concurrency would only make both jobs slower
 while doubling the memory.
+
+/v1/audio/speech sits on top of the same queue for OpenAI clients. It cannot
+be honestly synchronous for long input, so it is synchronous only where the
+arithmetic allows: short text is waited on and returned as audio, anything
+longer gets 202 and a Location header pointing at the native job. The native
+routes stay the ones to prefer — realtime_factor, per-segment pauses and the
+queue position have no field in the OpenAI shape and are dropped there.
 """
 
 from __future__ import annotations
@@ -20,11 +27,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from queue import Queue
 
+import numpy as np
 import soundfile as sf
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+from . import auth
 from .synth import SAMPLE_RATE, Synth
 
 OUT_DIR = Path(os.getenv("TTS_OUTPUT_DIR", "/output"))
@@ -37,12 +46,32 @@ DEF_EXAGGERATION = float(os.getenv("TTS_EXAGGERATION", "0.3"))
 DEF_CFG_WEIGHT = float(os.getenv("TTS_CFG_WEIGHT", "0.3"))
 DEF_TEMPERATURE = float(os.getenv("TTS_TEMPERATURE", "0.6"))
 
+# How much text /v1/audio/speech will block for. Roughly 14 characters of text
+# become a second of speech at 150 wpm, and a second of speech costs about
+# 4.8 seconds of CPU at 0.21x realtime — so a third of a second per character.
+# 300 characters is therefore around 100 seconds of work: inside
+# openai-python's 600 s default timeout, and survivable behind a proxy that
+# gives up at 120. Set to 0 to always answer 202.
+SYNC_MAX_CHARS = int(os.getenv("TTS_OPENAI_SYNC_MAX_CHARS", "300"))
+# Longer than the estimate above because the queue may be busy and the first
+# job of the day also loads 6.5 GB of weights. When it runs out the job is not
+# cancelled — the caller gets 202 and can collect the audio from /jobs.
+SYNC_TIMEOUT = float(os.getenv("TTS_OPENAI_SYNC_TIMEOUT", "180"))
+
+# Everything libsndfile writes without an external encoder. mp3, opus and aac
+# are in OpenAI's list and are not here: they would mean putting ffmpeg in an
+# image that already carries torch, to serve a format nobody asked for yet.
+MEDIA_TYPES = {"wav": "audio/wav", "flac": "audio/flac", "pcm": "audio/pcm"}
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("tts-long")
 
 jobs: dict[str, dict] = {}
 queue: Queue = Queue()
 state: dict[str, object] = {}
+# Only the OpenAI route registers here, and only while it is blocked on a job.
+# Kept out of the job dict so nothing unserialisable can reach /jobs.
+events: dict[str, threading.Event] = {}
 
 
 def _worker() -> None:
@@ -64,8 +93,14 @@ def _worker() -> None:
                     job["text"], job["language"], job["exaggeration"],
                     job["cfg_weight"], job["temperature"])
             compute = time.monotonic() - t
-            path = OUT_DIR / f"{job_id}.wav"
-            sf.write(path, audio, SAMPLE_RATE)
+            path = OUT_DIR / f"{job_id}.{job['format']}"
+            if job["format"] == "pcm":
+                # OpenAI's "pcm" is 24 kHz 16-bit mono little-endian, which is
+                # exactly what Chatterbox emits — no resampling, just a cast.
+                path.write_bytes(
+                    (np.clip(audio, -1.0, 1.0) * 32767).astype("<i2").tobytes())
+            else:
+                sf.write(path, audio, SAMPLE_RATE)
             duration = audio.size / SAMPLE_RATE
             job.update(status="done", path=str(path),
                        audio_seconds=round(duration, 1),
@@ -78,6 +113,11 @@ def _worker() -> None:
             job.update(status="failed", error=str(exc), finished_at=time.time())
             log.exception("%s failed", job_id[:8])
         finally:
+            # In `finally`, so a failed job wakes its caller with an error
+            # rather than leaving it to sit out the whole timeout.
+            waiter = events.pop(job_id, None)
+            if waiter is not None:
+                waiter.set()
             queue.task_done()
 
 
@@ -88,6 +128,7 @@ async def lifespan(app: FastAPI):
     # One worker on purpose. The model is 6.5 GB and generation is sequential,
     # so a second job would double memory and slow both.
     threading.Thread(target=_worker, daemon=True).start()
+    auth.log_state(log)
     log.info("ready, %d threads, idle timeout %.0fs (model loads on first job)",
              THREADS, IDLE_TIMEOUT)
     yield
@@ -101,6 +142,7 @@ app = FastAPI(
     description="Chatterbox long-form speech, CPU, as a job queue.",
     lifespan=lifespan,
 )
+auth.install(app)
 
 
 class Segment(BaseModel):
@@ -129,25 +171,43 @@ def health() -> dict[str, object]:
     }
 
 
+def _estimate(words: int) -> int:
+    # ~150 wpm speech at ~0.21x realtime. Rough, but the caller deserves to
+    # know this is minutes rather than seconds before it waits on anything.
+    return round(words / 150 * 60 / 0.21)
+
+
+def _enqueue(*, text: str | None, segments: list[tuple[str, float]] | None,
+             language: str, exaggeration: float, cfg_weight: float,
+             temperature: float, fmt: str = "wav",
+             event: threading.Event | None = None) -> str:
+    job_id = str(uuid.uuid4())
+    jobs[job_id] = {
+        "id": job_id, "status": "queued", "created_at": time.time(),
+        "text": text, "language": language, "segments": segments,
+        "exaggeration": exaggeration, "cfg_weight": cfg_weight,
+        "temperature": temperature, "format": fmt,
+    }
+    # Registered before the job is visible to the worker, or a fast job could
+    # finish and find nothing to wake.
+    if event is not None:
+        events[job_id] = event
+    queue.put(job_id)
+    return job_id
+
+
 @app.post("/jobs", status_code=202)
 def create_job(req: JobRequest) -> dict[str, object]:
     if not req.text and not req.segments:
         raise HTTPException(400, "provide either text or segments")
-    job_id = str(uuid.uuid4())
     words = len((req.text or " ".join(s.text for s in (req.segments or []))).split())
-    jobs[job_id] = {
-        "id": job_id, "status": "queued", "created_at": time.time(),
-        "text": req.text, "language": req.language,
-        "segments": [(s.text, s.pause_after) for s in req.segments] if req.segments else None,
-        "exaggeration": req.exaggeration, "cfg_weight": req.cfg_weight,
-        "temperature": req.temperature,
-    }
-    queue.put(job_id)
-    # ~150 wpm speech at ~0.21x realtime. Rough, but the caller deserves to
-    # know this is minutes rather than seconds before it waits on anything.
-    estimate = round(words / 150 * 60 / 0.21)
+    job_id = _enqueue(
+        text=req.text,
+        segments=[(s.text, s.pause_after) for s in req.segments] if req.segments else None,
+        language=req.language, exaggeration=req.exaggeration,
+        cfg_weight=req.cfg_weight, temperature=req.temperature)
     return {"id": job_id, "status": "queued", "queued_ahead": queue.qsize() - 1,
-            "estimated_seconds": estimate}
+            "estimated_seconds": _estimate(words)}
 
 
 def _public(job: dict) -> dict:
@@ -175,5 +235,107 @@ def get_audio(job_id: str) -> FileResponse:
         raise HTTPException(404, "no such job")
     if job["status"] != "done":
         raise HTTPException(409, f"job is {job['status']}")
-    return FileResponse(job["path"], media_type="audio/wav",
-                        filename=f"{job_id}.wav")
+    fmt = job["format"]
+    return FileResponse(job["path"], media_type=MEDIA_TYPES[fmt],
+                        filename=f"{job_id}.{fmt}")
+
+
+# ------------------------------------------------------- OpenAI compatible --
+#
+# Added alongside the native routes, not in place of them. /jobs stays the one
+# to prefer, for the reasons in the module docstring.
+
+
+class SpeechRequest(BaseModel):
+    model: str = "tts-1"
+    input: str
+    # Accepted and ignored. Chatterbox clones from a reference clip and has no
+    # named voices, so mapping 'alloy' onto anything would be an invention. The
+    # field stays because OpenAI clients require it and would refuse to send
+    # the request without one.
+    voice: str = "alloy"
+    # OpenAI defaults this to mp3; there is no mp3 encoder in this image, so
+    # the default here is wav. Clients that never send the field get audio
+    # they can play either way.
+    response_format: str = "wav"
+    speed: float = 1.0
+    # Not OpenAI fields. Accepted because the OpenAI shape has no room for the
+    # knobs that decide how this reads, and extra_body is how openai-python
+    # passes vendor options through.
+    language: str = DEFAULT_LANG
+    exaggeration: float = Field(default=DEF_EXAGGERATION, ge=0.0, le=1.0)
+    cfg_weight: float = Field(default=DEF_CFG_WEIGHT, ge=0.0, le=1.0)
+    temperature: float = Field(default=DEF_TEMPERATURE, ge=0.1, le=1.5)
+
+
+def _error(status: int, message: str, code: str,
+           type_: str = "invalid_request_error") -> JSONResponse:
+    """The OpenAI error envelope. openai-python reads the message off this."""
+    return JSONResponse(status_code=status,
+                        content={"error": {"message": message, "type": type_,
+                                           "code": code}})
+
+
+@app.post("/v1/audio/speech")
+def openai_speech(req: SpeechRequest) -> Response:
+    """OpenAI's speech endpoint, synchronous only where it can honestly be.
+
+    OpenAI's contract is request/response. This service runs at 0.21x
+    realtime, so for anything but short text a synchronous answer is not slow,
+    it is impossible — the socket dies long before the audio exists. Both
+    halves of the obvious compromise are here rather than one:
+
+    - input at or under TTS_OPENAI_SYNC_MAX_CHARS is waited on and returned as
+      audio, which is what an unmodified OpenAI client needs;
+    - anything longer, or a wait that runs out, returns 202 with the job id
+      and a Location header for the native route.
+
+    The alternative — always 202 — would hand openai-python a JSON body it
+    would happily write into a .wav file. The other alternative, always
+    blocking, would be a lie the network catches. A caller that cannot handle
+    202 should set TTS_OPENAI_SYNC_MAX_CHARS to something it can wait for and
+    keep its input under it.
+    """
+    text = req.input.strip()
+    if not text:
+        return _error(400, "input must not be empty", "invalid_input")
+    if req.response_format not in MEDIA_TYPES:
+        return _error(400, f"response_format '{req.response_format}' is not "
+                           f"available: this image has no encoder beyond "
+                           f"libsndfile, so only "
+                           f"{', '.join(sorted(MEDIA_TYPES))} are produced.",
+                      "unsupported_value")
+    if abs(req.speed - 1.0) > 1e-6:
+        # Silently ignoring it would return audio of the wrong length, which
+        # is worse than refusing: Chatterbox has no rate control, and
+        # resampling to fake one shifts the pitch with it.
+        return _error(400, "speed is not supported: Chatterbox has no rate "
+                           "control and resampling would shift pitch.",
+                      "unsupported_value")
+
+    done = threading.Event() if len(text) <= SYNC_MAX_CHARS else None
+    job_id = _enqueue(text=text, segments=None, language=req.language,
+                      exaggeration=req.exaggeration, cfg_weight=req.cfg_weight,
+                      temperature=req.temperature, fmt=req.response_format,
+                      event=done)
+
+    if done is not None and done.wait(SYNC_TIMEOUT):
+        job = jobs[job_id]
+        if job["status"] == "done":
+            return FileResponse(job["path"],
+                                media_type=MEDIA_TYPES[req.response_format],
+                                filename=f"{job_id}.{req.response_format}")
+        return _error(500, job.get("error", "synthesis failed"),
+                      "synthesis_failed", type_="server_error")
+
+    # Either too long to wait for, or the wait ran out. The job is untouched
+    # and still queued, so nothing has been wasted — Location points at where
+    # it will appear.
+    return JSONResponse(
+        status_code=202,
+        headers={"Location": f"/jobs/{job_id}"},
+        content={"id": job_id, "status": "queued",
+                 "queued_ahead": queue.qsize() - 1,
+                 "estimated_seconds": _estimate(len(text.split())),
+                 "audio_url": f"/jobs/{job_id}/audio"},
+    )

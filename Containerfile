@@ -2,6 +2,9 @@
 #
 #   POST /jobs -> queued -> Chatterbox -> wav on disk
 #
+# POST /v1/audio/speech is the same queue in OpenAI's shape, blocking only for
+# input short enough that blocking is honest. /jobs remains the richer route.
+#
 # This is a job queue, not a request/response service. Measured on an M2 Max
 # CPU it runs at roughly 0.21x realtime, so a ten-minute recording takes about
 # three quarters of an hour. An HTTP request waiting for that would time out.
@@ -58,7 +61,14 @@ ENV HOME=/home/tts \
     TTS_EXAGGERATION=0.3 \
     TTS_CFG_WEIGHT=0.3 \
     TTS_TEMPERATURE=0.6 \
+    TTS_OPENAI_SYNC_MAX_CHARS=300 \
+    TTS_OPENAI_SYNC_TIMEOUT=180 \
     PYTHONUNBUFFERED=1
+
+# TTS_API_KEYS, TTS_TLS_CERT and TTS_TLS_KEY are deliberately absent. Keys do
+# not belong baked into a published image, and a certificate path is only
+# meaningful once something is mounted at it. Unset means no auth and plain
+# HTTP, which is what this already did — the startup log says so at WARNING.
 
 RUN useradd --create-home --uid 1000 tts \
  && mkdir -p /models /output \
