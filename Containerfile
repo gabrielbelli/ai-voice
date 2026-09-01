@@ -32,13 +32,15 @@
 
 FROM python:3.13-slim-trixie
 
-# espeak-ng does the phonemisation Kokoro needs; libsndfile backs soundfile;
-# ffmpeg is here only for opus output, which is optional but small.
+# espeak-ng does the phonemisation Kokoro needs; ffmpeg encodes mp3, aac, opus
+# and flac. wav and pcm are written here, so libsndfile is no longer installed:
+# every encoder streams now, and libsndfile cannot write a header before it
+# knows the length.
 # util-linux supplies setpriv for the entrypoint's privilege drop — named
 # explicitly so a base image change cannot silently remove it.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      espeak-ng libsndfile1 ffmpeg curl util-linux \
+      espeak-ng ffmpeg curl util-linux \
  && rm -rf /var/lib/apt/lists/* \
  && command -v setpriv
 

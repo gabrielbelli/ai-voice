@@ -7,8 +7,14 @@ kokoro-onnx==0.4.9
 onnxruntime==1.24.1
 fastapi==0.121.2
 uvicorn[standard]==0.38.0
-soundfile==0.13.1
 numpy==2.3.4
+
+# soundfile and libsndfile are gone. Every encoder now feeds ffmpeg on a pipe
+# or writes the 44 bytes of a RIFF header itself, because a file has to be
+# complete before it can be read and that is the whole latency this service was
+# removing. Nothing left in the import graph needs it — checked by importing
+# the app and encoding all six formats with `soundfile` blocked at the import
+# hook — so the library leaves with it.
 
 # The auth middleware, the OpenAI error envelope, the health route and the TLS
 # entrypoint, shared with stt-stack and tts-long instead of hand-copied into
