@@ -18,7 +18,32 @@ env:
   STORAGE_DRIVER: vfs
 
 jobs:
+  # voice-common ships the assertions as well as the code, and this job runs
+  # them against the app object this repo actually builds. It is the answer to
+  # "a shared package now has three consumers": a bad bump fails at the
+  # consumer's build rather than on the box serving port 8001.
+  #
+  # Deliberately no model. The suite never enters the app's lifespan, so
+  # nothing here downloads the 340 MB of weights, and the whole job is under a
+  # minute on one runner.
+  conformance:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install the runtime and the conformance extra
+        run: pip install -r requirements-dev.txt
+      # `python -m pytest`, not `pytest`: the module form puts the working
+      # directory on sys.path, and without it `import app.main` fails with
+      # ModuleNotFoundError. This repo is a plain source tree, not an
+      # installed package, so there is nothing else to find `app` by.
+      - name: Run voice-common's conformance suite against this app
+        run: python -m pytest tests/ -q
+
   build:
+    needs: conformance
     # Native runners per architecture rather than qemu. This image has RUN
     # instructions (apt, pip), and emulated arm64 pip installs take tens of
     # minutes where a native runner takes two.

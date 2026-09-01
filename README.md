@@ -287,11 +287,13 @@ What the entrypoint does with the pair, before it drops privileges:
 | Only one of the two variables set | Exits. Half a configuration must not become a silent downgrade to plain HTTP |
 | Either file unreadable **by uid 1000** | Exits with the path. Readability is tested as the user that will open the file, not as root — a key mounted `0600 root:root` reads fine for the entrypoint and not at all for uvicorn |
 | `setpriv` itself cannot run | Exits quoting what `setpriv` said. Its own failure is not a permissions problem, and reporting it as one sends an operator to inspect a file whose mode was fine |
-| Both set and readable | Appends `--ssl-certfile` and `--ssl-keyfile` to whatever command was given |
+| Both set, but the command is not `uvicorn` | Exits. Only uvicorn is handed the certificate, so a `command:` override with TLS configured would have served plain HTTP while printing that it was serving HTTPS |
+| Both set and readable | Appends `--ssl-certfile` and `--ssl-keyfile` to the uvicorn command |
 
-The flags are appended to the command rather than read in Python, so an
-overridden `CMD` still gets TLS. Running uvicorn directly, outside the
-container, the environment variables do nothing — pass the flags yourself:
+The flags are appended to the command rather than read in Python, so the `CMD`
+baked into the image is exactly what it always was. Running uvicorn directly,
+outside the container, the environment variables do nothing — pass the flags
+yourself:
 
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8001 \
@@ -312,6 +314,7 @@ start, so a renewed certificate needs a container restart.
 | `TTS_API_KEYS` | unset | Comma-separated accepted keys. Unset means no authentication; set but naming none refuses to start |
 | `TTS_TLS_CERT` | unset | PEM certificate chain. Both TLS variables or neither |
 | `TTS_TLS_KEY` | unset | PEM private key, readable by uid 1000 |
+| `TTS_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`. An unrecognised value logs a warning and stays at `INFO` rather than refusing to start |
 
 ## Limiting CPU use
 
@@ -354,6 +357,45 @@ measured.
 **Qwen3-TTS** is excluded for a different reason: it is Mandarin-first, and
 its English and Portuguese carry a Chinese accent. **F5-TTS** and **XTTS-v2**
 are excluded for their non-commercial licences.
+
+## Shared code
+
+The API key middleware, the OpenAI error envelope, the `/health` route, the
+`Segment` and OpenAI request models, the PCM and splicing helpers, the logging
+setup and the TLS entrypoint are not written here. They come from
+[voice-common](https://github.com/gabrielbelli/voice-common), pinned to a
+commit in `requirements.txt` and shared with stt-stack and tts-long.
+
+That is not tidiness. The three services each carried their own copy of
+`app/auth.py`; the copies drifted by 170 to 197 lines, and one review round
+found three *different* defects, one per repo, because each had drifted
+separately. Two of the three were this repo's:
+
+- a non-ASCII `TTS_API_KEYS` value could never authenticate — the correct key
+  was rejected as the wrong one
+- `GET /health/` came back `401` the moment keys were configured, so a probe
+  written with the trailing slash went permanently unhealthy
+
+Both are fixed here and both are now assertions in a suite the package ships.
+`tests/test_conformance.py` is four lines of fixture; the tests come from
+voice-common and run in CI against the app object this repo actually builds,
+so a bad bump of that pin fails at the build rather than on the box:
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests/ -q
+```
+
+`python -m pytest` rather than `pytest`, because the module form puts the
+working directory on `sys.path` and `app` is a source tree here, not an
+installed package.
+
+Nothing in it loads Kokoro — the suite never enters the app's lifespan, so CI
+never downloads the 340 MB of weights.
+
+What stays here is what is actually this service's: the Kokoro voice table and
+its aliases, the ffmpeg encoder set and its bitrates, the format enum, the
+`0.5`–`2.0` speed clamp, the segment `voice` field, and every route.
 
 ## Licence
 

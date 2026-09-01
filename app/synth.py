@@ -13,10 +13,13 @@ import os
 from pathlib import Path
 
 import numpy as np
+from voice_common.audio import SAMPLE_RATE, check_rate, splice
 
 log = logging.getLogger("tts-stack.synth")
 
-SAMPLE_RATE = 24_000
+# Re-exported so app.main keeps importing the rate from the module that
+# produces the audio, rather than reaching past it into the shared package.
+__all__ = ["SAMPLE_RATE", "Synth"]
 
 
 def _wire_espeak() -> None:
@@ -64,8 +67,9 @@ class Synth:
     def speak(self, text: str, voice: str, language: str,
               speed: float) -> np.ndarray:
         audio, rate = self._k.create(text, voice=voice, speed=speed, lang=language)
-        if rate != SAMPLE_RATE:  # kokoro is 24 kHz; guard against a change
-            raise RuntimeError(f"unexpected sample rate {rate}")
+        # kokoro is 24 kHz; a model that changed it would otherwise ship every
+        # file with the wrong rate in its header and play at the wrong pitch.
+        check_rate(rate)
         return audio.astype(np.float32)
 
     def speak_segments(self, segments: list[tuple[str, float, str]],
@@ -82,13 +86,11 @@ class Synth:
         to be one voice for the whole call, which quietly made a documented
         per-segment `voice` a lie; there was never a cost to honouring it, a
         voice being a 510 KB embedding over weights that are already resident.
+
+        The splicing itself is voice_common.audio.splice: an empty segment
+        contributes its pause and no audio, and a request of nothing but
+        pauses returns zeros(0) rather than raising, exactly as this did.
         """
-        parts: list[np.ndarray] = []
-        for text, pause_after, voice in segments:
-            if text.strip():
-                parts.append(self.speak(text, voice, language, speed))
-            if pause_after > 0:
-                parts.append(np.zeros(int(SAMPLE_RATE * pause_after), dtype=np.float32))
-        if not parts:
-            return np.zeros(0, dtype=np.float32)
-        return np.concatenate(parts)
+        return splice([(self.speak(text, voice, language, speed)
+                        if text.strip() else None, pause_after)
+                       for text, pause_after, voice in segments])

@@ -24,6 +24,11 @@
 # Both are off when their variables are unset, which is how the service shipped
 # and how it stays on upgrade. The key file must be readable by uid 1000; the
 # entrypoint checks that and refuses to start rather than falling back to HTTP.
+#
+# That entrypoint is no longer in this repo. It ships in voice-common and pip
+# installs it to /usr/local/bin, so the TLS logic and the auth logic ride the
+# same pin and cannot be at different versions inside one image — which is
+# exactly how three copies of the script ended up with three different holes.
 
 FROM python:3.13-slim-trixie
 
@@ -43,12 +48,17 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
+# VOICE_* are read by the shared entrypoint and are image settings, not
+# operator settings: they only tell it which prefix this service's TLS
+# variables use and which volume to take ownership of. Every variable an
+# operator sets is still spelled TTS_.
 ENV TTS_MODEL_DIR=/models \
     TTS_VOICE=bm_george \
     TTS_LANGUAGE=en-us \
     TTS_THREADS=4 \
+    VOICE_TLS_PREFIX=TTS \
+    VOICE_CHOWN_DIRS=/models \
     PYTHONUNBUFFERED=1
 
 # uid 1000, created rather than reused: the slim base has no non-root account.
@@ -65,5 +75,5 @@ EXPOSE 8001
 
 # No HEALTHCHECK instruction — the OCI image spec has no field for one, so a
 # --format oci build drops it silently. Pass it at run time.
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/voice-entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]

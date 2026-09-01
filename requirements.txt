@@ -9,3 +9,17 @@ fastapi==0.121.2
 uvicorn[standard]==0.38.0
 soundfile==0.13.1
 numpy==2.3.4
+
+# The auth middleware, the OpenAI error envelope, the health route and the TLS
+# entrypoint, shared with stt-stack and tts-long instead of hand-copied into
+# each. Three copies of app/auth.py drifted into three DIFFERENT defects, one
+# per repo; that is what this pin exists to stop happening again.
+#
+# Pinned to a commit rather than a tag or a branch: an image build must produce
+# the same bytes next month, and a moving ref in a requirements file is a
+# supply-chain decision made by whoever pushed last. A tarball rather than
+# `git+ssh` so the build needs neither git nor a deploy key.
+#
+# The [audio] extra is numpy, which is pinned above and already in the image;
+# the extra takes no second copy, it only records the dependency honestly.
+voice-common[audio] @ https://github.com/gabrielbelli/voice-common/archive/4429e64a97926d17e00e8a5982208e7ffecfab2e.tar.gz

@@ -13,11 +13,14 @@ borrowed OpenAI's names for five of them — af_alloy, am_echo, am_onyx, af_nova
 and the British bm_fable — so five of the six names map by name alone and are
 not a matter of taste. `shimmer` has no counterpart at all, so it is mapped by
 ear, and that one row is a judgement call rather than a fact.
+
+The error envelope this route answers in is no longer written here. It lives in
+voice_common.errors, which every service in the estate now shares — four
+incompatible copies of the same four-key JSON object, two of them passing
+`code` and `type_` positionally in opposite orders, is what that move was for.
 """
 
 from __future__ import annotations
-
-from fastapi.responses import JSONResponse
 
 # The six names an OpenAI client is allowed to send. Native Kokoro names are
 # accepted too and take precedence, so nothing is shadowed: `af_nova` reaches
@@ -48,20 +51,6 @@ LANGUAGE_BY_PREFIX = {
     "p": "pt-br",
     "z": "cmn",
 }
-
-
-def error_response(status: int, message: str, type_: str, code: str) -> JSONResponse:
-    """An error in OpenAI's envelope.
-
-    openai-python reads `error.message` and shows it to the caller; FastAPI's
-    own `{"detail": ...}` reaches it as an unparsed body and surfaces as a bare
-    status code. Only the /v1 routes use this — changing the native routes'
-    error shape would break clients already written against them.
-    """
-    return JSONResponse(status_code=status,
-                        content={"error": {"message": message,
-                                           "type": type_,
-                                           "code": code}})
 
 
 def resolve_voice(requested: str | None, available: list[str],
