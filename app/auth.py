@@ -1,5 +1,10 @@
 """API-key authentication for everything except /health.
 
+Everything means everything: /openapi.json, /docs and /redoc are re-registered
+in main.py behind this check, because FastAPI's own copies are Starlette
+routes that no router dependency reaches, and a schema dump is a free map of
+the service.
+
 Off unless STT_API_KEYS is set, and loudly off: this service already runs on a
 LAN, and an upgrade that suddenly refused every unauthenticated request would
 break the deployment it was meant to protect. A WARNING at startup is the
@@ -26,9 +31,12 @@ log = logging.getLogger("stt-stack.auth")
 
 # Read once, at import. Rotating a key is therefore a restart, which is also
 # the only moment the startup line below can be trusted to describe reality.
-KEYS: list[str] = [
-    key.strip() for key in os.getenv("STT_API_KEYS", "").split(",") if key.strip()
-]
+#
+# The raw value is kept because the parsed list cannot tell "unset" from
+# STT_API_KEYS=" , , ": both leave KEYS empty, and announcing the second as
+# the first served a typo as though it were a decision.
+RAW: str | None = os.getenv("STT_API_KEYS")
+KEYS: list[str] = [key.strip() for key in (RAW or "").split(",") if key.strip()]
 
 
 class ApiError(Exception):
@@ -64,14 +72,29 @@ def install(app: FastAPI) -> None:
 
 
 def announce() -> None:
-    """Say, at startup, whether anything is being checked."""
+    """Say, at startup, whether anything is being checked.
+
+    Refuses to serve a key list that was set and parsed to nothing. Open is
+    allowed because someone chose it; a value of separators and whitespace is
+    nobody's choice, and starting anyway would leave a deployment that asked
+    for authentication running without it and told it was fine.
+    """
     if KEYS:
         log.info("api key auth enabled, %d key(s) accepted", len(KEYS))
-    else:
-        log.warning(
-            "STT_API_KEYS is unset: every request is accepted. Set it to a "
-            "comma-separated list of keys to require Authorization: Bearer"
+        return
+
+    if RAW is not None and RAW.strip():
+        raise ValueError(
+            f"STT_API_KEYS={RAW!r} contains separators and whitespace but no "
+            "key. Set it to a comma-separated list of keys, or unset it to "
+            "serve every request unauthenticated on purpose."
         )
+
+    log.warning(
+        "STT_API_KEYS is %s: every request is accepted. Set it to a "
+        "comma-separated list of keys to require Authorization: Bearer",
+        "unset" if RAW is None else "empty",
+    )
 
 
 def require_key(authorization: str | None = Header(default=None)) -> None:

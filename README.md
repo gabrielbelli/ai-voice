@@ -44,7 +44,8 @@ docker run -p 8000:8000 -v stt-models:/models \
   ghcr.io/gabrielbelli/stt-stack:pre
 ```
 
-First start downloads both models into the volume. Later starts are immediate.
+First start downloads the selected model into the volume. Later starts are
+immediate.
 
 ```bash
 curl -F file=@clip.wav http://localhost:8000/transcribe
@@ -118,7 +119,7 @@ Documented rather than faked:
 | Field | Behaviour |
 |---|---|
 | `model` | Accepted, ignored. The engine is fixed at startup by `STT_MODEL`; loading a second one per request does not fit the memory this runs in |
-| `prompt` | Added to the glossary's hotwords **on Whisper only**. Parakeet has no decode-time vocabulary at all, so under the default engine it does nothing |
+| `prompt` | Added to the glossary's hotwords **on Whisper only**. Parakeet has no decode-time vocabulary at all, so under the default engine it does nothing. `STT_HOTWORDS=0` drops it on both engines |
 | `temperature` | Accepted, ignored. Parakeet has no sampling temperature, and pinning one on Whisper disables its retry on low-confidence output |
 | `verbose_json` | No `segments`, and `language` echoes the request — neither engine reports segment timings or a detected language through this interface |
 | `srt`, `vtt` | One cue spanning the clip, for the same reason. True, if not very useful |
@@ -146,8 +147,23 @@ That is deliberate. This already runs on a LAN, and an upgrade that refused to
 start, or refused every request, would break a working deployment in order to
 protect it. Open is allowed; quietly open is not.
 
-`/health` is never authenticated. Container healthchecks call it and have no
-key, and requiring one turns a working service into a restart loop.
+**Set to separators alone is a different thing, and refuses to start.**
+`STT_API_KEYS=" , , "` parses to no keys at all, and announcing it as "unset"
+would report a typo as a decision — whoever wrote it wanted authentication and
+would have got none:
+
+```text
+ValueError: STT_API_KEYS=' , , ' contains separators and whitespace but no key.
+```
+
+`/health` is the only unauthenticated route. Container healthchecks call it and
+have no key, and requiring one turns a working service into a restart loop.
+
+`/openapi.json`, `/docs` and `/redoc` need the key like everything else. They
+are served by this app rather than by FastAPI's built-ins precisely so the key
+check reaches them; an unauthenticated schema is a free map of the service. In
+a browser the two pages then render empty, because the browser sends no bearer
+token when it fetches the schema — read the schema with `curl` and a key.
 
 Rejections are 401 in OpenAI's envelope, which is the shape openai-python
 reads — with FastAPI's default `{"detail": ...}` it reports "unknown error":
@@ -174,19 +190,30 @@ serves HTTPS. Leave them unset and it serves plain HTTP, as before.
 services:
   stt:
     environment:
-      STT_TLS_CERT: /etc/stt-stack/tls/fullchain.pem
-      STT_TLS_KEY: /etc/stt-stack/tls/privkey.pem
+      STT_TLS_CERT: /etc/letsencrypt/live/stt.example.net/fullchain.pem
+      STT_TLS_KEY: /etc/letsencrypt/live/stt.example.net/privkey.pem
     volumes:
-      - /etc/letsencrypt/live/stt.example.net:/etc/stt-stack/tls:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
 ```
 
-Setting only one is a configuration error rather than a fallback: the
+**Mount `/etc/letsencrypt`, not `live/<domain>`.** The files under `live` are
+relative symlinks into `../../archive/<domain>/`. Mount the `live` directory
+alone and the symlinks arrive intact with their targets left outside the
+container, where they resolve to nothing and uvicorn exits on a missing file.
+
+Setting only one variable is a configuration error rather than a fallback: the
 container says so on stderr and serves plain HTTP. Half-configured TLS that
 silently works is the failure worth shouting about.
 
+Overriding the container's `command:` with TLS configured is refused outright.
+Only uvicorn is given the certificate, so any other command would serve plain
+HTTP with the deployment believing otherwise — the same silent failure, and
+the one thing worse than being told is not being told.
+
 Both files must be readable by uid 1000, which is what the service drops to.
-A root-owned `0600` key mounted straight out of `/etc/letsencrypt` will not
-be.
+Certbot leaves `archive/` mode `0700` and the private key `0600`, both owned by
+root, so the straight mount above needs either those permissions widened or a
+deploy hook that copies the pair somewhere owned by uid 1000.
 
 **Nothing here generates a certificate.** A self-signed certificate that
 appears by magic is one every client is eventually told to stop verifying,
@@ -219,9 +246,9 @@ short clips (spontaneous corpora)  rtf 0.39 – 0.47
 
 ## Why no LLM cleanup
 
-The obvious next stage, and a trap at any size that fits beside two
-recognisers on a CPU box. Tested at 4B with an explicit prompt forbidding it,
-the cleanup stage still:
+The obvious next stage, and a trap at any size that fits beside a recogniser
+on a CPU box. Tested at 4B with an explicit prompt forbidding it, the cleanup
+stage still:
 
 - inverted meaning — "makes no sense to be available to me" became "are not
   available to me"
@@ -230,9 +257,8 @@ the cleanup stage still:
 - leaked its own reasoning into the output ("No, that's not right")
 
 Reliable adherence starts around 14B, which needs 10–20 GB of VRAM. Below
-that the raw transcript is more faithful than the cleaned one. The consensus
-pass does the useful half of the job — flagging uncertainty — without the half
-that invents confidence.
+that the raw transcript is more faithful than the cleaned one, and a faithful
+transcript is the product.
 
 ## Configuration
 
@@ -244,8 +270,7 @@ that invents confidence.
 | `STT_LANGUAGE` | unset | Leave unset if you code-switch. See below |
 | `STT_THREADS` | `4` | Must match your CPU limit. See below |
 | `STT_VAD` | `1` | Silence removal |
-| `STT_HOTWORDS` | `1` | `0` disables decode-time biasing, for A/B tests |
-| `STT_MARKER` | `<{a}\|{b}>` | Disagreement format |
+| `STT_HOTWORDS` | `1` | `0` disables decode-time biasing entirely, for A/B tests. See below |
 | `STT_GLOSSARY` | `/etc/stt-stack/glossary.txt` | See below |
 | `STT_API_KEYS` | unset | Comma-separated accepted keys. Unset means no auth |
 | `STT_TLS_CERT` | unset | PEM certificate. With `STT_TLS_KEY`, serves HTTPS |
@@ -272,7 +297,16 @@ string replacement never sees, because the wrong spelling was never in the
 list.
 
 For Brazilian Portuguese, `alefiury/parakeet-tdt-0.6b-v3-ptBR-TAGARELA-onnx`
-drops in via `STT_SECONDARY`.
+drops in via `STT_MODEL_ID`, with `STT_MODEL` left at `parakeet`.
+
+### Switching biasing off
+
+`STT_HOTWORDS=0` is absolute: no glossary hotwords, and a `prompt` sent to
+`/v1/audio/transcriptions` is dropped rather than passed to the decoder. Half
+an off switch is worse than none — a benchmark run that sets `prompt` would
+get biasing back on exactly the requests that carried one, and measure
+something other than what it thinks. Text repair is unaffected either way, and
+`/health` reports the current setting as `hotwords`.
 
 ## Language
 
@@ -287,9 +321,10 @@ spoken     Look, there is a big problem here. Small tasks and more operational..
 pinned pt  Veja, há um grande problema aqui, tarefas pequenas e mais operacionais...
 ```
 
-Parakeet is unaffected — it detects on its own and has no language argument —
-so the consensus `agreement` score collapses toward zero when this happens.
-A near-zero score on speech that clearly transcribed is the signature.
+Parakeet is unaffected — it detects on its own and takes no language argument
+— so this trap exists on the Whisper path only. Nothing in the response marks
+it: a translated transcript reads exactly like a working one, which is the
+whole problem.
 
 Override per request when you do know:
 
@@ -360,8 +395,8 @@ volumes:
   stt-models:
 ```
 
-Steady state is about 3 GB with both models loaded; 6 GB leaves room for a
-long clip without letting a runaway request take the host down.
+Steady state is about 1.4 GB on Parakeet and 2.9 GB on Whisper; 6 GB leaves
+room for a long clip without letting a runaway request take the host down.
 
 Every response carries `realtime_factor`. If it drops when you raise
 `STT_THREADS`, you have crossed the point where coordination costs more than
@@ -369,18 +404,11 @@ the extra cores return — around 8 on most hosts, earlier on older ones.
 
 ## Performance
 
-Rough figures, `int8`, both models, one 15-second clip:
-
-| Host | Wait |
-|---|---|
-| 8 modern cores | ~9 s |
-| 4 modern cores | ~15 s |
-| 4 cores, primary disabled (Parakeet only) | ~3 s |
-
-Whisper dominates the cost. `STT_SECONDARY=` alone is not the speed lever —
-`STT_PRIMARY=` cannot be emptied, so for a fast configuration set
-`STT_PRIMARY=small` or run Parakeet-class models at both ends and accept the
-loss of hotwords.
+Rough figures, `int8`, one 15-second clip on 4 modern cores: Parakeet returns
+in about 3 seconds. Whisper large-v3 runs at 0.5–0.9× realtime on the same CPU
+and dominates any wait it is part of, which is why the default engine is the
+other one. Choosing Whisper buys decode-time vocabulary and clean-read-speech
+accuracy, and costs an order of magnitude in latency.
 
 ## Licence
 

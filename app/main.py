@@ -22,6 +22,8 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 
 from fastapi import Depends, FastAPI, File, Form, UploadFile
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from . import auth, openai_api, pipeline
@@ -49,9 +51,40 @@ app = FastAPI(
     title="stt-stack",
     description="VAD, one recogniser, glossary repair. Parakeet by default.",
     lifespan=lifespan,
+    # Re-registered below, behind the key. FastAPI attaches its own three as
+    # plain Starlette routes, which no router dependency ever reaches, so with
+    # STT_API_KEYS set every real route was closed and the schema was still
+    # being handed out — a free map of the service to anything that can reach
+    # the port.
+    openapi_url=None,
+    docs_url=None,
+    redoc_url=None,
 )
 auth.install(app)
+openai_api.install(app)
 app.include_router(openai_api.router)
+
+
+@app.get("/openapi.json", include_in_schema=False,
+         dependencies=[Depends(auth.require_key)])
+def openapi() -> JSONResponse:
+    return JSONResponse(app.openapi())
+
+
+# Both pages fetch /openapi.json from the browser, which sends no bearer
+# token, so with keys configured they render empty. That is the honest
+# outcome: the schema is what needed protecting, and the page without it
+# leaks nothing.
+@app.get("/docs", include_in_schema=False,
+         dependencies=[Depends(auth.require_key)])
+def docs() -> HTMLResponse:
+    return get_swagger_ui_html(openapi_url="/openapi.json", title="stt-stack")
+
+
+@app.get("/redoc", include_in_schema=False,
+         dependencies=[Depends(auth.require_key)])
+def redoc() -> HTMLResponse:
+    return get_redoc_html(openapi_url="/openapi.json", title="stt-stack")
 
 
 class Transcript(BaseModel):

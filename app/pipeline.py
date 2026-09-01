@@ -107,9 +107,21 @@ def run(data: bytes, language: str | None = None, prompt: str | None = None) -> 
     `prompt` extends the glossary's decode-time vocabulary for this request.
     Whisper honours it; Parakeet has no mechanism for a vocabulary and
     silently cannot. See asr.py.
+
+    STT_HOTWORDS=0 outranks the prompt: with biasing switched off, a request
+    carrying one is transcribed without it.
     """
     if "asr" not in state:
         raise HTTPException(503, "model still loading")
+
+    # The off switch is absolute, not a default a request can talk its way
+    # past. The /v1 route accepts `prompt`, and joining it into the decoder's
+    # vocabulary here would hand decode-time biasing back to a run configured
+    # to measure the model without it — silently, and only on the requests
+    # that carried a prompt, which is the worst way for a benchmark to be
+    # wrong. The glossary's own hotwords are already withheld upstream.
+    if not HOTWORDS_ENABLED:
+        prompt = None
 
     samples = _decode(data)
     if samples.size == 0:
