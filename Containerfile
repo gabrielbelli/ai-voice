@@ -1,15 +1,15 @@
 # Self-hosted speech-to-text, whole stack, CPU only.
 #
-#   audio -> VAD -> primary ASR -> secondary ASR -> consensus -> glossary
+#   audio -> VAD -> recogniser -> glossary repair
 #
-# No CUDA and no torch. CTranslate2 carries Whisper, ONNX Runtime carries
-# Parakeet and Silero; together they cost a fraction of a single torch wheel,
-# and nothing in the inference path needs it.
+# One model, Parakeet by default. No CUDA and no torch: ONNX Runtime carries
+# Parakeet and Silero, CTranslate2 carries Whisper for anyone who selects it.
+# Together they cost a fraction of a single torch wheel.
 #
-# Models are NOT baked in. Together they are well over a gigabyte, they are
-# the pieces most likely to be swapped, and baking them would mean rebuilding
-# the image to change one. They download into the volume at /models on first
-# start.
+# Models are NOT baked in. They are the piece most likely to be swapped, and
+# baking one would mean rebuilding the image to change it. Whichever model is
+# selected downloads into the volume at /models on first start — Parakeet is
+# ~460 MB, Whisper large-v3 ~2.9 GB.
 #
 # Build:
 #   docker build -t stt-stack .
@@ -44,10 +44,8 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 # HF_HOME points at the volume so models survive container replacement.
 # Without it every restart re-downloads more than a gigabyte.
 ENV HF_HOME=/models \
-    STT_PRIMARY=large-v3 \
-    STT_PRIMARY_COMPUTE=int8 \
-    STT_SECONDARY=istupakov/parakeet-tdt-0.6b-v3-onnx \
-    STT_SECONDARY_QUANT=int8 \
+    STT_MODEL=parakeet \
+    STT_QUANTISATION=int8 \
     STT_GLOSSARY=/etc/stt-stack/glossary.txt \
     STT_THREADS=4 \
     STT_VAD=1 \

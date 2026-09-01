@@ -39,6 +39,13 @@ SOURCES: dict[str, list[dict]] = {
          "accent": "England English"},
         {"id": "edacc", "dataset": "edinburghcstr/edacc", "config": "default",
          "split": "test", "text_key": "text", "style": "spontaneous"},
+        # Common Voice is gated, so British read speech comes from VCTK
+        # instead — Edinburgh's corpus, filtered on its own accent field.
+        # Without it en-UK would be spontaneous-only and not comparable to
+        # the read sources the other locales have.
+        {"id": "vctk-gb", "dataset": "sanchit-gandhi/vctk", "config": "default",
+         "split": "train", "text_key": "text", "style": "read",
+         "accent": "English"},
     ],
     "pt-BR": [
         {"id": "fleurs-pt", "dataset": "google/fleurs", "config": "pt_br",

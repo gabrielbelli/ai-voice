@@ -83,9 +83,15 @@ def fetch(per_source: int, seed: int, only: list[str]) -> None:
                 if seen > per_source * 40:
                     break
                 seen += 1
+                # Corpora disagree on the field name: Common Voice uses
+                # "accents", VCTK uses "accent". Checking only one silently
+                # filters everything out and yields an empty, valid-looking
+                # manifest.
                 accent = src.get("accent")
-                if accent and accent not in (row.get("accents") or ""):
-                    continue
+                if accent:
+                    field = str(row.get("accents") or row.get("accent") or "")
+                    if accent not in field:
+                        continue
                 text = (row.get(src["text_key"]) or "").strip()
                 if not text:
                     continue
@@ -126,7 +132,8 @@ def normalise(text: str, locale: str) -> str:
 
 
 def run(url: str, label: str, conditions: list[str], limit: int | None,
-        only: list[str]) -> None:
+        only: list[str], engine: str = "http", cli: str = "",
+        vocab: str = "") -> None:
     import requests
     import soundfile as sf
     from jiwer import cer, wer
@@ -134,6 +141,14 @@ def run(url: str, label: str, conditions: list[str], limit: int | None,
     RUNS.mkdir(exist_ok=True)
     rng = np.random.default_rng(0)
     results = []
+
+    local = None
+    if engine == "parakeet":
+        from parakeet_local import ParakeetLocal
+        local = ParakeetLocal(cli, vocab or None)
+    elif engine == "whisper-local":
+        from whisper_local import WhisperLocal
+        local = WhisperLocal(threads=6, hotwords=None)
 
     for locale in sorted(SOURCES):
         if only and locale not in only:
@@ -167,9 +182,12 @@ def run(url: str, label: str, conditions: list[str], limit: int | None,
                     sf.write(buf, y, SAMPLE_RATE, format="WAV")
                     buf.seek(0)
                     try:
-                        resp = requests.post(f"{url}/transcribe",
-                                             files={"file": ("a.wav", buf, "audio/wav")},
-                                             timeout=600).json()
+                        if local is not None:
+                            resp = local.transcribe(y)
+                        else:
+                            resp = requests.post(f"{url}/transcribe",
+                                                 files={"file": ("a.wav", buf, "audio/wav")},
+                                                 timeout=600).json()
                     except Exception as exc:  # noqa: BLE001
                         print(f"    {cond}: request failed: {exc}")
                         break
@@ -240,6 +258,9 @@ if __name__ == "__main__":
                    help="subset of the degradation matrix; default all")
     r.add_argument("--limit", type=int, default=None)
     r.add_argument("--locales", nargs="*", default=[], help="e.g. pt-BR")
+    r.add_argument("--engine", choices=["http", "parakeet", "whisper-local"], default="http")
+    r.add_argument("--cli", default="", help="path to fluidaudiocli")
+    r.add_argument("--vocab", default="", help="custom vocab json for parakeet")
 
     p = sub.add_parser("report")
     p.add_argument("labels", nargs="*")
@@ -248,6 +269,7 @@ if __name__ == "__main__":
     if a.cmd == "fetch":
         fetch(a.per_source, a.seed, a.locales)
     elif a.cmd == "run":
-        run(a.url, a.label, a.conditions, a.limit, a.locales)
+        run(a.url, a.label, a.conditions, a.limit, a.locales,
+            a.engine, a.cli, a.vocab)
     else:
         report(a.labels)

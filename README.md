@@ -4,17 +4,32 @@ Self-hosted speech-to-text. One container, whole pipeline, CPU only.
 
 ```text
 audio
-  ↓  VAD              Silero — drop silence before either model sees it
-  ↓  primary ASR      Whisper large-v3, CTranslate2, hotwords from the glossary
-  ↓  secondary ASR    Parakeet TDT 0.6B v3, ONNX Runtime
-  ↓  consensus        mark where the two disagree
-  ↓  glossary         repair known terms
+  ↓  VAD          Silero — drop silence first
+  ↓  recogniser   Parakeet TDT 0.6B v3 by default, Whisper large-v3 on request
+  ↓  glossary     repair known terms
 text
 ```
 
-No CUDA, no torch. Models swap by environment variable. The stages are
-separable on purpose — splitting them into services later means moving each
-module behind a socket, not restructuring the pipeline.
+No CUDA, no torch. One model at a time, chosen by `STT_MODEL`.
+
+## Which model
+
+**Parakeet is the default.** Measured across 25 conditions and five Brazilian
+Portuguese corpora on identical audio:
+
+| Engine | pt-BR WER | English WER | rtf | RAM | Disk |
+|---|---|---|---|---|---|
+| **Parakeet TDT 0.6B v3** | **0.144** | **0.121** | **47–63×** | 1.4 GB | 461 MB |
+| Whisper large-v3 | 0.250 | 0.131 | 0.5–0.9× | 2.9 GB | 2.9 GB |
+
+Parakeet won 21 of 25 conditions at roughly seventy times the speed. It also
+degrades far more gracefully — band-limiting to 4 kHz, which is what a cheap
+or distant microphone does, cost Whisper +206% WER on CORAA and Parakeet +41%.
+
+**Whisper is worth choosing** for clean read speech, where it genuinely leads,
+and when you need decode-time vocabulary: it accepts `hotwords`, Parakeet does
+not. For Parakeet the glossary is post-decode repair only, which is weaker —
+it cannot recover a word the acoustic model never approached.
 
 ## Status
 
@@ -54,16 +69,24 @@ Audio must be **16 kHz mono**. Anything else is rejected rather than resampled
 in-process, so a client sending 44.1 kHz finds out immediately instead of
 quietly getting worse transcripts.
 
-## Why two models
+## Why there is no second model
 
-They fail differently. Two Whispers agree on their own mistakes; Whisper and
-Parakeet do not, and where they disagree is almost always a proper noun, an
-acronym or a piece of jargon — exactly the words worth doubting.
+A consensus pass was built, measured, and removed. The idea was that two
+models failing differently would flag the words worth doubting.
 
-`text` is the primary transcript with those spans marked `<primary|secondary>`.
-The secondary model never replaces a word. It casts doubt on one.
+In practice, across every disagreement observed, **the second model was the
+wrong one**. Not once did it catch a real error. A second opinion only informs
+when it is roughly as good as the first; when it is reliably worse, its
+dissent reduces to "the weaker model is wrong again" — noise, at about 40% of
+throughput.
 
-Set `STT_SECONDARY=` (empty) to run primary-only on a host too small for both.
+The cost landed worst where it mattered. On short clips, which is what
+dictation consists of, fixed per-request cost dominates:
+
+```text
+long clips (read corpora)          rtf 1.26 – 1.60
+short clips (spontaneous corpora)  rtf 0.39 – 0.47
+```
 
 ## Why no LLM cleanup
 
@@ -86,9 +109,9 @@ that invents confidence.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `STT_PRIMARY` | `large-v3` | Any faster-whisper model |
-| `STT_PRIMARY_COMPUTE` | `int8` | `int8`, `int8_float32`, `float32` |
-| `STT_SECONDARY` | `istupakov/parakeet-tdt-0.6b-v3-onnx` | Empty disables consensus |
+| `STT_MODEL` | `parakeet` | `parakeet` or `whisper` |
+| `STT_MODEL_ID` | model default | Override the specific checkpoint |
+| `STT_QUANTISATION` | `int8` | Whisper also takes `int8_float32`, `float32` |
 | `STT_LANGUAGE` | unset | Leave unset if you code-switch. See below |
 | `STT_THREADS` | `4` | Must match your CPU limit. See below |
 | `STT_VAD` | `1` | Silence removal |
