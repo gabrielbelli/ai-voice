@@ -1,0 +1,5 @@
+models/
+*.wav
+*.opus
+__pycache__/
+.venv/
