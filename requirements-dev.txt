@@ -1,0 +1,4 @@
+# Test-only. Never installed into the image — see the Containerfile.
+-r requirements.txt
+pytest==8.4.2
+pytest-asyncio==1.2.0
