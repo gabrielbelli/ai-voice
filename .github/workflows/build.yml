@@ -32,17 +32,27 @@ jobs:
         with:
           python-version: '3.12'
 
+      # ffmpeg for the three lossy formats. The encoder tests skip without it
+      # and the suite still passes, but skipping the format the schema
+      # DEFAULTS to would leave the most-used path unasserted in CI.
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
       # Not `-r requirements.txt`: chatterbox and the CPU torch wheel are
       # gigabytes and nothing asserted below imports either. app.synth imports
       # them lazily, inside _ensure_loaded, precisely so this is possible.
+      # uvicorn is here for one test and one test only — the streaming one
+      # measures time-to-first-byte, which needs a real socket because
+      # TestClient runs the application to completion before it answers.
       - name: Install what the suite actually imports
         run: |
           pip install pytest \
             "$(grep '^voice-common' requirements.txt | sed 's/\[audio\]/[audio,conformance]/')" \
             "$(grep '^fastapi==' requirements.txt)" \
-            "$(grep '^soundfile==' requirements.txt)"
+            "$(grep '^soundfile==' requirements.txt)" \
+            "$(grep '^uvicorn' requirements.txt)"
 
-      - name: Run the shared conformance suite
+      - name: Run the suite
         run: python -m pytest tests -v
 
   build:

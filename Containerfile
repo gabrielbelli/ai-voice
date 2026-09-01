@@ -29,10 +29,21 @@ FROM python:3.12-slim-trixie
 # libgomp1 supplies libgomp.so.1, the OpenMP runtime torch links against. The
 # amd64 wheels vendor their own copy and the arm64 ones do not, so without this
 # the image builds cleanly on both and then fails to import torch on arm64.
+#
+# ffmpeg is here for mp3, opus and aac — three of OpenAI's six formats, one of
+# which is the schema's DEFAULT. Refusing them used to be justified as keeping
+# an encoder out of an image that already carries torch, but the arithmetic
+# does not survive being written down: ffmpeg is around a hundred megabytes
+# against torch's several gigabytes, and without it a caller who simply omits
+# response_format is silently handed wav. tts-stack already carries it, with
+# the same bitrates. It is also what makes a streamed mp3 byte-identical to
+# the buffered one, which wav cannot be.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libsndfile1 libgomp1 util-linux \
+ && apt-get install -y --no-install-recommends \
+      libsndfile1 libgomp1 util-linux ffmpeg \
  && rm -rf /var/lib/apt/lists/* \
- && command -v setpriv
+ && command -v setpriv \
+ && command -v ffmpeg
 
 WORKDIR /srv
 
