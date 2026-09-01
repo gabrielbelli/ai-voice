@@ -1,6 +1,6 @@
 # Kokoro text-to-speech, CPU only.
 #
-#   text or segments -> phonemise -> Kokoro -> wav/opus
+#   text or segments -> phonemise -> Kokoro -> wav, opus, mp3, aac, flac, pcm
 #
 # No CUDA and no torch. Kokoro is 82M parameters on ONNX Runtime, so the whole
 # image lands around 400 MB — a torch wheel alone would be several times that,
@@ -14,6 +14,16 @@
 #
 # Run:
 #   docker run -p 8001:8001 -v tts-models:/models --cpus 4 -e TTS_THREADS=4 tts-stack
+#
+# Run with authentication and TLS:
+#   docker run -p 8001:8001 -v tts-models:/models -v /etc/tts-certs:/certs:ro \
+#     -e TTS_API_KEYS=key-one,key-two \
+#     -e TTS_TLS_CERT=/certs/fullchain.pem -e TTS_TLS_KEY=/certs/privkey.pem \
+#     tts-stack
+#
+# Both are off when their variables are unset, which is how the service shipped
+# and how it stays on upgrade. The key file must be readable by uid 1000; the
+# entrypoint checks that and refuses to start rather than falling back to HTTP.
 
 FROM python:3.13-slim-trixie
 

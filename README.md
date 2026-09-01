@@ -3,10 +3,11 @@
 Self-hosted text-to-speech. Kokoro, CPU only, no torch.
 
 ```text
-text or segments
+text or segments  →  /speak             native: pauses, realtime factor
+text              →  /v1/audio/speech   OpenAI's shape
   ↓  espeak-ng    phonemise
   ↓  Kokoro-82M   ONNX Runtime, CPU
-  ↓  wav or opus
+  ↓  wav  opus  mp3  aac  flac  pcm
 ```
 
 Sibling of [stt-stack](https://github.com/gabrielbelli/stt-stack), same
@@ -84,6 +85,176 @@ For explanations, the lower and calmer voices work better than the bright
 defaults — `bm_george`, `am_onyx`. Slowing slightly (`"speed": 0.95`) reads as
 deliberate rather than performed.
 
+## OpenAI-compatible API
+
+`POST /v1/audio/speech` accepts OpenAI's body, so anything already written
+against `api.openai.com` reaches this service by changing a base URL.
+
+```bash
+curl -X POST localhost:8001/v1/audio/speech \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer sk-your-key' \
+  -d '{"model":"tts-1","input":"Here is the change to make.","voice":"fable","response_format":"mp3"}' \
+  --output out.mp3
+```
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8001/v1", api_key="sk-your-key")
+
+response = client.audio.speech.create(
+    model="tts-1",
+    voice="fable",
+    input="Here is the change to make.",
+    response_format="mp3",
+)
+response.write_to_file("out.mp3")
+```
+
+`api_key` is required by the client library even when this service accepts
+anything; send any non-empty string when authentication is off.
+
+| Field | Handling |
+|---|---|
+| `model` | Accepted and ignored — there is one model here. Rejecting `tts-1` would break every client that sends it; claiming to honour it would be a lie |
+| `input` | Required |
+| `voice` | The six OpenAI names, **or** any of the 54 Kokoro names. Optional, unlike upstream: `TTS_VOICE` answers when it is absent |
+| `response_format` | `mp3` (default), `opus`, `aac`, `flac`, `wav`, `pcm`. `pcm` is headerless 24 kHz 16-bit mono, which is Kokoro's own rate — nothing is resampled |
+| `speed` | Accepted across OpenAI's 0.25–4.0 and **clamped to 0.5–2.0**, where Kokoro's duration predictor still tracks punctuation. A client asking for 4.0 wants fast speech, not a 400 it cannot act on |
+
+Errors come back in OpenAI's envelope, `{"error": {"message", "type", "code"}}`,
+because `openai-python` reads `error.message` and renders FastAPI's
+`{"detail": …}` as a bare status code. The native routes keep FastAPI's shape:
+clients are already written against it.
+
+### Which route to prefer
+
+**`/speak`, unless a client you do not control is asking for the other one.**
+
+| | `/speak` | `/v1/audio/speech` |
+|---|---|---|
+| Segments with pauses | yes | no field for it |
+| Per-segment voice | yes | no |
+| `language` override | yes | inferred from the voice |
+| `X-Realtime-Factor` | yes | sent, but clients ignore it |
+| Speed range | 0.5–2.0, rejected outside | 0.25–4.0, clamped |
+
+The OpenAI body cannot express a pause, and pauses are the thing that makes
+audio sound like instructions rather than narration. `/v1/audio/speech` is a
+translation layer over the same synthesiser, not a second interface.
+
+### Voice names
+
+The five names Kokoro borrowed from OpenAI map straight through. `shimmer` has
+no counterpart in the model, so that row is mapped by ear and is the only
+judgement call in the table.
+
+| OpenAI | Kokoro | |
+|---|---|---|
+| `alloy` | `af_alloy` | en-US |
+| `echo` | `am_echo` | en-US |
+| `fable` | `bm_fable` | en-GB |
+| `onyx` | `am_onyx` | en-US |
+| `nova` | `af_nova` | en-US |
+| `shimmer` | `af_bella` | en-US, mapped by ear |
+
+Native Kokoro names take precedence, so `af_nova` reaches `af_nova` whatever
+the table says, and `GET /voices` returns the live table under
+`openai_aliases`.
+
+The phonemiser language is inferred from the voice prefix, because OpenAI's
+body has no language field — asking for `fable` and getting a British voice
+read as American would be worse than inferring. `/speak` still takes an
+explicit `language`.
+
+## Authentication
+
+Off by default. Set `TTS_API_KEYS` to a comma-separated list to turn it on:
+
+```bash
+docker run -p 8001:8001 -v tts-models:/models \
+  -e TTS_API_KEYS=sk-workstation,sk-laptop \
+  ghcr.io/gabrielbelli/tts-stack:pre
+```
+
+```bash
+curl -X POST localhost:8001/speak \
+  -H 'authorization: Bearer sk-workstation' \
+  -H 'content-type: application/json' \
+  -d '{"text":"Authenticated."}' --output out.wav
+```
+
+- **Unset or empty means every request is accepted**, and the service says so
+  at `WARNING` on every start. It neither refuses to boot nor runs open in
+  silence. This service already runs on a LAN with no keys anywhere, and an
+  upgrade that starts rejecting every existing caller is a worse outage than a
+  warning nobody reads.
+- One list, no per-key identity or scopes. Rotation is: add the new key, move
+  the callers, drop the old one.
+- Keys are compared with `hmac.compare_digest` against every configured key,
+  with no early exit on a match. `==` returns at the first differing byte and
+  leaks the matching prefix; stopping at the match would leak how far down the
+  list a valid key sits.
+- **`/health` is never authenticated.** Container healthchecks have no key and
+  no way to be given one. Everything else needs one, `/docs` and
+  `/openapi.json` included.
+- Enforcement is middleware, not a per-route dependency, so a route added later
+  is protected without anyone remembering to ask.
+
+A rejected request gets `401` in OpenAI's envelope:
+
+```json
+{"error": {"message": "Incorrect API key provided. Send it as 'Authorization: Bearer <key>'.",
+           "type": "invalid_request_error",
+           "code": "invalid_api_key"}}
+```
+
+That envelope is used on the native routes too, unlike every other error. A
+rejection happens before routing, so there is no route yet whose conventions
+it could follow, and the client most likely to be turned away is the one that
+only reads `error.message`.
+
+## TLS
+
+Off by default. Set both `TTS_TLS_CERT` and `TTS_TLS_KEY` to PEM paths and
+uvicorn serves HTTPS on the same port:
+
+```bash
+docker run -p 8001:8001 -v tts-models:/models \
+  -v /etc/letsencrypt/live/tts.example.net:/certs:ro \
+  -e TTS_TLS_CERT=/certs/fullchain.pem \
+  -e TTS_TLS_KEY=/certs/privkey.pem \
+  -e TTS_API_KEYS=sk-workstation \
+  ghcr.io/gabrielbelli/tts-stack:pre
+```
+
+> **No self-signed certificate is ever generated.** A certificate that appears
+> by magic is one nobody validates, and a client taught to skip verification
+> keeps skipping it against the real certificate too. Bring a real one, or
+> terminate TLS at a reverse proxy and leave this service on plain HTTP behind
+> it.
+
+What the entrypoint does with the pair, before it drops privileges:
+
+| Situation | Result |
+|---|---|
+| Only one of the two variables set | Exits. Half a configuration must not become a silent downgrade to plain HTTP |
+| Either file unreadable **by uid 1000** | Exits with the path. Readability is tested as the user that will open the file, not as root — a key mounted `0600 root:root` reads fine for the entrypoint and not at all for uvicorn |
+| Both set and readable | Appends `--ssl-certfile` and `--ssl-keyfile` to whatever command was given |
+
+The flags are appended to the command rather than read in Python, so an
+overridden `CMD` still gets TLS. Running uvicorn directly, outside the
+container, the environment variables do nothing — pass the flags yourself:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8001 \
+  --ssl-certfile /certs/fullchain.pem --ssl-keyfile /certs/privkey.pem
+```
+
+Certificate renewal is the host's business. uvicorn reads the PEM files once at
+start, so a renewed certificate needs a container restart.
+
 ## Configuration
 
 | Variable | Default | Notes |
@@ -92,6 +263,9 @@ deliberate rather than performed.
 | `TTS_LANGUAGE` | `en-us` | `en-us`, `en-gb`, `pt-br`, … |
 | `TTS_THREADS` | `4` | Must match your CPU limit — see below |
 | `TTS_MODEL_DIR` | `/models` | Volume for weights |
+| `TTS_API_KEYS` | unset | Comma-separated accepted keys. Unset means no authentication |
+| `TTS_TLS_CERT` | unset | PEM certificate chain. Both TLS variables or neither |
+| `TTS_TLS_KEY` | unset | PEM private key, readable by uid 1000 |
 
 ## Limiting CPU use
 
