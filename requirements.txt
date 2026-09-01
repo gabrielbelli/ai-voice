@@ -1,0 +1,11 @@
+# CPU only. No torch.
+#
+# Kokoro is 82M parameters and runs on ONNX Runtime, so the whole image stays
+# under half a gigabyte. A torch-based alternative would cost more in wheels
+# alone than this ships in total.
+kokoro-onnx==0.4.9
+onnxruntime==1.24.1
+fastapi==0.121.2
+uvicorn[standard]==0.38.0
+soundfile==0.13.1
+numpy==2.3.4
