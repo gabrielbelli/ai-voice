@@ -199,8 +199,18 @@ def _job_chars(job: dict) -> int:
 
 
 def _backlog_seconds() -> float:
-    """Estimated compute already accepted and not yet finished."""
-    return sum(_compute_seconds(_job_chars(job)) for job in jobs.values()
+    """Estimated compute already accepted and not yet finished.
+
+    Over a `list()` snapshot, and so is every other walk of `jobs` below. The
+    dict is read from the event loop and from AnyIO's thread pool — every sync
+    route runs there — while DELETE pops from it and the sweeper pops from it,
+    and a plain `.values()` iteration that is interrupted by a pop raises
+    RuntimeError: dictionary changed size during iteration. That would be a 500
+    on /v1/audio/speech caused by an unrelated DELETE landing in the same
+    millisecond. Building the list is one C-level call and cannot be
+    interrupted part way.
+    """
+    return sum(_compute_seconds(_job_chars(job)) for job in list(jobs.values())
                if job["status"] in {"queued", "running"})
 
 
@@ -428,7 +438,7 @@ def _health() -> dict[str, object]:
         "threads": THREADS,
         "queued": queue.qsize(),
         "queue_capacity": MAX_QUEUE,
-        "running": sum(1 for j in jobs.values() if j["status"] == "running"),
+        "running": sum(1 for j in list(jobs.values()) if j["status"] == "running"),
         "realtime_factor": round(rate.value, 3),
     }
 
@@ -536,14 +546,22 @@ def _segments(text: str | None,
 
 
 def _public(job: dict) -> dict:
-    return {k: v for k, v in job.items()
+    """The job as /jobs reports it, over a snapshot for the reason above.
+
+    `dict(job)` rather than `job.items()`: the worker thread ADDS keys to a
+    running job — started_at, then path and the timings — so a comprehension
+    over the live dict can be interrupted mid-walk by the job it is reporting
+    on finishing, which is a 500 on GET /jobs/<id> at the exact moment a caller
+    is most likely to be polling it.
+    """
+    return {k: v for k, v in dict(job).items()
             if k not in {"segments", "text", "stream", "reference"}}
 
 
 @app.get("/jobs")
 def list_jobs() -> dict[str, object]:
-    return {"jobs": [_public(j) for j in
-                     sorted(jobs.values(), key=lambda j: -j["created_at"])[:50]]}
+    recent = sorted(list(jobs.values()), key=lambda j: -j["created_at"])[:50]
+    return {"jobs": [_public(j) for j in recent]}
 
 
 @app.get("/jobs/{job_id}")
@@ -615,13 +633,20 @@ def list_voices() -> dict[str, object]:
 # to prefer for batch work, for the reasons in the module docstring.
 
 
-class VoiceRef(BaseModel):
+class CustomVoice(BaseModel):
     """OpenAI's custom-voice object: `{"id": "voice_1234"}`.
 
     The schema's VoiceIdsOrCustomVoice is anyOf[string, {id: string}] and
     openai-python's `Voice` alias includes it. It was rejected here with
     "voice: Input should be a valid string" — including for the minimal SDK
     call, which sends exactly this form.
+
+    Declared as a model rather than unwrapped by a validator so that this
+    service's own /openapi.json keeps the anyOf, which is what a generated
+    client reads to learn the object form is accepted. The name is visible on
+    the wire — pydantic tags a failed union branch with the class name, and
+    app/envelope.py puts that tag in the message — so it is OpenAI's word for
+    the shape rather than an internal one.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -658,7 +683,7 @@ class SpeechRequest(OpenAISpeechRequest):
     input: str = Field(min_length=1, max_length=MAX_INPUT_CHARS)
     # str or {"id": ...}; resolved against app/voices.py, which is also what
     # decides whether an unknown name is a 400.
-    voice: str | VoiceRef | None = None
+    voice: str | CustomVoice | None = None
     # OpenAI's default, and now this service's, because the image carries an
     # encoder for it. It used to default to wav while an EXPLICIT mp3 was
     # refused with a 400 — so a caller who omitted the field believing it had
@@ -729,7 +754,7 @@ def _validate(req: SpeechRequest) -> tuple[str, str | None] | JSONResponse:
                  f"{', '.join(SUPPORTED_LANGUAGES)}.",
             code="unsupported_value", param="language")
 
-    requested = req.voice.id if isinstance(req.voice, VoiceRef) else req.voice
+    requested = req.voice.id if isinstance(req.voice, CustomVoice) else req.voice
     resolved = VOICES.resolve(requested)
     if resolved is None:
         return error_response(

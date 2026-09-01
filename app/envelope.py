@@ -69,6 +69,56 @@ _VALIDATION_CODES = {
     "extra_forbidden": "unknown_parameter",
 }
 
+# The scalar names pydantic uses to tag a union branch in `loc`. A branch that
+# is a model is tagged with the model's class name instead, which is why
+# `_is_branch_tag` also accepts anything carrying an uppercase letter: every
+# field name in an OpenAI body is lower-case snake_case, and every pydantic
+# model in this service is CamelCase, so the two sets cannot collide.
+_SCALAR_TAGS = frozenset({"str", "int", "float", "bool", "bytes", "none",
+                          "list", "dict", "tuple", "set", "literal"})
+
+
+def _is_branch_tag(part: object) -> bool:
+    return isinstance(part, str) and (part in _SCALAR_TAGS or part.lower() != part)
+
+
+def _union_branches(errors: list[dict]) -> tuple[str, list[str]] | None:
+    """(field, one message per branch) if `errors` are a union's, else None.
+
+    A field declared as a union of shapes is reported by pydantic as ONE ERROR
+    PER BRANCH, each carrying the branch's type name as an extra `loc` element:
+    `voice` given `{"id": "x", "typo": 1}` produces `("body", "voice", "str")`
+    and `("body", "voice", "CustomVoice", "typo")`. Reading the first error the
+    way every other case is read named the parameter `voice.str`, which is not
+    a parameter and is not something a client can act on — so the branches are
+    collapsed back onto the field they all belong to, and every branch's
+    complaint is kept, because a caller who mistyped a key inside the object
+    needs to be told about the object form and not only about the string one.
+    """
+    first = errors[0]["loc"]
+    depth = next((i for i, part in enumerate(first) if _is_branch_tag(part)), None)
+    if depth is None or depth < 2:
+        # depth 0 is "body" and depth 1 is the field itself; a tag can only
+        # appear after the field it belongs to.
+        return None
+    prefix = tuple(first[:depth])
+    branch_errors = [e for e in errors
+                     if tuple(e["loc"][:depth]) == prefix
+                     and len(e["loc"]) > depth and _is_branch_tag(e["loc"][depth])]
+    if len(branch_errors) < 2:
+        return None
+
+    field = ".".join(str(part) for part in prefix[1:])
+    messages: list[str] = []
+    for error in branch_errors:
+        # Anything past the tag is a path INSIDE that branch — `typo` for the
+        # extra key above — and naming it is what makes the message actionable.
+        inside = ".".join(str(part) for part in error["loc"][depth + 1:])
+        message = f"{inside}: {error['msg']}" if inside else error["msg"]
+        if message not in messages:
+            messages.append(message)
+    return field, messages
+
 
 def error_response(status: int, message: str, *,
                    type_: str = "invalid_request_error",
@@ -157,6 +207,21 @@ def install_openai_errors(app: FastAPI) -> None:
 
         # loc[0] is always "body"; the rest names the field, with ints for
         # list indices — segments.0.text.
+        branches = _union_branches(errors)
+        if branches:
+            # A field declared as a union of shapes — `voice`, which OpenAI's
+            # VoiceIdsOrCustomVoice makes anyOf[string, {id}]. pydantic reports
+            # ONE ERROR PER BRANCH, each with the branch's type name appended to
+            # loc, so the naive first-error reading produced `param: "voice.str"`
+            # — which is not a parameter and is not something a client can act
+            # on. The field is the common prefix; the message is every branch's
+            # complaint, so a caller who sent {"id": "x", "typo": 1} is told
+            # about both forms rather than only about the string one.
+            field, messages = branches
+            return error_response(
+                400, f"{field}: " + " or ".join(messages),
+                code="invalid_value", param=field)
+
         field = ".".join(str(part) for part in first["loc"][1:]) or None
         if first["type"] == "extra_forbidden":
             # Worded as OpenAI words it, because a client that greps its own
