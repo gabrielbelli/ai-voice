@@ -40,7 +40,12 @@ COPY app/ ./app/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # HF_HOME on the volume so the ~3 GB of weights survive container replacement.
-ENV HF_HOME=/models \
+# librosa pulls numba, which JIT-compiles on first use and caches the result
+# next to its own installed source — read-only for a non-root user, so the
+# first job dies with "no locator available for file .../librosa/...". Point
+# the cache somewhere writable instead.
+ENV NUMBA_CACHE_DIR=/tmp/numba \
+    HF_HOME=/models \
     TTS_OUTPUT_DIR=/output \
     TTS_THREADS=8 \
     TTS_IDLE_TIMEOUT=600 \
