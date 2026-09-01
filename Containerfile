@@ -23,8 +23,11 @@
 # interpreter keeps a transitive import from deciding this for us.
 FROM python:3.12-slim-trixie
 
+# libgomp1 supplies libgomp.so.1, the OpenMP runtime torch links against. The
+# amd64 wheels vendor their own copy and the arm64 ones do not, so without this
+# the image builds cleanly on both and then fails to import torch on arm64.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libsndfile1 util-linux \
+ && apt-get install -y --no-install-recommends libsndfile1 libgomp1 util-linux \
  && rm -rf /var/lib/apt/lists/* \
  && command -v setpriv
 
