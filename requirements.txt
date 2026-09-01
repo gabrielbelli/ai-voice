@@ -11,4 +11,5 @@ setuptools>=75
 fastapi==0.121.2
 uvicorn[standard]==0.38.0
 soundfile==0.13.1
-numpy==2.3.4
+# numpy is deliberately unpinned. chatterbox-tts requires numpy<2 on Python
+# 3.12, and pinning a 2.x here makes the resolve impossible. Let it choose.
