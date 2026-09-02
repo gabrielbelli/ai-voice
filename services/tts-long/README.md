@@ -456,12 +456,16 @@ pip install './packages/common[audio,conformance]' fastapi soundfile 'uvicorn[st
 cd services/tts-long && python -m pytest tests
 ```
 
-One thing that should live in `packages/common` and did not: `app/envelope.py`,
-which is `voice_common.errors` plus the `param` field OpenAI's schema requires
-and the 404/405/500 handlers it has no equivalent of. What stopped it was the
-pin — a commit SHA on a GitHub tarball cannot name a commit that has not been
-published. **There is no pin now**, so the only thing left between here and
-there is doing it, tests included.
+`app/envelope.py` is gone. It was `voice_common.errors` plus the `param` field
+OpenAI's schema requires and the 404/405/500 handlers the shared package had no
+equivalent of, and it was here rather than upstream only because of the pin — a
+commit SHA on a GitHub tarball cannot name a commit that has not been
+published. There is no pin now, so all of it moved up, tests included. It was
+the best of the three vendored copies and it is the one the shared code was
+built from: the union-branch collapse, the `extra_forbidden` wording, the 500
+handler and the `.items()` that keeps a 405's `Allow` header all came from
+here. Measured on the wire before and after, **this service emits byte-identical
+errors** — the change was entirely to the other three.
 
 What stays here is what is actually this service's: the job queue, the
 streaming path, the chunker that works around the model's 40-second ceiling,

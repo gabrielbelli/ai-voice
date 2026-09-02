@@ -54,13 +54,19 @@ RUN apt-get update \
 
 WORKDIR /srv
 
-# Repo-relative, because the context is the repository root. This is the one
-# service that does NOT copy packages/common: it depends on none of it — no
-# auth module, no error envelope, no health contract, and its own entrypoint.sh
-# below rather than voice-entrypoint.sh, because it has no TLS and no volume to
-# take ownership of. Adopting the shared package here is a real change with a
-# real argument behind it, and not one to make silently while moving a build
-# context.
+# Repo-relative, because the context is the repository root. This service used
+# to be the one that did NOT copy packages/common, on the grounds that it
+# depended on none of it. That was true of the auth module (it has its own, and
+# its own env var) and of the health contract (it fans out to three backends
+# rather than reporting on itself), and it is still true of the entrypoint —
+# entrypoint.sh below rather than voice-entrypoint.sh, because there is no TLS
+# and no volume to take ownership of here.
+#
+# It was never true of the error envelope. This service had a fourth
+# hand-written copy of it, three keys where the schema requires four, and it is
+# the process an OpenAI SDK client actually talks to. So the package comes in
+# for that one module, and pip resolves `./packages/common` from /srv.
+COPY packages/common/ ./packages/common/
 COPY services/gateway/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 

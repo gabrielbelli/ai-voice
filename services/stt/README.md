@@ -610,16 +610,19 @@ One repository removes that gap: the commit is the pin. What keeps it honest is
 app this service actually builds, so a bad change to the shared code fails in
 CI rather than in production.
 
-`app/errors.py` exists because of the old pin. The specification requires
-`param` on every error and an envelope on 404 and 405, and `voice_common.errors`
-emits neither, so this service completes the envelope on its own — over the
-shared code rather than instead of it. **The reason it could not simply be
-moved is now gone**: a pin cannot name a commit that has not been published,
-and there is no pin any more. Merging it into `voice_common.errors` is a
-follow-up with no blocker left, not a constraint. `tests/test_parity.py`
-asserts the result, along with every other field on the compatible surface,
-against a recogniser that is not a model, so CI runs all of it without
-downloading 460 MB.
+`app/errors.py` is gone, and it existed because of the old pin. The
+specification requires `param` on every error and an envelope on 404 and 405,
+`voice_common.errors` emitted neither, and a pin cannot name a commit that has
+not been published — so this service completed the envelope on its own. All of
+it is upstream now. Two things this service used to answer changed with the
+move, both under `/v1` and both because the three copies had disagreed: a 405
+now reads `Invalid URL (GET …)` rather than `Invalid method (GET …)`, which is
+the wording the other two chose and the one the real API sends, and it carries
+`code: "method_not_allowed"` where it used to carry null — a 404 and a 405 now
+share a message shape, so `code` is what tells them apart.
+`tests/test_parity.py` asserts the result, along with every other field on the
+compatible surface, against a recogniser that is not a model, so CI runs all of
+it without downloading 460 MB.
 
 Install from the repository root — pip resolves `./packages/common` against the
 working directory — and run pytest from here, because `import app.main` needs

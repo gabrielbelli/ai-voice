@@ -75,17 +75,24 @@ from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFil
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
+from voice_common.errors import ApiError
+
 from . import asr, languages, pipeline
-from .errors import (
-    CODE_INVALID,
-    CODE_MISSING,
-    CODE_UNKNOWN_PARAM,
-    CODE_UNSUPPORTED_PARAM,
-    CODE_UNSUPPORTED_VALUE,
-    ApiError,
-)
 
 log = logging.getLogger("stt-stack.openai")
+
+# Codes openai-python surfaces as `.code`. Every one used here is a code the
+# real API sends, so a client can branch on the same strings against both.
+# They live in this file rather than in voice_common because they are the
+# vocabulary of the by-hand validation below — the transcription body is
+# multipart, not a pydantic model, so nothing upstream chooses these; the two
+# the shared validation handler picks for itself (missing, invalid) are
+# repeated here because this file emits them directly.
+CODE_MISSING = "missing_required_parameter"
+CODE_INVALID = "invalid_value"
+CODE_UNKNOWN_PARAM = "unknown_parameter"
+CODE_UNSUPPORTED_PARAM = "unsupported_parameter"
+CODE_UNSUPPORTED_VALUE = "unsupported_value"
 
 FORMATS = ("json", "text", "verbose_json", "srt", "vtt")
 TRANSLATION_FORMATS = ("json", "text", "verbose_json", "srt", "vtt")

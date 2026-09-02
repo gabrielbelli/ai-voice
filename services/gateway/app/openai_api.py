@@ -1,13 +1,20 @@
-"""The OpenAI shape: the error envelope, and the model list the router advertises.
+"""The model list this router advertises, and nothing else.
 
-Two things live here, and they are the same thing seen twice.
+The error envelope used to live here too, as a fourth hand-written copy of a
+shape three other services already shared. It is `voice_common.errors` now.
+Two things were wrong with the copy and both were on the wire: it built three
+keys where OpenAI's schema requires four — `param` is required-but-nullable and
+was absent from every error this gateway had ever emitted — and its
+`error_response(status, message, type_, code)` took the two strings
+POSITIONALLY, which is the exact mistake the shared function is keyword-only to
+prevent. Two sibling repos had already swapped that pair; this was the last
+place in the estate where the swap could still be written.
 
-The envelope is the shape every error leaves this service in, `/v1` or not.
-openai-python reads `error.message` and shows it to the caller; FastAPI's own
-`{"detail": ...}` reaches it as an unparsed body and surfaces as a bare status
-code. The three backends already emit this envelope under `/v1`, so a gateway
-that wrapped their answers in a different one would be a second, lying source
-of truth — see the governing rule in main.py.
+The envelope remains the shape every error leaves this service in, `/v1` or
+not, which is this service's own older decision and not the backends': a
+gateway-side failure happens before or instead of routing, so there is no
+backend whose conventions it could follow. main.py carries the boundary the
+shared handlers draw and the one place this service stays on its own side of it.
 
 `MODELS` is the only content this service invents. It exists because the
 `model` string is the routing key (main.py: `LONG_MODELS`) and a client needs
@@ -17,14 +24,11 @@ a property of the routing contract, not of any backend's state, and a service
 that could not tell you its own routing table while a backend was restarting
 would be answering the wrong question.
 
-Kept next to the envelope so the one thing that must not drift — an advertised
-name that routes somewhere the table does not claim — drifts in one file.
-tests/test_gateway.py asserts the two agree.
+The one thing that must not drift — an advertised name that routes somewhere
+the table does not claim — is asserted by tests/test_gateway.py.
 """
 
 from __future__ import annotations
-
-from fastapi.responses import JSONResponse
 
 # OpenAI's model object requires `created`, and nothing here has a creation
 # date: the entries are routing keys, not artefacts. This is the date the
@@ -57,20 +61,3 @@ MODELS: tuple[dict[str, object], ...] = (
 )
 
 MODEL_LIST: dict[str, object] = {"object": "list", "data": list(MODELS)}
-
-
-def error_response(status: int, message: str, type_: str, code: str,
-                   headers: dict[str, str] | None = None) -> JSONResponse:
-    """An error in OpenAI's envelope.
-
-    Used on the native routes too, unlike the backends, which keep FastAPI's
-    `{"detail": ...}` there. A gateway-side failure happens before or instead
-    of routing, so there is no backend whose conventions it could follow, and
-    the client most likely to be turned away is the one that reads only
-    `error.message`.
-    """
-    return JSONResponse(status_code=status,
-                        content={"error": {"message": message,
-                                           "type": type_,
-                                           "code": code}},
-                        headers=headers)

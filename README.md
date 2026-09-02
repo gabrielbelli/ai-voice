@@ -18,7 +18,7 @@ share, one repository, deployed as a single app behind one published port.
   /v1/models              ├─ answered at the gateway
   /health                 └─ all three, fanned out, no key required
 
-  packages/common            the wire contract all three backends import
+  packages/common            the wire contract all four services import
 ```
 
 Every service keeps its own README, and those are the reference: what each
@@ -62,6 +62,26 @@ sit at different revisions, and nothing in a single commit could say so.
 Here the commit is the pin. `packages/common` is a **path dependency**, every
 service installs it from the working tree, and a change to it is one commit and
 one CI run that rebuilds all four images.
+
+The first thing that removed was a second instance of exactly the same shape.
+OpenAI's error schema requires four fields on every error — `type`, `message`,
+`param` and `code`, the last two required-but-**nullable**, so present as JSON
+null rather than absent — and `voice_common.errors` built three. It also
+registered no handler for `StarletteHTTPException`, so a mistyped path under
+`/v1` returned FastAPI's `{"detail": "Not Found"}`, which openai-python reads
+no message off and reports as a bare "unknown error".
+
+Three services noticed and each vendored its own fix, each docstring saying the
+code belonged upstream and that the pin was the only reason it was not. The
+fourth, `services/gateway`, had none of it — and it is the process an SDK
+client actually talks to. Nobody looked, which is the same failure as the
+non-ASCII API key: fixed in one service, found still live in two others months
+later, because the fix round only patched where a reviewer happened to look.
+
+All of it is in `voice_common.errors` now, the three copies are deleted, and
+`voice_common.conformance` carries the assertion that would have caught the
+gateway: every `/v1` error, in every service, has all four fields. A fifth
+service cannot repeat it silently.
 
 ## Why four services and not one
 
@@ -148,7 +168,10 @@ editable install over the top: `pip install -e './packages/common[audio,conforma
 Each service runs `voice_common.conformance`, the suite the shared package
 ships, against the app object it actually builds. That is what makes one tree
 safe to share: a change to `packages/common` fails at a consumer's test job
-rather than on the host.
+rather than on the host. The gateway runs one assertion out of it rather than
+the whole suite — it carries its own auth module and publishes no
+`/openapi.json`, so most of the rest does not describe it — and the one it runs
+is the four-field envelope check it used to fail.
 
 ## CI
 

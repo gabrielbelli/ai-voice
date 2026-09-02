@@ -12,6 +12,7 @@ import json
 import httpx
 import pytest
 from conftest import MockBackend, Slow, Unreachable, gateway, reload_gateway
+from voice_common.conformance import assert_four_field_envelope
 
 SPEECH = "/v1/audio/speech"
 
@@ -422,12 +423,76 @@ async def test_everything_outside_the_table_is_404(monkeypatch, backends, path):
 
 
 async def test_a_wrong_method_is_an_envelope_too(monkeypatch, backends):
+    """A NATIVE route, and its wording and code are deliberately unchanged.
+
+    /transcribe, /speak, /voices and /jobs have clients — bench/bench.py, the
+    integration suite, Open WebUI — and `method_not_supported` is a string one
+    of them may already branch on. The /v1 side now answers `method_not_allowed`
+    with the three backends' wording; this side keeps what it had.
+    """
     stt, tts, long = backends
     async with gateway(monkeypatch, stt=stt, tts=tts, long=long) as (client, _):
         response = await client.get("/transcribe")
 
     assert response.status_code == 405
     assert response.json()["error"]["code"] == "method_not_supported"
+
+
+async def test_a_v1_error_reads_the_same_here_as_from_the_backend(monkeypatch,
+                                                                 backends):
+    """A 404 and a 405 under /v1 are the estate's, not this service's own.
+
+    A client that hits the gateway and a client that hits stt-stack directly
+    should not have to learn two wordings for the same condition — and `code`
+    tells the two conditions apart, which a shared null would not.
+    """
+    stt, tts, long = backends
+    async with gateway(monkeypatch, stt=stt, tts=tts, long=long) as (client, _):
+        unrouted = await client.post("/v1/nope", content=b"{}")
+        wrong_method = await client.get(SPEECH)
+
+    assert unrouted.status_code == 404
+    assert unrouted.json()["error"]["code"] == "unknown_url"
+    # The routing-table sentence is this service's own and worth keeping: it is
+    # the one 404 in the estate that can say where the accepted paths are
+    # published.
+    assert unrouted.json()["error"]["message"].startswith(
+        "Invalid URL (POST /v1/nope). This gateway routes a fixed set")
+
+    assert wrong_method.status_code == 405
+    assert wrong_method.json()["error"]["code"] == "method_not_allowed"
+    assert wrong_method.json()["error"]["message"] == \
+        "Invalid URL (GET /v1/audio/speech)"
+
+
+async def test_every_v1_error_carries_all_four_fields(monkeypatch, backends):
+    """The omission this service carried silently for its whole life.
+
+    `param` is required-but-NULLABLE in OpenAI's `Error` — present as JSON
+    null, never absent. Three sibling services noticed voice-common built three
+    keys and each vendored its own fix; this one, the process an openai-python
+    client actually talks to, had none of it and nobody looked. So the
+    assertion is shared with them rather than written a fifth time: it is
+    voice_common.conformance.assert_four_field_envelope, and the same call runs
+    in all four CIs.
+
+    Every error this service can produce without a backend is driven here: the
+    401 built by the auth middleware from outside every exception handler, an
+    unrouted path, a wrong method, a body it cannot parse, and a backend that
+    is not there.
+    """
+    stt, tts, long = backends
+    async with gateway(monkeypatch, stt=stt, tts=tts, long=long,
+                       api_keys="sk-one") as (client, _):
+        assert_four_field_envelope(await client.get("/voices"))
+
+    async with gateway(monkeypatch, stt=stt, tts=tts, long=Unreachable()) as (client, _):
+        assert_four_field_envelope(await client.post("/v1/nope", content=b"{}"))
+        assert_four_field_envelope(await client.get(SPEECH))
+        assert_four_field_envelope(
+            await client.post(SPEECH, content=b"{not json"))
+        assert_four_field_envelope(
+            await client.post(SPEECH, content=body(model="chatterbox")))
 
 
 # --------------------------------------------------------------------- auth --

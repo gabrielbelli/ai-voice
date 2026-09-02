@@ -40,12 +40,11 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from voice_common import auth, logging as voice_logging
-from voice_common.errors import install_errors
+from voice_common.errors import error_response, install_errors
 from voice_common.health import install_health
 from voice_common.models import OpenAISpeechRequest, Segment as BaseSegment
 
 from .audio_out import CONTENT_TYPE, FORMATS, encode, encode_stream
-from .errors import install_speech_errors, speech_error
 from .openai_api import (VOICE_ALIASES, custom_voice_id, language_for_voice,
                          resolve_voice, unmapped_aliases)
 from .synth import FRAME_SAMPLES, MAX_CHUNK_PHONEMES, SAMPLE_RATE, Synth
@@ -140,16 +139,13 @@ app = FastAPI(title="tts-stack",
 # have to be renamed for this service to stop keeping its own copy.
 auth.install(app, "TTS_API_KEYS")
 
-# The /v1 error envelope and the handler that puts a rejected body into it. The
-# native routes keep FastAPI's own `{"detail": ...}`: clients are already
-# written against that shape and /v1 is the only compatibility boundary here.
+# The /v1 error envelope — all four fields, and the 404, 405 and 500 handlers
+# that used to escape it. This repo carried app/errors.py to add `param` and
+# those handlers on top of a shared package it could not change; both now live
+# upstream, so there is nothing to register second. The native routes keep
+# FastAPI's own `{"detail": ...}`: clients are already written against that
+# shape and /v1 is the only compatibility boundary here.
 install_errors(app)
-
-# …and this repo's own, on top: the shared handlers build an envelope with no
-# `param`, which the schema puts in REQUIRED, and register nothing for the 404
-# and 405 that FastAPI answers under /v1 in its own shape. Registered second
-# because the later registration of an exception handler wins.
-install_speech_errors(app)
 
 
 class Segment(BaseSegment):
@@ -527,8 +523,8 @@ def _sse_body(synth: Synth, chunks: list[str], voice: str, language: str,
 def openai_speech(req: SpeechRequest) -> Response:
     synth = state.get("synth")
     if not synth:
-        return speech_error(503, "model still loading",
-                            type_="server_error", code="model_loading")
+        return error_response(503, "model still loading",
+                              type_="server_error", code="model_loading")
 
     voice = resolve_voice(req.voice, synth.voices, DEFAULT_VOICE)  # type: ignore[attr-defined]
     if voice is None:
@@ -538,7 +534,7 @@ def openai_speech(req: SpeechRequest) -> Response:
         # beats synthesising in a voice nobody asked for. All thirteen of the
         # published names are accepted first, which is the part that was
         # missing: seven of them used to be a 400.
-        return speech_error(
+        return error_response(
             400,
             f"Unknown voice {(req.voice or DEFAULT_VOICE)!r}. Accepted: "
             f"{', '.join(sorted(VOICE_ALIASES))}, or any Kokoro voice from "
@@ -566,8 +562,8 @@ def openai_speech(req: SpeechRequest) -> Response:
         chunks = synth.plan(req.input, language, CHUNK_PHONEMES)  # type: ignore[attr-defined]
         input_tokens = synth.token_count(chunks)  # type: ignore[attr-defined]
     except Exception as exc:  # noqa: BLE001 - the client needs the reason
-        return speech_error(500, f"phonemisation failed: {exc}",
-                            type_="server_error", code="synthesis_failed")
+        return error_response(500, f"phonemisation failed: {exc}",
+                              type_="server_error", code="synthesis_failed")
 
     if req.stream_format == "sse":
         # No Content-Length, so uvicorn frames it chunked, which is what the
@@ -588,8 +584,8 @@ def openai_speech(req: SpeechRequest) -> Response:
         pieces = [synth.speak_chunk(phonemes, voice, language, speed)  # type: ignore[attr-defined]
                   for phonemes in chunks]
     except Exception as exc:  # noqa: BLE001 - the client needs the reason
-        return speech_error(500, f"synthesis failed: {exc}",
-                            type_="server_error", code="synthesis_failed")
+        return error_response(500, f"synthesis failed: {exc}",
+                              type_="server_error", code="synthesis_failed")
 
     # Handled, not left to FastAPI: an ffmpeg that is missing or fails used to
     # return the plain "Internal Server Error" body, which openai-python shows
@@ -598,8 +594,9 @@ def openai_speech(req: SpeechRequest) -> Response:
     try:
         data = encode(pieces, req.response_format)
     except Exception as exc:  # noqa: BLE001 - the client needs the reason
-        return speech_error(500, f"encoding to {req.response_format} failed: {exc}",
-                            type_="server_error", code="encoding_failed")
+        return error_response(
+            500, f"encoding to {req.response_format} failed: {exc}",
+            type_="server_error", code="encoding_failed")
 
     compute = time.monotonic() - started
     duration = sum(piece.size for piece in pieces) / SAMPLE_RATE

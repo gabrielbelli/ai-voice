@@ -36,8 +36,7 @@ import logging
 import os
 
 from fastapi import FastAPI, Request
-
-from .openai_api import error_response
+from voice_common.errors import error_response
 
 log = logging.getLogger("voice-gateway.auth")
 
@@ -156,8 +155,7 @@ def install(app: FastAPI) -> None:
                 401,
                 "Incorrect API key provided. Send it as "
                 "'Authorization: Bearer <key>'.",
-                "invalid_request_error",
-                "invalid_api_key",
+                code="invalid_api_key",
                 # RFC 9110 wants a challenge on a 401. OpenAI's own API omits
                 # it; sending it costs nothing and keeps generic HTTP clients
                 # honest.

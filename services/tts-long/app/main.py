@@ -33,11 +33,15 @@ The native routes stay the ones to prefer for batch work — realtime_factor,
 per-segment pauses and the queue position have no field in the OpenAI shape
 and are dropped there.
 
-Authentication, the health contract, `Segment` and the logging setup are
-voice_common's. The error envelope is app/envelope.py, which is voice_common's
-plus the `param` field the schema requires; app/encoders.py is the one encoder
-both the buffered and the streamed paths use. What is left in this file is the
-queue, which is the whole reason this service exists separately from tts-stack.
+Authentication, the health contract, the error envelope, `Segment` and the
+logging setup are voice_common's. app/envelope.py is gone: it was this
+service's private copy of the envelope, written while voice-common was pinned
+by tarball SHA, and every line of it now lives in voice_common.errors — it was
+the best of the three vendored copies and the one the shared code was built
+from, so this service's wire output did not change. app/encoders.py is the one
+encoder both the buffered and the streamed paths use. What is left in this file
+is the queue, which is the whole reason this service exists separately from
+tts-stack.
 """
 
 from __future__ import annotations
@@ -59,13 +63,13 @@ from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from voice_common import auth, logging as voice_logging
+from voice_common.errors import error_response, install_errors
 from voice_common.health import install_health
 from voice_common.models import OpenAISpeechRequest, Segment
 
 from . import voices as voice_registry
 from .chunking import chunk_text, speech_seconds
 from .encoders import MEDIA_TYPES, available_formats, encode, make_encoder
-from .envelope import error_response, install_openai_errors
 from .synth import (SAMPLE_RATE, SUPPORTED_LANGUAGES, Synth, speech_tokens)
 
 OUT_DIR = Path(os.getenv("TTS_OUTPUT_DIR", "/output"))
@@ -396,12 +400,13 @@ app = FastAPI(
 auth.install(app, "TTS_API_KEYS")
 
 # The /v1 error envelope, in the four-field shape the schema requires, plus
-# the 404, 405 and 500 handlers that used to escape it. Installed after
-# auth.install because it also gives the middleware's 401 the same envelope —
-# see app/envelope.py. The native routes keep FastAPI's own `{"detail": ...}`
-# and its 422: /jobs is the older contract and something out there already
-# parses it.
-install_openai_errors(app)
+# the 404, 405 and 500 handlers that used to escape it. Order against
+# auth.install no longer matters: the middleware's 401 is built by the same
+# error_response as everything else, so it carries `param` without this
+# service rebinding a name to put it there. The native routes keep FastAPI's
+# own `{"detail": ...}` and its 422: /jobs is the older contract and something
+# out there already parses it.
+install_errors(app)
 
 
 class JobRequest(BaseModel):
@@ -645,8 +650,8 @@ class CustomVoice(BaseModel):
     service's own /openapi.json keeps the anyOf, which is what a generated
     client reads to learn the object form is accepted. The name is visible on
     the wire — pydantic tags a failed union branch with the class name, and
-    app/envelope.py puts that tag in the message — so it is OpenAI's word for
-    the shape rather than an internal one.
+    voice_common.errors puts that tag in the message — so it is OpenAI's word
+    for the shape rather than an internal one.
     """
 
     model_config = ConfigDict(extra="forbid")

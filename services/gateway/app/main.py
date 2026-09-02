@@ -72,8 +72,11 @@ from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import ClientDisconnect
 
+from voice_common.errors import (error_response, http_error_response,
+                                 install_errors, v1_path)
+
 from . import auth
-from .openai_api import MODEL_LIST, error_response
+from .openai_api import MODEL_LIST
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("voice-gateway")
@@ -201,6 +204,21 @@ app = FastAPI(
 )
 auth.install(app)
 
+# The shared /v1 handlers, which this service had none of. It was the only one
+# of the four with no `param` on any error and no envelope at all on an
+# unhandled 500 — and it is the one openai-python actually talks to, which is
+# the entire reason it exists. install_errors also registers a validation
+# handler that nothing here reaches today: no route below takes a pydantic
+# body. That is the point. The next /v1 route someone adds gets the envelope
+# without having to know this paragraph exists.
+install_errors(app)
+
+# What a 404 says when the path is not in the table. The gateway is the one
+# service whose 404 has something useful to add: it routes a FIXED set of
+# paths, and it can name where that set is published.
+UNKNOWN_URL_HINT = ("This gateway routes a fixed set of paths; GET /v1/models "
+                    "lists the models it accepts.")
+
 
 @app.exception_handler(StarletteHTTPException)
 async def _http_error(request: Request, exc: StarletteHTTPException) -> Response:
@@ -208,20 +226,37 @@ async def _http_error(request: Request, exc: StarletteHTTPException) -> Response
 
     There is no catch-all pass-through on purpose: a wildcard route would
     proxy /docs and /openapi.json to a backend that put them behind a key.
+
+    Registered after install_errors, which replaces the shared handler for
+    this one exception class. It has to be, because this service answers its
+    NATIVE routes in the envelope too — an older decision of its own, see
+    openai_api.py — and the shared handler deliberately hands the native side
+    back to FastAPI, which is right for the three backends and wrong here.
+
+    Under /v1 it defers to the shared renderer, so a 404 and a 405 from this
+    gateway read exactly as they do from the three services behind it. The
+    native branch is this service's existing wording, kept byte for byte:
+    those routes have clients — bench/bench.py, the integration suite, Open
+    WebUI — and `method_not_supported` is a string one of them may already
+    branch on. Its only change is the `param` key the schema requires, which
+    comes from sharing error_response.
     """
+    if v1_path(request.url.path):
+        return http_error_response(request, exc,
+                                   unknown_url_hint=UNKNOWN_URL_HINT)
+
     if exc.status_code == 404:
         return error_response(
             404,
-            f"Invalid URL ({request.method} {request.url.path}). This gateway "
-            "routes a fixed set of paths; GET /v1/models lists the models it "
-            "accepts.",
-            "invalid_request_error", "unknown_url")
+            f"Invalid URL ({request.method} {request.url.path}). "
+            f"{UNKNOWN_URL_HINT}",
+            code="unknown_url")
     if exc.status_code == 405:
         return error_response(
             405, f"Not allowed: {request.method} {request.url.path}.",
-            "invalid_request_error", "method_not_supported")
-    return error_response(exc.status_code, str(exc.detail), "invalid_request_error",
-                          "invalid_request_error")
+            code="method_not_supported")
+    return error_response(exc.status_code, str(exc.detail),
+                          code="invalid_request_error")
 
 
 # ------------------------------------------------------------------ proxy --
@@ -358,7 +393,7 @@ async def _proxy(request: Request, backend: Backend, *,
             503,
             f"{backend.name} is not reachable from the gateway; the container "
             "may be restarting.",
-            "server_error", "backend_unavailable",
+            type_="server_error", code="backend_unavailable",
             headers={"Retry-After": "30"})
     except httpx.TimeoutException:
         _log(request=request, backend=backend.name, model=model,
@@ -367,7 +402,7 @@ async def _proxy(request: Request, backend: Backend, *,
             504,
             f"{backend.name} did not finish within "
             f"{backend.read_timeout:.0f} s. {backend.timeout_help}",
-            "server_error", "backend_timeout")
+            type_="server_error", code="backend_timeout")
     except ClientDisconnect:
         # The client hung up while we were still reading its upload. Nothing
         # can be delivered; 499 is nginx's code for it and never leaves here.
@@ -380,7 +415,7 @@ async def _proxy(request: Request, backend: Backend, *,
         return error_response(
             503,
             f"{backend.name} could not be reached: {type(exc).__name__}.",
-            "server_error", "backend_unavailable",
+            type_="server_error", code="backend_unavailable",
             headers={"Retry-After": "30"})
 
     content_type = upstream.headers.get("content-type", "")
@@ -401,7 +436,7 @@ async def _proxy(request: Request, backend: Backend, *,
             502,
             f"{backend.name} answered {upstream.status_code} with a body that "
             f"is not an error envelope: {raw[:200]!r}",
-            "server_error", "backend_error")
+            type_="server_error", code="backend_error")
 
     headers = _response_headers(upstream)
     if upstream.status_code == 503 and "retry-after" not in headers:
@@ -489,7 +524,7 @@ async def speech(request: Request) -> Response:
         _log(request=request, backend="-", model=None, status="400-badjson",
              started=started)
         return error_response(400, f"request body is not valid JSON: {exc}",
-                              "invalid_request_error", "invalid_value")
+                              code="invalid_value")
 
     # A body that is valid JSON but not an object (a list, a bare string) is
     # forwarded rather than rejected: it has no `model`, so it goes fast, and

@@ -1,12 +1,14 @@
 # voice-common
 
 The shared wire contract for [services/stt](../../services/stt/README.md),
-[services/tts](../../services/tts/README.md) and
-[services/tts-long](../../services/tts-long/README.md).
+[services/tts](../../services/tts/README.md),
+[services/tts-long](../../services/tts-long/README.md) and, for the error
+envelope, [services/gateway](../../services/gateway/README.md).
 
 ```text
 voice_common.auth         API keys, the exemption set, the 401
-voice_common.errors       OpenAI's error envelope, and the validation handler
+voice_common.errors       OpenAI's error envelope — all four fields — and the
+                          validation, 404/405 and unhandled-500 handlers
 voice_common.health       the health CONTRACT: async, and one string for route
                           and exemption
 voice_common.models       Segment, OpenAISpeechRequest — two bases, no more
@@ -79,7 +81,7 @@ from voice_common import auth, errors, health, logging as voice_logging
 log = voice_logging.setup("tts-stack", "TTS")
 
 app = FastAPI(title="tts-stack")
-errors.install_errors(app)                  # ApiError + RequestValidationError
+errors.install_errors(app)                  # ApiError, validation, 404/405, 500
 health.install_health(app, details=lambda: {"threads": THREADS})
 auth.install(app, "TTS_API_KEYS")           # the env var name is the parameter
 ```
@@ -89,8 +91,20 @@ authentication, so the two can never name different strings. The order of the
 two calls does not matter.
 
 Raise `errors.ApiError` from a handler; return `errors.error_response(...)` from
-middleware. `type_` and `code` are keyword-only, because two sibling repos pass
-them positionally in opposite orders today and nothing catches it.
+middleware. `type_`, `code` and `param` are keyword-only, because two sibling
+repos passed the first two positionally in opposite orders and nothing caught
+it — both are strings, both produce a valid-looking envelope, and the only
+symptom is a client reading a code out of the field that names a category.
+
+Every body carries all four fields OpenAI's schema requires. `param` and `code`
+are serialised even when null, because the schema marks them
+required-but-nullable and a generated client may read the key rather than test
+for its presence.
+
+**`install_errors` stops at `/v1`.** Native routes keep FastAPI's
+`{"detail": ...}` and its 422, and an unhandled error on one stays a plain-text
+500. Those routes have clients that never touch the compatibility layer, and
+`errors.v1_path` is the one place that line is drawn.
 
 ### The conformance suite
 

@@ -718,15 +718,16 @@ its aliases, the ffmpeg encoder set and its bitrates, the format enum, the
 `0.5`–`2.0` speed clamp, the phoneme chunking, the SSE event shape, the segment
 `voice` field, and every route.
 
-`app/errors.py` is the exception, and a temporary one. The `param` key, the
-`/v1` 404 and 405 handlers and the middleware that fills `param` into the shared
-auth middleware's `401` all belong in `voice_common.errors` — that is where the
-envelope lives and all three services need them. They are here because the
-shared package used to be pinned to a commit tarball, so a change there reached
-this image only on the next bump, and this service was live. **That blocker is
-gone**: the package is a path dependency from this same tree now, and moving the
-module across is a follow-up rather than something a pin forbids. It is written
-to be lifted unchanged.
+`app/errors.py` is gone. The `param` key, the `/v1` 404 and 405 handlers and the
+middleware that filled `param` into the shared auth middleware's `401` were here
+only because the shared package used to be pinned to a commit tarball, so a
+change there reached this image only on the next bump. That pin is gone — the
+package is a path dependency from this same tree — and all three now live in
+`voice_common.errors`, where the envelope lives and where the other services get
+them from the same lines. The `param`-backfill middleware went with them and was
+not replaced: `voice_common.errors.error_response` builds the fourth key itself,
+so the 401 the shared auth middleware returns carries it like every other
+error.
 
 ## Licence
 

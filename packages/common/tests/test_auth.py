@@ -179,6 +179,25 @@ def test_no_key_is_a_401_carrying_the_challenge_and_the_openai_envelope(
     assert "Authorization: Bearer" in body["message"]
 
 
+def test_the_401_carries_param_without_a_service_bolting_one_on(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """This body is built OUTSIDE every exception handler, and used to lack `param`.
+
+    The middleware runs before routing and has nothing above it to catch a
+    raise, so it calls error_response directly. While error_response built
+    three keys, this was the one /v1 error a service could not complete from an
+    exception handler — and all three worked around it differently: two added
+    an ASGI middleware to patch the body on the way out, and the third rebound
+    `voice_common.auth.error_response` to a local function at import. All three
+    workarounds are deleted, and this is the assertion that says they are not
+    needed rather than merely absent.
+    """
+    client = build("k1", monkeypatch)
+    body = client.get("/v1/thing").json()["error"]
+    assert set(body) == {"message", "type", "param", "code"}
+    assert body["param"] is None
+
+
 @pytest.mark.parametrize("header", ["", "Bearer", "Bearer ", "Basic k1",
                                     "k1", "bearer  ", "Token k1"])
 def test_a_header_that_is_not_a_bearer_key_is_rejected(

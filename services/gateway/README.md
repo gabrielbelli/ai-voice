@@ -248,6 +248,22 @@ permanently published.
 
 ## Failures
 
+This service installs `packages/common` for one module: `voice_common.errors`.
+It used to have a fourth hand-written copy of the envelope, which built three
+keys where OpenAI's schema requires four — `param` is required-but-nullable and
+was absent from every error this gateway ever emitted — and whose
+`error_response(status, message, type_, code)` took the two strings
+*positionally*, which is the exact swap the shared function is keyword-only to
+prevent. Auth, health and the entrypoint stay local: this service has its own
+env var, fans health out to three backends rather than reporting on itself, and
+has no TLS or volume for the shared entrypoint to handle.
+
+Under `/v1` a 404 and a 405 now read exactly as they do from the three
+backends. The **native** routes keep the wording and the `code` values they
+had, `method_not_supported` included: `/transcribe`, `/speak`, `/voices` and
+`/jobs` have clients that may already branch on them. Their only change is the
+`param` key the schema requires.
+
 **Governing rule: if the backend produced an answer, forward it unchanged** —
 status, body and all. All three services already emit the OpenAI envelope under
 `/v1` with distinct `code` values (`model_loading`, `invalid_value`,

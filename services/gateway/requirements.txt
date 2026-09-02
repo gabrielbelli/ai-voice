@@ -1,4 +1,4 @@
-# Three dependencies, and no torch. This process moves bytes between sockets;
+# Four dependencies, and no torch. This process moves bytes between sockets;
 # nothing in it loads a model, decodes audio, or imports numpy.
 #
 # httpx is the only real choice here: it is the async client the backends'
@@ -8,3 +8,20 @@
 fastapi==0.121.2
 uvicorn[standard]==0.38.0
 httpx==0.28.1
+
+# The OpenAI error envelope, shared with services/stt, services/tts and
+# services/tts-long instead of hand-copied into a fourth file.
+#
+# This service used to be the exception — "the gateway does not install the
+# shared package" — and the exception was measured, not theoretical. It was the
+# only one of the four emitting errors with no `param`, which OpenAI's schema
+# marks required-but-nullable, and the only one whose unhandled 500 under /v1
+# left as plain text that openai-python reads no message off. It is also the
+# process an SDK client actually talks to, so it was the worst place in the
+# estate to be the odd one out.
+#
+# The path is relative to the CURRENT WORKING DIRECTORY, not to this file: pip
+# resolves a path requirement against the process's cwd. So every install runs
+# from the repository root, which is what the Containerfile's WORKDIR and every
+# CI job do. No extras: nothing here imports voice_common.audio.
+./packages/common

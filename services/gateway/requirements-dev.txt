@@ -2,3 +2,9 @@
 -r requirements.txt
 pytest==8.4.2
 pytest-asyncio==1.2.0
+
+# voice_common.conformance ships the assertions the shared wire contract is
+# made of, and this service runs the four-field envelope one against its own
+# app. [conformance] is pytest and httpx at the versions the package was tested
+# with; requirements.txt above already brings the package itself.
+./packages/common[conformance]

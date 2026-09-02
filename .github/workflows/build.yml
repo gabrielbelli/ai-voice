@@ -32,10 +32,13 @@ jobs:
   # architectures — because someone fixed a typo in the gateway's README.
   #
   # The one rule worth stating twice: a change under packages/common rebuilds
-  # ALL FOUR. Three of them install it as a path dependency, so its code is
-  # inside their images; the gateway does not, and is rebuilt anyway, because
-  # "this service is exempt from the shared package" is exactly the kind of
-  # fact that is true until it quietly is not.
+  # ALL FOUR. All four install it as a path dependency now, so its code is
+  # inside every image. This rule was written while the gateway installed none
+  # of it and was rebuilt anyway, on the grounds that "this service is exempt
+  # from the shared package" is exactly the kind of fact that is true until it
+  # quietly is not. It stopped being true: the gateway had a fourth
+  # hand-written copy of the error envelope, three keys where the schema
+  # requires four, and it is the process an SDK client actually talks to.
   changes:
     runs-on: ubuntu-24.04
     outputs:
@@ -310,12 +313,16 @@ jobs:
         with:
           python-version: '3.13'
 
-      # The siblings run a shared conformance suite because their behaviour is
-      # a model's output, which a unit test cannot assert. This one is a
-      # router, and every rule it implements — which backend a model string
-      # reaches, what a refused connection turns into, that the client's
+      # The siblings run the whole shared conformance suite because their
+      # behaviour is a model's output, which a unit test cannot assert. This
+      # one is a router, and every rule it implements — which backend a model
+      # string reaches, what a refused connection turns into, that the client's
       # Authorization header never leaves the process — is assertable against
-      # mock backends in milliseconds.
+      # mock backends in milliseconds. It cannot run the suite whole either:
+      # it carries its own auth module and publishes no /openapi.json, so half
+      # those assertions do not describe it. It calls the one that does —
+      # conformance.assert_four_field_envelope — from its own tests, which is
+      # why requirements-dev.txt now names the [conformance] extra.
       - name: Install
         run: pip install -r services/gateway/requirements-dev.txt
 
@@ -420,10 +427,12 @@ jobs:
         if: matrix.service == 'gateway'
         run: |
           buildah run --user root "$(buildah from localhost/build:gateway-${{ matrix.arch }})" -- \
-            python -c 'import app.main, httpx, fastapi, uvicorn; print("ok", httpx.__version__, fastapi.__version__)'
+            python -c 'import app.main, voice_common.errors, httpx, fastapi, uvicorn; print("ok", httpx.__version__, fastapi.__version__)'
 
       # Every image also carries the shared entrypoint, except the gateway,
-      # which ships its own and depends on none of packages/common. A build
+      # which ships its own: it has no TLS and no volume to take ownership of.
+      # It does install packages/common — for voice_common.errors, and for
+      # nothing else. A build
       # that installed the package but not its `script-files` produces an image
       # that starts and immediately exits with "exec: voice-entrypoint.sh: not
       # found", which is a run-time failure this makes a build-time one.

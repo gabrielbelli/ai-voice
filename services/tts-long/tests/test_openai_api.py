@@ -95,30 +95,6 @@ def test_a_malformed_voice_object_names_voice_and_not_a_union_branch(speech):
     assert "valid string" in error["message"]
 
 
-def test_a_union_collapse_does_not_swallow_two_ordinary_field_errors():
-    """Two errors on two ordinary sub-fields are not a union and stay apart.
-
-    The guard on the collapse above. `segments.0.text` and
-    `segments.0.pause_after` share a prefix and diverge at the same depth that
-    union branches do; only the branch TAG tells the two cases apart, so this
-    asserts the tag test rather than the shape.
-    """
-    from app.envelope import _union_branches
-
-    union = [{"loc": ("body", "voice", "str"), "msg": "Input should be a "
-                                                      "valid string"},
-             {"loc": ("body", "voice", "CustomVoice", "typo"),
-              "msg": "Extra inputs are not permitted"}]
-    assert _union_branches(union) == (
-        "voice", ["Input should be a valid string",
-                  "typo: Extra inputs are not permitted"])
-
-    ordinary = [{"loc": ("body", "segments", 0, "text"), "msg": "a"},
-                {"loc": ("body", "segments", 0, "pause_after"), "msg": "b"}]
-    assert _union_branches(ordinary) is None
-    assert _union_branches([{"loc": ("body", "input"), "msg": "c"}]) is None
-
-
 def test_the_voice_actually_used_is_reported(speech):
     """This service has one voice. The response says which one it used."""
     response = speech.post("/v1/audio/speech",

@@ -19,10 +19,11 @@ The wire contract around those routes — the API keys, the 401, OpenAI's error
 envelope, the health route and the log configuration — comes from voice_common,
 which this service shares with tts-stack and tts-long. Three hand-vendored
 copies of that code had drifted into three different defects; the package
-docstrings carry the detail. app/errors.py completes that envelope with the two
-things the specification requires and the shared package does not emit yet,
-over the shared code rather than instead of it. Everything below this line is
-what is genuinely particular to speech-to-text.
+docstrings carry the detail. app/errors.py is gone with them: it completed the
+envelope with `param` and the 404/405 handlers while voice-common was pinned by
+tarball SHA and could not be changed from here, and all of it now lives in
+voice_common.errors. Everything below this line is what is genuinely particular
+to speech-to-text.
 """
 
 from __future__ import annotations
@@ -37,7 +38,6 @@ from voice_common import auth, errors, health
 from voice_common import logging as voice_logging
 
 from . import asr, openai_api, pipeline
-from . import errors as v1_errors
 
 # STT_LOG_LEVEL comes with this: until now the only way to get DEBUG out of a
 # running container was to edit the source and rebuild the image.
@@ -62,7 +62,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# ApiError and the /v1 validation handler, both rendered in OpenAI's envelope.
+# ApiError, the /v1 validation handler, the 404/405 handler and the unhandled
+# 500, all rendered in OpenAI's four-field envelope.
 errors.install_errors(app)
 
 
@@ -105,18 +106,6 @@ health.install_health(app, details=_health_details)
 # so this file used to re-register all three by hand just to get the check in
 # front of them. Middleware also cannot be forgotten on a route added later.
 auth.install(app, "STT_API_KEYS")
-
-# The two pieces of the error envelope voice_common does not yet emit: `param`,
-# which the specification requires on every error, and a handler for 404 and
-# 405, which leaked FastAPI's {"detail": ...} to a client that reads none of it.
-# They live here rather than upstream because requirements.txt pins voice-common
-# by an immutable tarball SHA — see app/errors.py.
-#
-# AFTER auth.install, and that order is load-bearing. The 401 body is built by
-# the key middleware and returned from outside every exception handler, so the
-# backfill has to be the outer of the two to reach it — and Starlette makes the
-# most recently added middleware the outermost.
-v1_errors.install(app)
 
 app.include_router(openai_api.router)
 

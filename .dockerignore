@@ -9,7 +9,7 @@
 # read under any builder.)
 #
 # What this file is actually for, in order:
-#   1. Keeping packages/common's test tree out of the three images that COPY
+#   1. Keeping packages/common's test tree out of the four images that COPY
 #      that directory whole. This is the only line here that changes an image.
 #   2. Keeping .git out of the context, which is most of the bytes on the wire.
 #   3. Not invalidating a build layer over a file no image contains.
@@ -21,8 +21,9 @@
 .github
 
 # The conformance suite runs in CI against the source tree, never from inside
-# an image. packages/common is COPYd whole by stt, tts and tts-long, so this
-# line is the one that keeps pytest and its fixtures out of a service image.
+# an image. packages/common is COPYd whole by all four services now — the
+# gateway took it for voice_common.errors — so this line is the one that keeps
+# pytest and its fixtures out of a service image.
 # Note the package's own README.md and LICENSE are deliberately NOT excluded:
 # pyproject.toml declares `readme = "README.md"`, and setuptools fails the
 # build outright if the file named there is missing from the context.

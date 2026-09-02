@@ -20,6 +20,8 @@ drifted:
   * /docs and /openapi.json need a key when keys are on
   * a bad /v1 body is 400 with a readable error.message (stt-stack answers 422)
   * /health is a coroutine function, not a thread-pool route (tts-stack, stt-stack)
+  * every /v1 error carries all four fields the schema requires (all four, and
+    voice-gateway silently for its whole life — see the assertion's docstring)
 
 Use it from a consumer by creating one test module:
 
@@ -53,7 +55,7 @@ from fastapi import FastAPI
 from starlette.testclient import TestClient
 
 __all__ = [
-    "Service", "module_app", "voice_service",
+    "Service", "module_app", "voice_service", "assert_four_field_envelope",
     "test_a_non_ascii_key_authenticates",
     "test_health_with_a_trailing_slash_is_not_rejected",
     "test_a_set_but_keyless_variable_refuses_to_start",
@@ -61,7 +63,12 @@ __all__ = [
     "test_a_bad_v1_body_is_400_with_a_readable_message",
     "test_health_is_a_coroutine_function",
     "test_a_wrong_key_is_rejected_with_a_challenge",
+    "test_every_v1_error_carries_all_four_fields",
 ]
+
+# `type`, `message`, `param` and `code`. `param` and `code` are
+# required-but-NULLABLE — present as JSON null, never absent.
+ENVELOPE_FIELDS = {"message", "type", "param", "code"}
 
 # Non-ASCII on purpose. This exact shape is what tts-stack rejected as
 # "Incorrect API key provided" while it was the configured key.
@@ -108,6 +115,28 @@ def module_app(module: str, attr: str = "app") -> Callable[[], FastAPI]:
         return getattr(importlib.import_module(module), attr)
 
     return build
+
+
+def assert_four_field_envelope(response) -> dict:  # noqa: ANN001 - httpx or requests
+    """Assert one response is an OpenAI error envelope, and return its error.
+
+    A function rather than only a test, because the one service this invariant
+    was written for cannot run the suite around it: voice-gateway carries its
+    own auth module and publishes no /openapi.json, so half the assertions here
+    do not describe it. It calls this directly from its own tests. A shared
+    assertion beats a fifth copy of `set(body) == {...}` — that is the whole
+    argument of this file, applied to itself.
+    """
+    body = response.json()
+    assert isinstance(body, dict) and isinstance(body.get("error"), dict), (
+        f"{response.status_code} is not an error envelope: {response.text[:200]}")
+    error = body["error"]
+    assert set(error) == ENVELOPE_FIELDS, (
+        f"{response.status_code} envelope has {sorted(error)}, "
+        f"needs {sorted(ENVELOPE_FIELDS)}: {response.text[:200]}")
+    assert isinstance(error["message"], str) and error["message"].strip(), (
+        f"openai-python reads error.message and shows it: {response.text[:200]}")
+    return error
 
 
 @pytest.fixture
@@ -250,3 +279,38 @@ def test_a_wrong_key_is_rejected_with_a_challenge(
     assert response.status_code == 401, response.text
     assert response.headers.get("WWW-Authenticate") == "Bearer"
     assert response.json()["error"]["code"] == "invalid_api_key"
+
+
+def test_every_v1_error_carries_all_four_fields(
+        voice_service: Service, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The assertion that would have caught the gateway's silent omission.
+
+    `param` and `code` are required-but-NULLABLE in OpenAI's `Error`: present
+    as JSON null, never absent. Three services noticed that voice-common built
+    three keys and each vendored its own fix; the fourth, voice-gateway, had
+    none of it and emitted a three-key envelope for its whole life — to clients
+    using the openai-python SDK, which is the entire reason that service
+    exists. Nobody looked, because there was no assertion that looked for them.
+
+    So this drives every error path a service has in common with the others,
+    from OUTSIDE the app, and it runs in all four CIs. A fifth service that
+    forgets `param`, or registers no handler for an unrouted /v1 path, fails
+    here on its first build rather than in a client's log six months later.
+    """
+    unrouted = "/v1/definitely-not-a-route"
+
+    # No key: the 401 the shared auth middleware builds from outside every
+    # exception handler, which is the one body a service cannot fix by
+    # registering a handler.
+    client = _client(voice_service, monkeypatch, "k1")
+    assert_four_field_envelope(client.post(voice_service.v1_path, json={}))
+
+    # Keys off, so the rest is about the envelope rather than about the key.
+    client = _client(voice_service, monkeypatch, None)
+    # A body the service rejects.
+    assert_four_field_envelope(client.post(voice_service.v1_path, json={}))
+    # An unrouted /v1 path, and a wrong method on a routed one. Both used to
+    # leak FastAPI's `{"detail": ...}`, which openai-python reads no message
+    # off and reports as a bare "unknown error".
+    assert_four_field_envelope(client.post(unrouted, json={}))
+    assert_four_field_envelope(client.get(voice_service.v1_path))
