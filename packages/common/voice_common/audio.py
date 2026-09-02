@@ -10,11 +10,13 @@ the one pin that genuinely conflicts across the estate: tts-stack pins
 requires numpy<2 on Python 3.12, so a hard dependency here would make one of
 the two resolves impossible.
 
-Everything above the wire format stays out. tts-stack's ffmpeg table and its
-bitrate reasoning — 32k opus, 64k mp3 and aac, chosen for one voice at 24 kHz
-— is an image decision, not a wire decision: tts-long has no ffmpeg on purpose,
-and stt-stack has none so that a 44.1 kHz caller is told rather than quietly
-resampled.
+Everything above the wire format stays out. The ffmpeg table and its bitrate
+reasoning — 32k opus, 64k mp3 and aac, chosen for one voice at 24 kHz — is an
+image decision, not a wire decision. tts-stack and tts-long agree on those
+numbers today and still keep a table each: tts-stack's formats are fixed at
+import, tts-long's are whatever ffmpeg on PATH allows at start-up, and
+stt-stack encodes nothing at all so that a 44.1 kHz caller is told rather than
+quietly resampled.
 """
 
 from __future__ import annotations

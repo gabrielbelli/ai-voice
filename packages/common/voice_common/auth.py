@@ -70,8 +70,10 @@ __all__ = ["ConfigurationError", "install", "exempt", "load_keys",
 
 log = logging.getLogger("voice_common.auth")
 
-# The container HEALTHCHECK calls this and has no key, and no way to be given
-# one. Requiring one turns a working service into a restart loop. Nothing else
+# The container healthcheck calls this and has no key, and no way to be given
+# one — it is passed at run time, in compose.yaml, because HEALTHCHECK is not a
+# field in the OCI image spec and no image here carries the instruction.
+# Requiring a key turns a working service into a restart loop. Nothing else
 # is exempt by default; voice_common.health adds the real health path through
 # exempt() so the route and the exemption can never name different strings.
 DEFAULT_PUBLIC_PATHS = ("/health",)

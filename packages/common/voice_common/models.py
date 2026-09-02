@@ -63,14 +63,17 @@ class OpenAISpeechRequest(BaseModel):
     rejecting "tts-1" would break every client that sends it while claiming to
     honour it would be a lie.
 
-    `voice` is optional, unlike upstream, because a service with a configured
-    default voice has an answer when the field is absent — and because
-    tts-long has no named voices at all.
+    `voice` is optional, unlike upstream, because every service here has an
+    answer when the field is absent: tts-stack falls back to TTS_VOICE, and
+    tts-long to Chatterbox's own built-in speaker, which is the one voice that
+    is always present whether or not any reference clip is installed.
 
-    `response_format` is NOT here. Each service ships a different set of
-    encoders and the enum is an image decision: tts-long has no ffmpeg in an
-    image already carrying torch, so mp3 and opus are not on offer there at
-    all. Subclass and declare the formats that image can actually produce.
+    `response_format` is NOT here. The enum is a property of the image, not of
+    the wire, and the two services do not even decide it the same way:
+    tts-stack fixes it at import as a Literal over the formats it ships, while
+    tts-long computes it at start-up from whether ffmpeg is on PATH, so the
+    same code answers three formats or six depending on the image it is in.
+    Subclass and declare what that image can actually produce.
     """
 
     # extra="allow", and this is the point of the class. See the module

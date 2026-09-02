@@ -88,10 +88,21 @@ First job downloads ~3 GB of weights. The model **loads lazily and unloads
 after ten minutes idle** — 6.5 GB resident is not something to leave sitting
 on a shared host between jobs.
 
-The image carries a `HEALTHCHECK` that polls `/health`, with a two-minute
-start period so that first download is not mistaken for a hung container.
-`/health` is answered on the event loop and never waits on the queue, so a
-service that is merely busy still reports healthy.
+**The image carries no `HEALTHCHECK` instruction**, and one here would not
+survive the build: `HEALTHCHECK` is not a field in the OCI image spec, and CI
+builds with buildah, whose default format is `oci`, so the instruction is
+dropped silently on the way to the registry and `docker inspect` on a published
+image shows none. The probe is passed at run time instead, which is where all
+four images have theirs. [`compose.yaml`](../../compose.yaml) at the repository
+root carries it, and that copy is the only one there is — delete it and this
+container has no probe.
+
+Its `start_period` there is **900 s**, not the two minutes an ordinary service
+would want, because the first job downloads ~3 GB of weights before it can
+answer anything; a shorter grace kills the container mid-download and the next
+one starts the download again. `/health` itself is answered on the event loop
+and never waits on the queue, so a service that is merely busy still reports
+healthy.
 
 ```bash
 # submit
@@ -340,11 +351,13 @@ every accented key — so the *correct* key came back as "Incorrect API key
 provided". Startup warns about such a key anyway: it works only with clients
 that send the header as UTF-8, which HTTP does not guarantee.
 
-`/health` stays open, because the image's `HEALTHCHECK` calls it and has no
-key — and so does `/health/`, with the trailing slash. The check runs before
-routing, so FastAPI's 307 to `/health` never happens and a probe written that
-way used to go permanently 401 the day keys were configured. Everything else
-needs a key, `/docs` and `/openapi.json` included.
+`/health` stays open, because the container healthcheck calls it and has no key
+and no way to be given one — that probe lives in `compose.yaml` rather than in
+the image, for the reason under [Run](#run) — and so does `/health/`, with the
+trailing slash. The check runs before routing, so FastAPI's 307 to `/health`
+never happens and a probe written that way used to go permanently 401 the day
+keys were configured. Everything else needs a key, `/docs` and `/openapi.json`
+included.
 
 ## TLS
 

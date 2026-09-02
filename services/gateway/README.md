@@ -137,13 +137,18 @@ are a property of the routing contract, not of any backend's state, and a
 client most wants to know what it can send while a backend is restarting.
 
 **Input length is not a routing key**, and that is the decisive rejection.
-Length is a proxy for a quality choice, and it breaks on a measured fact:
-tts-long's image has no ffmpeg, so its formats are `wav`, `flac`, `pcm` and an
-mp3 request is a hard `400` — while `mp3` is exactly what OpenAI's
-`response_format` defaults to. A caller sending a perfectly ordinary
-400-character mp3 request would be auto-escalated into a `400` it could not act
-on, and a 17-second call would become a ten-minute job with nothing in the
+Length is a proxy for a quality choice, and the cost of getting it wrong is not
+symmetric: a caller sending a perfectly ordinary 400-character request would
+have a 17-second call auto-escalated into a ten-minute job, with nothing in the
 request that asked for it.
+
+The rejection used to rest on a second, sharper fact that has since expired,
+and it is recorded here rather than quietly dropped: tts-long's image carried no
+ffmpeg, so its formats were `wav`, `flac` and `pcm` and an mp3 request to it was
+a hard `400` — while `mp3` is exactly what OpenAI's `response_format` defaults
+to. That image carries ffmpeg now and answers all six formats at the same
+bitrates tts-stack uses, so the two backends no longer differ on format. The
+timing asymmetry above is what still rules length out on its own.
 
 **A header was rejected too.** `X-TTS-Backend` works, and is invisible in the
 surface that matters: Open WebUI and every other OpenAI-shaped client has a
@@ -396,7 +401,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-58 tests against mock backends wired in through httpx's own transport layer, so
+63 tests against mock backends wired in through httpx's own transport layer, so
 every one of them runs the real proxy code — header filtering, streaming,
 timeout mapping, auth — with only the socket replaced.
 
@@ -437,16 +442,25 @@ is 190-240 ms of recognition at the measured 8.5-10.4x, and a feature that adds
   is a normal state in which `/jobs` must still be accepted.
 - **Body rewriting beyond reading `model`.** No voice mapping, no language
   inference, no format translation, no error normalisation. tts-stack already
-  maps OpenAI's six voice names onto Kokoro voices; a second table here means
-  two tables and a guaranteed drift.
+  maps all thirteen OpenAI voice names onto Kokoro voices, and tts-long keeps
+  its own clip registry with a different mechanism again; a second table here
+  means two tables and a guaranteed drift. The last time that table changed it
+  went from six names to thirteen, which is exactly the drift a copy would have
+  missed.
 - **A unified job abstraction over both TTS backends.** It means the gateway
   holds job state, and then needs storage, restart survival, its own `/jobs`
   endpoints, and an answer for in-flight jobs when it redeploys. tts-long
   already has all of that, and the flat mount makes its URLs work unchanged.
-- **Streaming or SSE synthesis.** Neither backend can stream: Kokoro
-  synthesises the whole array and then shells out to ffmpeg over a temp file. A
-  gateway-side fake stream would buffer the complete response and dribble it
-  out, adding latency to pretend at a capability that does not exist upstream.
+- **Gateway-side streaming or SSE synthesis.** Both TTS backends stream for
+  real now — `stream_format: "sse"` on `/v1/audio/speech` emits
+  `speech.audio.delta` events as each chunk is encoded, through ffmpeg on a
+  pipe rather than a temporary file — and this service already forwards a
+  response body as it arrives, so those events reach the client untouched with
+  nothing added here. What stays rejected is a gateway-side *fake*: buffering a
+  complete response and dribbling it out to pretend at a capability a backend
+  does not have. There is nothing to pretend at, and inventing an SSE frame
+  here would put a second copy of the event shape in front of the one the
+  backend defines.
 - **TLS, CORS and certificates**, unlike the siblings, which do carry TLS. It
   is LAN traffic on one host; if it is ever exposed beyond the LAN that belongs
   to whatever reverse proxy already terminates TLS for the NAS.

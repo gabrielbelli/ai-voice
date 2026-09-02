@@ -16,22 +16,28 @@
 
 This is a router, not a framework. It exists for two reasons and no others.
 
-ONE AUTH BOUNDARY. The three backends each carry their own copy of an auth
-module, and the three copies have already diverged and duplicated bugs between
-them. Here the backends run open, only :8080 is published, and one file checks
-a token — see auth.py.
+ONE AUTH BOUNDARY. The three backends used to carry a copy each of an auth
+module, and those three copies diverged and duplicated bugs between them; they
+share voice_common.auth now, which closed that gap but not this one — three
+processes each deciding for themselves is still three places a key can be
+misconfigured. Here the backends run open, only :8080 is published, and one
+file checks a token. That file is this service's own auth.py rather than the
+shared module: a different env var, and no health route of its own to exempt.
 
 ONE HEALTH ANSWER. Today, knowing whether the stack is up means polling three
 ports. GET /health here fans out and returns all three, unauthenticated.
 
 THE ROUTING KEY IS THE `model` STRING AND NOTHING ELSE. Not input length: that
-is a proxy for a quality decision, and it breaks on a measured fact — tts-long
-has no ffmpeg, so an mp3 request to it is a hard 400 while mp3 is exactly what
-OpenAI's response_format defaults to. Escalating a 400-character paragraph on
-length would also turn a ~17 s call into a ~10 min job with nothing in the
-request that asked for it. Not a header either: Open WebUI and every other
-OpenAI-shaped client has a `model` field in its settings and no custom-header
-field, and a routing key nobody can set is not a routing key.
+is a proxy for a quality decision, and escalating a 400-character paragraph on
+length turns a ~17 s call into a ~10 min job with nothing in the request that
+asked for it. (The other half of this argument has expired and is recorded
+rather than relied on: tts-long carried no ffmpeg, so an mp3 request to it was
+a hard 400 while mp3 is exactly what response_format defaults to. It carries
+ffmpeg now and answers all six formats, so the two backends no longer differ
+there — the timing asymmetry is what still rules length out.) Not a header
+either: Open WebUI and every other OpenAI-shaped client has a `model` field in
+its settings and no custom-header field, and a routing key nobody can set is
+not a routing key.
 
 AN UNKNOWN MODEL GOES FAST. The two wrong answers are asymmetric — sending a
 long-form request to Kokoro costs some quality, sending an ordinary one to

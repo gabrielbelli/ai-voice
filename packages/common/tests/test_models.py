@@ -60,16 +60,17 @@ def test_model_is_accepted_and_ignored() -> None:
 
 
 def test_voice_is_optional_unlike_upstream() -> None:
-    """A service with a configured default voice has an answer when the field
-    is absent, and tts-long has no named voices at all."""
+    """Every service here has an answer when the field is absent: tts-stack
+    falls back to TTS_VOICE, tts-long to Chatterbox's built-in speaker."""
     assert OpenAISpeechRequest(input="hi").voice is None
 
 
 def test_no_response_format_here_because_the_encoder_set_is_an_image_decision(
         ) -> None:
-    """tts-long has no ffmpeg in an image already carrying torch, so mp3 and
-    opus are not on offer there. Each service subclasses and declares the
-    formats its image can actually produce."""
+    """tts-stack fixes its enum at import as a Literal; tts-long computes it at
+    start-up from whether ffmpeg is on PATH, so the same code offers three
+    formats or six depending on the image. Each subclasses and declares its
+    own."""
     assert "response_format" not in OpenAISpeechRequest.model_fields
 
 

@@ -20,7 +20,8 @@ voice-entrypoint.sh       installed to /usr/local/bin: TLS, chown, setpriv
 
 ## Why this exists
 
-`app/auth.py` exists in all three repos. Diffed pairwise:
+`app/auth.py` existed in all three repositories, once each, before this package
+replaced them. Diffed pairwise at that point:
 
 | | differing lines |
 |---|---|
@@ -41,9 +42,14 @@ each copy had drifted separately:
 - **`TTS_API_KEYS=','` silently disabled authentication** (tts-stack and
   tts-long, not stt-stack) and logged that the variable was *unset*.
 
-Two of the three are still live today in the copies that never got the fix:
-`stt-stack/app/auth.py:115` and `tts-long/app/auth.py:68` both encode UTF-8,
-and `tts-long/app/auth.py:103` still matches `OPEN_PATHS` as an exact string.
+Two of the three outlived their discovery: the fix round patched only the copy
+a reviewer happened to be reading, and `stt-stack/app/auth.py:115` and
+`tts-long/app/auth.py:68` were both still encoding UTF-8, with
+`tts-long/app/auth.py:103` still matching `OPEN_PATHS` as an exact string, when
+this package landed. All three copies are deleted now — the only `app/auth.py`
+left in the tree is `services/gateway`'s, which is its own module by design:
+that service has a different env var and fans health out to three backends
+rather than reporting on itself.
 
 This package is the union of every fix. The argument for it is measured, not
 predicted.
@@ -61,13 +67,13 @@ an accident of scope.
 
 | Stays behind | Why |
 |---|---|
-| Kokoro voice handling (`VOICE_ALIASES`, `resolve_voice`, …) | A property of one model's `voices.bin`, and the `shimmer`→`af_bella` row is a judgement by ear. tts-long has no named voices; stt-stack has no voices. |
+| Kokoro voice handling (`VOICE_ALIASES`, `resolve_voice`, …) | A property of one model's `voices.bin`, and the `shimmer`→`af_bella` row is a judgement by ear. tts-long has its own registry and it is a different mechanism — clips on disk cloned per request, not embeddings in a weights file, so `TTS_VOICE_STRICT` and the `X-Voice` header have no counterpart here. stt-stack has no voices at all. |
 | Parakeet and Whisper model loading | Nothing else in the estate loads a recogniser. |
 | Silero VAD | One consumer; the 512-sample window and 16 kHz constant are properties of one ONNX model. |
 | Glossary repair | A regex table with no STT-specific machinery, so it *looks* shareable. Nobody has asked for it twice. "Could plausibly be wanted by a second service" is exactly how a shared package becomes a junk drawer. |
 | Chatterbox's job queue | The whole reason tts-long exists as a separate service, and none of it generalises to a 4x-realtime synthesiser. |
 | Per-wheel workarounds (`_wire_espeak`, `_stub_watermarker`) | Each is a scar from one dependency in one image. Sharing them would put tts-long's torch problem in stt-stack's import path. |
-| Audio encoding beyond the PCM byte contract | The ffmpeg table and its bitrates are an image decision: tts-long has no ffmpeg on purpose, stt-stack none so a 44.1 kHz caller is told rather than quietly resampled. |
+| Audio encoding beyond the PCM byte contract | The ffmpeg table and its bitrates are an image decision. tts-stack and tts-long both carry the binary and both encode the same three lossy formats at the same bitrates, but each keeps its own table: the formats, the sample rate and the container each service offers are part of *its* wire contract, and stt-stack has no encoder at all so a 44.1 kHz caller is told rather than quietly resampled. Worth revisiting if a third service starts encoding. |
 | The 16 kHz input guard | Despite the name, not the same thing as the output rate guard. It is a policy about what input the service accepts, in the only service that takes audio in. |
 | The concrete request models | They diverge where it matters: tts-stack clamps speed into 0.5–2.0, tts-long refuses any speed but 1.0. A shared base would need overriding on nearly every field. |
 | Containerfiles and CI workflows | Base image, ports, ENV defaults, tuning constants. Deployment machinery, and reusable-workflow territory — a separate decision. |
@@ -108,10 +114,13 @@ for its presence.
 
 ### The conformance suite
 
-Every consumer runs the suite this package ships, against the app it actually
-builds. That is what stops behaviour drifting in the parts each service still
-writes itself, and it makes a bad `voice-common` bump fail at the consumer's
-build rather than in production.
+The three backends run the whole suite this package ships, against the app each
+actually builds. That is what stops behaviour drifting in the parts each service
+still writes itself, and it makes a bad `voice-common` bump fail at the
+consumer's build rather than in production. The gateway runs one assertion out
+of it rather than the whole suite — it carries its own auth module and publishes
+no `/openapi.json`, so most of the rest does not describe it — and the one it
+runs, `assert_four_field_envelope`, is exported for exactly that.
 
 ```python
 # tests/test_conformance.py
@@ -155,9 +164,13 @@ One line in each consuming service's `requirements.txt`, a path into this same
 tree:
 
 ```text
-./packages/common            # services/stt — no extras
+./packages/common            # services/stt and services/gateway — no extras
 ./packages/common[audio]     # services/tts and services/tts-long — numpy
 ```
+
+The gateway takes it for `voice_common.errors` and nothing else: it keeps its
+own auth module, its own health fan-out and its own entrypoint, so it needs no
+extras and does not install the audio helpers.
 
 **The path is relative to the working directory, not to the file.** pip
 resolves a path requirement against the process's cwd, so every install runs
@@ -204,9 +217,10 @@ round: a change here rebuilds all four images in one CI run, and there is
 nowhere for a stale copy to hide.
 
 The honest remaining cost is unchanged in kind: every change here has to be
-validated against three consumers. `voice_common.conformance` is the answer to
-that, and it now runs in the same pipeline as this package's own tests rather
-than in three other repositories.
+validated against four consumers now, not three — the gateway installs this
+package too. `voice_common.conformance` is the answer to that, and it now runs
+in the same pipeline as this package's own tests rather than in four other
+repositories.
 
 ## Tests
 
@@ -223,4 +237,4 @@ one can see why it exists.
 
 ## Licence
 
-BSD-2-Clause. Same as the three services.
+BSD-2-Clause. Same as the four services.

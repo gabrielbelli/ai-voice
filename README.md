@@ -278,8 +278,10 @@ extra hop in front of three ports that are still open to the LAN.
 `main` carries validated versions only. Work happens on `prerelease`, which
 publishes `:pre` and never `:latest`.
 
-All 48 commits from the five original repositories are intact — the import used
+All 42 commits from the five original repositories are intact — the import used
 `git subtree`, so `git log --follow` on any file reaches back through it.
+(`git rev-list --count HEAD` counts more: the five merge commits the imports
+made, and this repository's own commits on top of them.)
 
 ## Licence
 

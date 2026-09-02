@@ -9,7 +9,9 @@ own error paths, its own health payload — and those are where the same class o
 defect reappears. So the package ships the assertions too, and each service's
 CI runs them against the app object it actually builds. A bad voice-common bump
 then fails at the consumer's build rather than in production, which is the
-honest answer to "a shared package has to be validated against three consumers".
+honest answer to "a shared package has to be validated against four consumers".
+Three of them run the whole suite; the gateway runs assert_four_field_envelope
+out of it, because it has its own auth module and publishes no /openapi.json.
 
 Every assertion here is a bug that was really found, or a contract that really
 drifted:
