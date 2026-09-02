@@ -103,10 +103,21 @@ jobs:
       # The image is useless if the runtime cannot import, and that only shows
       # up at run time — onnxruntime ships per-architecture wheels and a
       # missing arm64 wheel would build fine and fail on first request.
+      #
+      # soundfile is deliberately absent from this line: it left with
+      # libsndfile when every encoder moved to feeding ffmpeg on a pipe (see
+      # requirements.txt), and the check went on asserting it until both build
+      # jobs failed on `ModuleNotFoundError: No module named 'soundfile'` for a
+      # module the image is correct not to have. ffmpeg is checked instead,
+      # because it is a binary rather than a wheel and the encoders shell out
+      # to it — a missing one is a 500 on the first mp3 request, which is the
+      # default format.
       - name: Check the runtime imports on this architecture
         run: |
           buildah run --user root "$(buildah from localhost/build:${{ matrix.arch }})" -- \
-            python -c 'import kokoro_onnx, onnxruntime, soundfile; print("ok", onnxruntime.__version__)'
+            python -c 'import kokoro_onnx, onnxruntime, numpy; print("ok", onnxruntime.__version__, numpy.__version__)'
+          buildah run --user root "$(buildah from localhost/build:${{ matrix.arch }})" -- \
+            ffmpeg -version
 
       - name: Log in to the registry
         if: github.event_name != 'pull_request'
