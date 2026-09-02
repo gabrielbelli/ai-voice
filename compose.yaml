@@ -1,6 +1,6 @@
 # The voice stack as one TrueNAS app, behind one published port.
 #
-#   host:8080  ->  voice-gateway  ->  stt-stack:8000
+#   host:30080  ->  voice-gateway  ->  stt-stack:8000
 #                                     tts-stack:8001
 #                                     tts-long:8002
 #
@@ -49,7 +49,7 @@
 # READ THIS BEFORE DEPLOYING: the moment this applies, every client pointed at
 # :8000, :8001 or :8002 breaks. That includes services/stt/bench/bench.py, the
 # voice-integration suite, the gateway's own tests/test_live.py, and any Open
-# WebUI or script configured with a backend port. They move to :8080, which
+# WebUI or script configured with a backend port. They move to :30080, which
 # serves the same paths (/transcribe, /speak, /voices, /jobs, /v1/...) with no
 # rewriting.
 
@@ -65,7 +65,17 @@ services:
     pull_policy: always
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      # 30080 on the host, not 8080. Port 8080 on orko is already bound by an
+      # unrelated app (ix-rickroll), and docker refuses the bind rather than
+      # sharing it: "Bind for 0.0.0.0:8080 failed: port is already allocated",
+      # which fails the whole `up` and leaves the app in DEPLOYING with the
+      # other three containers running and this one merely `created`.
+      #
+      # 30080 also matches the convention every other app on that box already
+      # follows -- rackula 30323, metube 30097, gitea 30008, unifi 30072-75,
+      # convertx 30154. The CONTAINER port stays 8080: nothing inside the image
+      # or in the healthcheck below needs to know about the host mapping.
+      - "30080:8080"
     environment:
       # Service names, not 127.0.0.1 and not the host address: these resolve on
       # the app-internal network, which is the only place the three still
