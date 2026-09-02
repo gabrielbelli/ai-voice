@@ -19,8 +19,10 @@
 # gigabytes, not megabytes. Nothing here decodes audio; bytes are streamed
 # between two sockets and never held.
 #
-# Build:
-#   docker build -t voice-gateway .
+# Build, from the repository root — the context is the root for every service
+# here, even this one, which has no path dependency to pull in. One context
+# rule beats a per-service exception nobody remembers:
+#   docker build -f services/gateway/Containerfile -t ai-voice-gateway .
 #
 # Run (compose or a TrueNAS app, on the network the three backends share):
 #   docker run -p 8080:8080 \
@@ -28,7 +30,7 @@
 #     -e GATEWAY_TTS_URL=http://tts-stack:8001 \
 #     -e GATEWAY_TTS_LONG_URL=http://tts-long:8002 \
 #     -e GATEWAY_API_KEYS=sk-workstation,sk-laptop \
-#     voice-gateway
+#     ai-voice-gateway
 #
 # GATEWAY_API_KEYS unset means authentication is off and every request is
 # accepted — for all three backends, since this is the only thing checking a
@@ -52,11 +54,18 @@ RUN apt-get update \
 
 WORKDIR /srv
 
-COPY requirements.txt .
+# Repo-relative, because the context is the repository root. This is the one
+# service that does NOT copy packages/common: it depends on none of it — no
+# auth module, no error envelope, no health contract, and its own entrypoint.sh
+# below rather than voice-entrypoint.sh, because it has no TLS and no volume to
+# take ownership of. Adopting the shared package here is a real change with a
+# real argument behind it, and not one to make silently while moving a build
+# context.
+COPY services/gateway/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app/ ./app/
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY services/gateway/app/ ./app/
+COPY services/gateway/entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # The backend URLs default to the service names the compose file uses. They are
 # named here rather than left to the application's defaults so that `docker
@@ -86,12 +95,21 @@ EXPOSE 8080
 # sibling is restarting. It reports which one is down in the body; this probe
 # only asks whether the gateway itself is still answering.
 #
+# There is no HEALTHCHECK instruction, and the one that used to be here was
+# never in a published image. HEALTHCHECK is not a field in the OCI image spec,
+# so an OCI-format build drops it silently — and OCI is buildah's DEFAULT
+# format (`buildah bud --format`, default "oci"), which is what CI runs. The
+# comment that stood here claimed the opposite, that CI built in the docker
+# format; it did not, so the probe below was written, reviewed and shipped
+# nowhere. The three sibling images already had none for the same reason.
+#
+# It is passed at run time instead, where every runtime honours it. compose.yaml
+# at the repository root carries this exact probe for all four services:
+#
+#   docker run --health-cmd "python -c \
+#     \"import urllib.request as u; u.urlopen('http://127.0.0.1:8080/health', timeout=8).read()\"" ...
+#
 # python rather than curl, which is not in this image and is not worth a layer.
-# A HEALTHCHECK is not part of the OCI image spec, so a `--format oci` build
-# drops it silently; the CI here builds in the default docker format, and a
-# deployment that needs the probe regardless should pass it at run time.
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD ["python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8080/health', timeout=8).read()"]
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]

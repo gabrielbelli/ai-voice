@@ -1,0 +1,206 @@
+# The voice stack as one TrueNAS app, behind one published port.
+#
+#   host:8080  ->  voice-gateway  ->  stt-stack:8000
+#                                     tts-stack:8001
+#                                     tts-long:8002
+#
+# WHAT CHANGED WHEN THE FIVE REPOSITORIES BECAME ONE. The image names, and
+# nothing else:
+#
+#   ghcr.io/gabrielbelli/stt-stack      ->  ghcr.io/gabrielbelli/ai-voice-stt
+#   ghcr.io/gabrielbelli/tts-stack      ->  ghcr.io/gabrielbelli/ai-voice-tts
+#   ghcr.io/gabrielbelli/tts-long       ->  ghcr.io/gabrielbelli/ai-voice-tts-long
+#   ghcr.io/gabrielbelli/voice-gateway  ->  ghcr.io/gabrielbelli/ai-voice-gateway
+#
+# The SERVICE names below are deliberately NOT renamed to match the directory
+# layout. They are DNS names on the app-internal network: `stt-stack` is what
+# GATEWAY_STT_URL resolves, in this file, in the gateway's image defaults and
+# in whatever is already deployed. They are also what the named volumes and
+# container_names are keyed on, so renaming them would orphan the models
+# already on disk to rename a hostname nobody types. A directory is not a
+# hostname.
+#
+# THE OTHER REAL CHANGE HERE IS A DELETION, and it predates the monorepo. The
+# three backends had `ports: ["8000:8000"]` and friends, so anything that could
+# reach the NAS could reach all three directly and the gateway's "single auth
+# boundary" was an aspiration — a client that skipped :8080 skipped the only
+# process in this stack that checks a token. Removing those three `ports`
+# entries is what makes the boundary real; adding voice-gateway is what keeps
+# the stack usable afterwards. Neither half is any use alone.
+#
+# WHY THIS IS FREE. The three containers are one app and therefore already
+# share a network, so `http://stt-stack:8000` already resolved from inside it.
+# Nothing is being built to enable the gateway; a door is being closed.
+#
+# EVERY BACKEND SETTING BELOW IS COPIED VERBATIM from the deployed app
+# (`app.config` for "stt-stack" over the TrueNAS middleware). Environment,
+# cpus, mem_limit, volumes, tag, pull_policy, restart and healthcheck are
+# unchanged, deliberately and to the character: this file is about the network
+# boundary and must not be able to alter anything else.
+#
+# THE HEALTHCHECKS HERE ARE THE ONLY ONES THERE ARE. None of the four
+# Containerfiles carries a HEALTHCHECK instruction, and that is not an
+# oversight: HEALTHCHECK is not a field in the OCI image spec, and CI builds
+# with buildah, whose default format is oci — so an instruction in a
+# Containerfile is dropped silently on the way to the registry and `docker
+# inspect` on a published image shows none. Delete a probe from this file and
+# the container has no probe.
+#
+# READ THIS BEFORE DEPLOYING: the moment this applies, every client pointed at
+# :8000, :8001 or :8002 breaks. That includes services/stt/bench/bench.py, the
+# voice-integration suite, the gateway's own tests/test_live.py, and any Open
+# WebUI or script configured with a backend port. They move to :8080, which
+# serves the same paths (/transcribe, /speak, /voices, /jobs, /v1/...) with no
+# rewriting.
+
+services:
+
+  # ------------------------------------------------------------ the door --
+  #
+  # The only service with a `ports` entry. If a second one ever appears here,
+  # this file has stopped doing its job.
+  voice-gateway:
+    container_name: voice-gateway
+    image: ghcr.io/gabrielbelli/ai-voice-gateway:pre
+    pull_policy: always
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # Service names, not 127.0.0.1 and not the host address: these resolve on
+      # the app-internal network, which is the only place the three still
+      # listen once the ports below are gone.
+      GATEWAY_STT_URL: http://stt-stack:8000
+      GATEWAY_TTS_URL: http://tts-stack:8001
+      GATEWAY_TTS_LONG_URL: http://tts-long:8002
+      # GATEWAY_API_KEYS is deliberately NOT set here, because inventing a key
+      # in a file that gets deployed is how a placeholder becomes production
+      # credentials. Unset means authentication is OFF and every request is
+      # accepted — for all three backends, since this is now the only process
+      # that could check a token. Closing the ports without setting this buys
+      # one door and no lock: it removes the bypass, not the anonymity.
+      #
+      # Set it to a comma-separated list before this is reachable from
+      # anywhere untrusted, and expect the startup WARNING until you do:
+      # GATEWAY_API_KEYS: sk-workstation,sk-laptop
+    # 2 CPUs and 512 MB against the backends' 26 and 18 GB, because this
+    # process moves bytes between two sockets and never holds them: uploads and
+    # audio responses stream through, and the single buffered body is
+    # /v1/audio/speech's JSON, which is kilobytes. The image itself is 283 MB
+    # with no model and no torch in it.
+    cpus: 2
+    mem_limit: 512m
+    healthcheck:
+      # Its OWN localhost, like every service here. Note this endpoint answers
+      # 200 even when a backend is down, on purpose — it reports `degraded` in
+      # the body instead. A 503 here because tts-long is still loading would
+      # have the orchestrator restart the gateway, which is the one container
+      # that must stay up to report the outage.
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      # Seconds, not minutes: there is no model to load. The backends' long
+      # start_periods below are theirs and are not inherited.
+      start_period: 30s
+    # No depends_on. `service_healthy` on tts-long would hold the gateway down
+    # for up to its 900 s start_period, and GET /health during a cold start is
+    # exactly when someone most wants an answer. The gateway already returns a
+    # named 503 with Retry-After for a backend that is not up yet, so starting
+    # before them is the useful behaviour rather than a race to tolerate.
+
+  # -------------------------------------------------------- the backends --
+  #
+  # `expose` replaces `ports` on all three. Being honest about what that does:
+  # container-to-container traffic on a shared compose network works with or
+  # without `expose`, so the enforcement is the ABSENCE of `ports`, not the
+  # presence of `expose`. It is kept because it documents which port each
+  # service actually listens on, and a reviewer reading this file for the
+  # boundary should see a declaration, not a blank.
+  #
+  # Every healthcheck below points at 127.0.0.1 inside its own container. None
+  # of them touches the gateway or a sibling: a container must never be
+  # restarted because a different container is down, and a healthcheck aimed at
+  # :8080 would turn one backend's outage into all four restarting.
+
+  stt-stack:
+    container_name: stt-stack
+    image: ghcr.io/gabrielbelli/ai-voice-stt:pre
+    pull_policy: always
+    restart: unless-stopped
+    expose:
+      - "8000"
+    environment:
+      STT_MODEL: parakeet
+      STT_QUANTISATION: int8
+      STT_THREADS: "8"
+      STT_VAD: "1"
+    cpus: 10
+    mem_limit: 6g
+    volumes:
+      - stt-models:/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 600s
+
+  tts-stack:
+    container_name: tts-stack
+    image: ghcr.io/gabrielbelli/ai-voice-tts:pre
+    pull_policy: always
+    restart: unless-stopped
+    expose:
+      - "8001"
+    environment:
+      TTS_LANGUAGE: en-us
+      TTS_THREADS: "4"
+      TTS_VOICE: bm_george
+    cpus: 6
+    mem_limit: 2g
+    volumes:
+      - tts-models:/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8001/health')"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 300s
+
+  tts-long:
+    container_name: tts-long
+    image: ghcr.io/gabrielbelli/ai-voice-tts-long:pre
+    pull_policy: always
+    restart: unless-stopped
+    expose:
+      - "8002"
+    environment:
+      HOME: /home/tts
+      NUMBA_CACHE_DIR: /tmp/numba
+      TTS_CFG_WEIGHT: "0.3"
+      TTS_EXAGGERATION: "0.3"
+      TTS_IDLE_TIMEOUT: "600"
+      TTS_TEMPERATURE: "0.6"
+      TTS_THREADS: "8"
+    cpus: 10
+    mem_limit: 10g
+    volumes:
+      - tts-long-models:/models
+      - tts-long-out:/output
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8002/health')"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      # 900 s because the model is 6.5 GB and lazily loaded, and roughly 3 GB
+      # is downloaded on the very first job this container ever runs.
+      start_period: 900s
+
+# Unchanged, and named here so the deploy does not create new empty ones and
+# silently orphan the models already on disk.
+volumes:
+  stt-models:
+  tts-models:
+  tts-long-models:
+  tts-long-out:

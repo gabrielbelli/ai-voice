@@ -1,8 +1,8 @@
 # voice-common
 
-The shared wire contract for [stt-stack](https://github.com/gabrielbelli/stt-stack),
-[tts-stack](https://github.com/gabrielbelli/tts-stack) and
-[tts-long](https://github.com/gabrielbelli/tts-long).
+The shared wire contract for [services/stt](../../services/stt/README.md),
+[services/tts](../../services/tts/README.md) and
+[services/tts-long](../../services/tts-long/README.md).
 
 ```text
 voice_common.auth         API keys, the exemption set, the 401
@@ -137,55 +137,71 @@ is one every client is taught to stop validating.
 
 ## Installing
 
-One identical line in each service's `requirements.txt`, with the readable tag
-in a comment above it:
+One line in each consuming service's `requirements.txt`, a path into this same
+tree:
 
 ```text
-# voice-common v1.0.0 — https://github.com/gabrielbelli/voice-common
-voice-common @ https://github.com/gabrielbelli/voice-common/archive/<40-char-sha>.tar.gz
+./packages/common            # services/stt — no extras
+./packages/common[audio]     # services/tts and services/tts-long — numpy
 ```
 
-Plus `voice-common[audio] @ ...` for the two TTS services, which need numpy
-anyway.
+**The path is relative to the working directory, not to the file.** pip
+resolves a path requirement against the process's cwd, so every install runs
+from the repository root — which is what the Containerfiles' `WORKDIR` and
+every CI job do. Reading a `requirements.txt` from inside its own service
+directory fails with `Expected package name at the start of dependency
+specifier`, which reads like a syntax error in the file and is not one.
+
+Naming the path twice with different extras is not a conflict: pip's resolver
+unions them, which is how `services/tts/requirements-dev.txt` adds
+`[conformance]` on top of the `[audio]` its `-r requirements.txt` already
+brought in.
+
+### Why a path, when the SHA pin was right
+
+The pin was right *while this was a separate repository*. Its reasoning is
+worth keeping, because it is the reasoning that a fourth consumer outside this
+tree would revive:
 
 - **A tarball URL, not `git+https://`**: `python:3.x-slim-trixie` has no git
   binary, so a git dependency costs an extra apt layer in three images.
 - **A SHA, not a tag**: a tag can be moved; the archive-by-SHA URL is genuinely
-  immutable. The tag survives as the human-readable half in the comment, which
-  the release workflow should emit as a pair so the line is generated rather
-  than hand-edited.
-- **Not PyPI**: three consumers, one namespace, none external. A published wheel
-  buys release ceremony and nothing else. This is already a valid sdist, so the
-  move is a `twine upload` away if a fourth consumer appears.
-- **Not vendoring or a subtree**: that *is* the status quo, and it is what
-  produced 197/187/170 differing lines and three different bug sets.
+  immutable.
+- **Not PyPI**: three consumers, one namespace, none external. A published
+  wheel buys release ceremony and nothing else. This is still a valid sdist, so
+  the move is a `twine upload` away if a fourth consumer appears.
+- **Not vendoring**: vendoring *was* the status quo, and it is what produced
+  197/187/170 differing lines and three different bug sets.
 - **Not a submodule**: the pin lands in `.gitmodules` as a raw SHA nobody reads
   in review, every CI checkout needs `submodules: true`, and the dependencies
   still have to be duplicated into each `requirements.txt` by hand.
 
-A change here does **not** force three rebuilds. Each service pins its own SHA
-and bumps on its own schedule. What *should* force three rebuilds is a
-security-relevant fix — which is precisely the case that today does not happen
-at all.
+What the pin bought was reproducibility, and a path in one repository gives the
+same thing more cheaply: **the commit is the pin**. A checkout of any revision
+of this repository builds the services against exactly the shared code that
+revision contains, and no state outside `git log` records which version that
+was.
 
-The honest ongoing cost: this repo needs its own CI, its own tests and a
-release, and every change has to be validated against three consumers.
-`voice_common.conformance` is the answer to that last part.
+What it cost was the gap. A fix here reached a service only after a push, a
+tag, a re-pin and a rebuild, three times over — so a change was **not** forced
+on the consumers, and the one case where it should be, a security-relevant fix,
+was the case that did not happen at all. That inversion is now the other way
+round: a change here rebuilds all four images in one CI run, and there is
+nowhere for a stale copy to hide.
 
-## Adoption order
-
-1. **tts-stack** — it already has the corrected auth and the strictest TLS
-   readability check, so it is the smallest diff and the reference.
-2. **tts-long**.
-3. **stt-stack** last: it is the only one that inverts its enforcement model
-   from per-route dependencies to middleware, and that should go after the
-   middleware has run in two services.
+The honest remaining cost is unchanged in kind: every change here has to be
+validated against three consumers. `voice_common.conformance` is the answer to
+that, and it now runs in the same pipeline as this package's own tests rather
+than in three other repositories.
 
 ## Tests
 
+Run from this directory, so pyproject's `testpaths` and its
+`filterwarnings = ["error"]` apply:
+
 ```bash
 python -m venv .venv && ./.venv/bin/pip install -e '.[audio,conformance]'
-./.venv/bin/python -m pytest -q
+cd packages/common && ../../.venv/bin/python -m pytest -q
 ```
 
 Every test is named after the failure it prevents, so the next person reading

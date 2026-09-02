@@ -17,15 +17,27 @@ numpy==2.3.4
 # hook — so the library leaves with it.
 
 # The auth middleware, the OpenAI error envelope, the health route and the TLS
-# entrypoint, shared with stt-stack and tts-long instead of hand-copied into
-# each. Three copies of app/auth.py drifted into three DIFFERENT defects, one
-# per repo; that is what this pin exists to stop happening again.
+# entrypoint, shared with services/stt and services/tts-long instead of
+# hand-copied into each. Three copies of app/auth.py drifted into three
+# DIFFERENT defects, one per repo; that is what this dependency exists to stop
+# happening again.
 #
-# Pinned to a commit rather than a tag or a branch: an image build must produce
-# the same bytes next month, and a moving ref in a requirements file is a
-# supply-chain decision made by whoever pushed last. A tarball rather than
-# `git+ssh` so the build needs neither git nor a deploy key.
+# A PATH into this repository, not a tarball pinned by SHA. The pin was right
+# while voice-common was its own repository: a change there reached this
+# service only after a push, a tag and a re-pin, and the SHA is what made the
+# build reproducible. In one repository the same pin becomes a liability — it
+# lets packages/common and the services that embed it sit at different
+# revisions inside a single commit, which is the one state a monorepo exists to
+# make unrepresentable. The commit is the pin now, and `git log` is the only
+# place either version is recorded.
+#
+# The path is relative to the CURRENT WORKING DIRECTORY, not to this file: pip
+# resolves a path requirement against the process's cwd. Checked rather than
+# assumed — reading this file from its own directory fails with "Expected
+# package name at the start of dependency specifier", which reads like a syntax
+# error in the file and is not one. So every install runs from the repository
+# root, which is what the Containerfile's WORKDIR and every CI job do.
 #
 # The [audio] extra is numpy, which is pinned above and already in the image;
 # the extra takes no second copy, it only records the dependency honestly.
-voice-common[audio] @ https://github.com/gabrielbelli/voice-common/archive/4429e64a97926d17e00e8a5982208e7ffecfab2e.tar.gz
+./packages/common[audio]

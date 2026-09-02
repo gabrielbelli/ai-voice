@@ -41,7 +41,7 @@ publishes `:pre` and never `:latest`.
 ```bash
 docker run -p 8000:8000 -v stt-models:/models \
   --cpus 4 -e STT_THREADS=4 \
-  ghcr.io/gabrielbelli/stt-stack:pre
+  ghcr.io/gabrielbelli/ai-voice-stt:pre
 ```
 
 First start downloads the selected model into the volume. Later starts are
@@ -297,7 +297,7 @@ decoders tolerate its absence.
 ```bash
 docker run -p 8000:8000 -v stt-models:/models \
   -e STT_API_KEYS="$(openssl rand -hex 32)" \
-  ghcr.io/gabrielbelli/stt-stack:pre
+  ghcr.io/gabrielbelli/ai-voice-stt:pre
 ```
 
 **Unset means no authentication**, and the service says so at every startup:
@@ -550,7 +550,7 @@ capped.
 ```bash
 docker run -p 8000:8000 -v stt-models:/models \
   --cpus 4 -e STT_THREADS=4 \
-  ghcr.io/gabrielbelli/stt-stack:pre
+  ghcr.io/gabrielbelli/ai-voice-stt:pre
 ```
 
 Pin to specific cores when the host is shared, so the service cannot be
@@ -559,7 +559,7 @@ scheduled onto whatever else is busy:
 ```bash
 docker run -p 8000:8000 -v stt-models:/models \
   --cpuset-cpus 0-3 -e STT_THREADS=4 \
-  ghcr.io/gabrielbelli/stt-stack:pre
+  ghcr.io/gabrielbelli/ai-voice-stt:pre
 ```
 
 Compose:
@@ -567,7 +567,7 @@ Compose:
 ```yaml
 services:
   stt:
-    image: ghcr.io/gabrielbelli/stt-stack:pre
+    image: ghcr.io/gabrielbelli/ai-voice-stt:pre
     ports: ["8000:8000"]
     volumes: ["stt-models:/models"]
     environment:
@@ -597,27 +597,37 @@ accuracy, and costs an order of magnitude in latency.
 
 The API keys and the 401, OpenAI's error envelope, the `/health` route, the log
 level switch and the container entrypoint all come from
-[voice-common](https://github.com/gabrielbelli/voice-common), which this
-service shares with `tts-stack` and `tts-long`. Each of those used to be a
+[packages/common](../../packages/common/README.md), which this service shares
+with `services/tts` and `services/tts-long`. Each of those used to be a
 hand-vendored copy in every repo; the three copies of `auth.py` alone differed
 by 170–197 lines and had drifted into three *different* defects, one per copy.
 
-It is pinned by SHA in `requirements.txt`, so a change there does not force a
-rebuild here. What keeps the pin honest is `tests/test_conformance.py`: the
-package ships its own pytest suite and this repo runs it against the app it
-actually builds, so a bad bump fails at the build rather than in production.
+It is a **path dependency** in `requirements.txt` — `./packages/common`, from
+the working tree. It used to be a tarball pinned by SHA, which meant a change
+there did not reach this service until it was pushed, tagged and re-pinned.
+One repository removes that gap: the commit is the pin. What keeps it honest is
+`tests/test_conformance.py`, which runs the suite the package ships against the
+app this service actually builds, so a bad change to the shared code fails in
+CI rather than in production.
 
-That pin is also why `app/errors.py` exists. The specification requires `param`
-on every error and an envelope on 404 and 405, and voice-common emits neither
-yet; a fix there is not a fix here until the pin moves, so this service
-completes the envelope on its own — over the shared code rather than instead of
-it. `tests/test_parity.py` asserts the result, along with every other field on
-the compatible surface, against a recogniser that is not a model, so CI runs
-all of it without downloading 460 MB.
+`app/errors.py` exists because of the old pin. The specification requires
+`param` on every error and an envelope on 404 and 405, and `voice_common.errors`
+emits neither, so this service completes the envelope on its own — over the
+shared code rather than instead of it. **The reason it could not simply be
+moved is now gone**: a pin cannot name a commit that has not been published,
+and there is no pin any more. Merging it into `voice_common.errors` is a
+follow-up with no blocker left, not a constraint. `tests/test_parity.py`
+asserts the result, along with every other field on the compatible surface,
+against a recogniser that is not a model, so CI runs all of it without
+downloading 460 MB.
+
+Install from the repository root — pip resolves `./packages/common` against the
+working directory — and run pytest from here, because `import app.main` needs
+this directory as the rootdir:
 
 ```bash
-python -m venv .venv && ./.venv/bin/pip install -r requirements.txt pytest httpx
-./.venv/bin/python -m pytest tests -q
+pip install -r services/stt/requirements.txt './packages/common[conformance]'
+cd services/stt && python -m pytest tests -q
 ```
 
 Everything particular to speech-to-text stays here: the recognisers, the VAD,

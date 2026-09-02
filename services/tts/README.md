@@ -10,8 +10,7 @@ text              →  /v1/audio/speech   OpenAI's shape, buffered or SSE
   ↓  wav  opus  mp3  aac  flac  pcm
 ```
 
-Sibling of [stt-stack](https://github.com/gabrielbelli/stt-stack), same
-conventions.
+Sibling of [services/stt](../stt/README.md), same conventions.
 
 ## Status
 
@@ -23,7 +22,7 @@ publishes `:pre` and never `:latest`.
 ```bash
 docker run -p 8001:8001 -v tts-models:/models \
   --cpus 4 -e TTS_THREADS=4 \
-  ghcr.io/gabrielbelli/tts-stack:pre
+  ghcr.io/gabrielbelli/ai-voice-tts:pre
 ```
 
 First start downloads ~340 MB into the volume. Later starts are immediate.
@@ -502,7 +501,7 @@ Off by default. Set `TTS_API_KEYS` to a comma-separated list to turn it on:
 ```bash
 docker run -p 8001:8001 -v tts-models:/models \
   -e TTS_API_KEYS=sk-workstation,sk-laptop \
-  ghcr.io/gabrielbelli/tts-stack:pre
+  ghcr.io/gabrielbelli/ai-voice-tts:pre
 ```
 
 ```bash
@@ -567,7 +566,7 @@ docker run -p 8001:8001 -v tts-models:/models \
   -e TTS_TLS_CERT=/certs/fullchain.pem \
   -e TTS_TLS_KEY=/certs/privkey.pem \
   -e TTS_API_KEYS=sk-workstation \
-  ghcr.io/gabrielbelli/tts-stack:pre
+  ghcr.io/gabrielbelli/ai-voice-tts:pre
 ```
 
 > **No self-signed certificate is ever generated.** A certificate that appears
@@ -645,7 +644,7 @@ threads.
 ```bash
 docker run -p 8001:8001 -v tts-models:/models \
   --cpus 4 -e TTS_THREADS=4 --memory 2g \
-  ghcr.io/gabrielbelli/tts-stack:pre
+  ghcr.io/gabrielbelli/ai-voice-tts:pre
 ```
 
 Steady state is about 400 MB, so 2 GB is generous.
@@ -683,8 +682,9 @@ are excluded for their non-commercial licences.
 The API key middleware, the OpenAI error envelope, the `/health` route, the
 `Segment` and OpenAI request models, the PCM and splicing helpers, the logging
 setup and the TLS entrypoint are not written here. They come from
-[voice-common](https://github.com/gabrielbelli/voice-common), pinned to a
-commit in `requirements.txt` and shared with stt-stack and tts-long.
+[packages/common](../../packages/common/README.md), installed as a path
+dependency in `requirements.txt` and shared with `services/stt` and
+`services/tts-long`.
 
 That is not tidiness. The three services each carried their own copy of
 `app/auth.py`; the copies drifted by 170 to 197 lines, and one review round
@@ -722,9 +722,11 @@ its aliases, the ffmpeg encoder set and its bitrates, the format enum, the
 `/v1` 404 and 405 handlers and the middleware that fills `param` into the shared
 auth middleware's `401` all belong in `voice_common.errors` — that is where the
 envelope lives and all three services need them. They are here because the
-shared package is pinned to a commit tarball, so a change there reaches this
-image only on the next bump, and this service is live now. The module is written
-to be lifted across unchanged.
+shared package used to be pinned to a commit tarball, so a change there reached
+this image only on the next bump, and this service was live. **That blocker is
+gone**: the package is a path dependency from this same tree now, and moving the
+module across is a follow-up rather than something a pin forbids. It is written
+to be lifted unchanged.
 
 ## Licence
 

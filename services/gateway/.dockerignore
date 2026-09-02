@@ -1,8 +1,0 @@
-.git
-.github
-tests
-pytest.ini
-*.md
-!README.md
-__pycache__
-.venv

@@ -9,25 +9,25 @@
 # The model is NOT baked in. It is ~310 MB plus 28 MB of voice embeddings, and
 # it downloads into the volume at /models on first start.
 #
-# Build:
-#   docker build -t tts-stack .
+# Build, from the repository root:
+#   docker build -f services/tts/Containerfile -t ai-voice-tts .
 #
 # Run:
-#   docker run -p 8001:8001 -v tts-models:/models --cpus 4 -e TTS_THREADS=4 tts-stack
+#   docker run -p 8001:8001 -v tts-models:/models --cpus 4 -e TTS_THREADS=4 ai-voice-tts
 #
 # Run with authentication and TLS:
 #   docker run -p 8001:8001 -v tts-models:/models -v /etc/tts-certs:/certs:ro \
 #     -e TTS_API_KEYS=key-one,key-two \
 #     -e TTS_TLS_CERT=/certs/fullchain.pem -e TTS_TLS_KEY=/certs/privkey.pem \
-#     tts-stack
+#     ai-voice-tts
 #
 # Both are off when their variables are unset, which is how the service shipped
 # and how it stays on upgrade. The key file must be readable by uid 1000; the
 # entrypoint checks that and refuses to start rather than falling back to HTTP.
 #
-# That entrypoint is no longer in this repo. It ships in voice-common and pip
-# installs it to /usr/local/bin, so the TLS logic and the auth logic ride the
-# same pin and cannot be at different versions inside one image — which is
+# That entrypoint is not in this service. It ships in packages/common and pip
+# installs it to /usr/local/bin, so the TLS logic and the auth logic come from
+# one tree and cannot be at different versions inside one image — which is
 # exactly how three copies of the script ended up with three different holes.
 
 FROM python:3.13-slim-trixie
@@ -46,10 +46,27 @@ RUN apt-get update \
 
 WORKDIR /srv
 
-COPY requirements.txt .
+# The build context is the REPOSITORY ROOT, not this directory. packages/common
+# is a path dependency now, and pip cannot install what the context does not
+# contain — a context of services/tts has no packages/ in it at all. So every
+# COPY below is repo-relative and the build runs from the root:
+#
+#   docker build -f services/tts/Containerfile -t ai-voice-tts .
+#
+# Building from inside services/tts fails on the first COPY. That is the
+# failure worth having: a wrong context otherwise surfaces as a pip error about
+# a path, several minutes into a build.
+COPY packages/common/ ./packages/common/
+COPY services/tts/requirements.txt ./requirements.txt
+
+# Run from /srv, because requirements.txt names `./packages/common` and pip
+# resolves a path requirement against the process's cwd, not against the file
+# it read it from. The tree copied above stays in the image — deleting it in a
+# later layer would not shrink anything, and the copy that actually gets
+# imported is the one pip built into site-packages.
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app/ ./app/
+COPY services/tts/app/ ./app/
 
 # VOICE_* are read by the shared entrypoint and are image settings, not
 # operator settings: they only tell it which prefix this service's TLS

@@ -18,9 +18,8 @@ One port, one key, three speech services.
   /health                 └─  all three, fanned out, no key required
 ```
 
-Sibling of [stt-stack](https://github.com/gabrielbelli/stt-stack),
-[tts-stack](https://github.com/gabrielbelli/tts-stack) and
-[tts-long](https://github.com/gabrielbelli/tts-long), same conventions. No
+Sibling of [services/stt](../stt/README.md), [services/tts](../tts/README.md)
+and [services/tts-long](../tts-long/README.md), same conventions. No
 torch, no model, no volume, no state — the image is `fastapi` and `httpx` on
 the slim base.
 
@@ -63,7 +62,7 @@ docker run -p 8080:8080 \
   -e GATEWAY_TTS_URL=http://tts-stack:8001 \
   -e GATEWAY_TTS_LONG_URL=http://tts-long:8002 \
   -e GATEWAY_API_KEYS=sk-workstation,sk-laptop \
-  ghcr.io/gabrielbelli/voice-gateway:pre
+  ghcr.io/gabrielbelli/ai-voice-gateway:pre
 ```
 
 ```bash
@@ -193,7 +192,7 @@ checks can tell.
 
 ```bash
 docker run -p 8080:8080 -e GATEWAY_API_KEYS=sk-workstation,sk-laptop \
-  ghcr.io/gabrielbelli/voice-gateway:pre
+  ghcr.io/gabrielbelli/ai-voice-gateway:pre
 ```
 
 ```bash

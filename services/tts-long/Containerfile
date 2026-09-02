@@ -14,12 +14,12 @@
 # would otherwise target is a GTX 1060: Pascal, whose FP16 runs at 1/64 rate,
 # so it would not help even where one exists.
 #
-# Build:
-#   docker build -t tts-long .
+# Build, from the repository root:
+#   docker build -f services/tts-long/Containerfile -t ai-voice-tts-long .
 #
 # Run:
 #   docker run -p 8002:8002 -v tts-long-models:/models -v tts-long-out:/output \
-#              --cpus 8 -e TTS_THREADS=8 tts-long
+#              --cpus 8 -e TTS_THREADS=8 ai-voice-tts-long
 
 # 3.12, not 3.13+: resemble-perth imports pkg_resources, which 3.14 removed.
 # The watermarker is stubbed in app/synth.py as well, but pinning the
@@ -47,16 +47,34 @@ RUN apt-get update \
 
 WORKDIR /srv
 
-COPY requirements.txt .
-# voice-common ships voice-entrypoint.sh through setuptools `script-files`, so
-# it lands in /usr/local/bin alongside the interpreter and rides the same pin
-# as the auth code. Checked here rather than discovered at run time, the way
-# setpriv is above: a wheel that stopped installing the script would otherwise
-# produce an image that builds and then cannot start.
+# The build context is the REPOSITORY ROOT, not this directory. packages/common
+# is a path dependency now, and pip cannot install what the context does not
+# contain — a context of services/tts-long has no packages/ in it at all. So every
+# COPY below is repo-relative and the build runs from the root:
+#
+#   docker build -f services/tts-long/Containerfile -t ai-voice-tts-long .
+#
+# Building from inside services/tts-long fails on the first COPY. That is the
+# failure worth having: a wrong context otherwise surfaces as a pip error about
+# a path, several minutes into a build.
+COPY packages/common/ ./packages/common/
+COPY services/tts-long/requirements.txt ./requirements.txt
+
+# Run from /srv, because requirements.txt names `./packages/common` and pip
+# resolves a path requirement against the process's cwd, not against the file
+# it read it from. The tree copied above stays in the image — deleting it in a
+# later layer would not shrink anything, and the copy that actually gets
+# imported is the one pip built into site-packages.
+#
+# packages/common ships voice-entrypoint.sh through setuptools `script-files`,
+# so it lands in /usr/local/bin alongside the interpreter and comes from the
+# same tree as the auth code. Checked here rather than discovered at run time,
+# the way setpriv is above: a build that stopped installing the script would
+# otherwise produce an image that builds and then cannot start.
 RUN pip install --no-cache-dir -r requirements.txt \
  && command -v voice-entrypoint.sh
 
-COPY app/ ./app/
+COPY services/tts-long/app/ ./app/
 
 # VOICE_TLS_PREFIX and VOICE_CHOWN_DIRS parameterise the shared entrypoint.
 # They are image settings rather than operator settings: the prefix is what
@@ -100,18 +118,27 @@ RUN useradd --create-home --uid 1000 tts \
 VOLUME ["/models", "/output"]
 EXPOSE 8002
 
-# /health is exempt from API key auth precisely so this can call it, and until
-# now nothing did — the exemption was justified by a healthcheck that did not
-# exist. It is also the check that would have caught /v1/audio/speech holding
-# every AnyIO worker thread while /health could not be served.
+# /health is exempt from API key auth precisely so a probe can call it, and it
+# is the check that would have caught /v1/audio/speech holding every AnyIO
+# worker thread while /health could not be served.
+#
+# There is no HEALTHCHECK instruction, and the one that used to be here never
+# reached a published image: HEALTHCHECK is not a field in the OCI image spec,
+# and OCI is buildah's DEFAULT format (`buildah bud --format`, default "oci"),
+# which is what CI runs. The probe is passed at run time instead, which is
+# where the three sibling images have always had theirs. compose.yaml at the
+# repository root carries it, with the 900 s start_period the first 3 GB
+# download needs:
+#
+#   --health-cmd "python -c \"import os,ssl,urllib.request as u; \
+#     s='https' if os.getenv('TTS_TLS_CERT') else 'http'; \
+#     u.urlopen(f'{s}://127.0.0.1:8002/health', timeout=8, \
+#     context=ssl._create_unverified_context()).read()\""
 #
 # python rather than curl, which is not in this image and is not worth a layer.
-# Scheme follows TTS_TLS_CERT because the entrypoint turns that into HTTPS, and
-# verification is off: this is loopback, asking whether the process still
-# answers, not who it claims to be. start-period is generous because the first
-# job downloads ~3 GB of weights and the container must not be killed over it.
-HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
-    CMD ["python", "-c", "import os,ssl,urllib.request as u; s='https' if os.getenv('TTS_TLS_CERT') else 'http'; u.urlopen(f'{s}://127.0.0.1:8002/health', timeout=8, context=ssl._create_unverified_context()).read()"]
+# The scheme follows TTS_TLS_CERT because the entrypoint turns that into HTTPS,
+# and verification is off: this is loopback, asking whether the process still
+# answers, not who it claims to be.
 
 ENTRYPOINT ["voice-entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002"]

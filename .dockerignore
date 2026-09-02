@@ -1,0 +1,53 @@
+# One ignore file, because there is now one build context: the repository root.
+#
+# The four per-service .dockerignore files are gone. Docker and buildah read
+# the ignore file at the CONTEXT root and nowhere else, so the moment the
+# context moved out of services/<name>/ those four stopped being consulted —
+# leaving four files that look authoritative and do nothing, which is worse
+# than none. (BuildKit will also read <Containerfile>.dockerignore beside the
+# Containerfile; none of these were named that, so none of them were being
+# read under any builder.)
+#
+# What this file is actually for, in order:
+#   1. Keeping packages/common's test tree out of the three images that COPY
+#      that directory whole. This is the only line here that changes an image.
+#   2. Keeping .git out of the context, which is most of the bytes on the wire.
+#   3. Not invalidating a build layer over a file no image contains.
+
+.git
+
+# A workflow edit must not invalidate the pip layer of four builds, and CI
+# configuration has no business inside an image.
+.github
+
+# The conformance suite runs in CI against the source tree, never from inside
+# an image. packages/common is COPYd whole by stt, tts and tts-long, so this
+# line is the one that keeps pytest and its fixtures out of a service image.
+# Note the package's own README.md and LICENSE are deliberately NOT excluded:
+# pyproject.toml declares `readme = "README.md"`, and setuptools fails the
+# build outright if the file named there is missing from the context.
+packages/common/tests
+
+# Not copied by any Containerfile — these lines only keep the context small
+# and say plainly what is not build input.
+services/*/tests
+services/*/conftest.py
+services/*/pytest.ini
+services/*/requirements-dev.txt
+
+# The benchmark is a client, not part of the service. It has its own
+# requirements.txt and pulls a second Whisper implementation.
+services/stt/bench
+
+# Models are downloaded into the volume at /models on first start and are
+# never baked in — a local models/ directory is gigabytes of context for
+# nothing. Same for sample audio.
+**/models
+**/*.wav
+
+# Deployment, not build input.
+compose.yaml
+
+**/__pycache__
+**/*.pyc
+**/.venv

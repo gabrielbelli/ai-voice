@@ -1,7 +1,0 @@
-.git
-.github
-models
-*.wav
-*.md
-!README.md
-__pycache__

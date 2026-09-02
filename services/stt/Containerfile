@@ -11,11 +11,11 @@
 # selected downloads into the volume at /models on first start — Parakeet is
 # ~460 MB, Whisper large-v3 ~2.9 GB.
 #
-# Build:
-#   docker build -t stt-stack .
+# Build, from the repository root:
+#   docker build -f services/stt/Containerfile -t ai-voice-stt .
 #
 # Run:
-#   docker run -p 8000:8000 -v stt-models:/models --cpus 4 -e STT_THREADS=4 stt-stack
+#   docker run -p 8000:8000 -v stt-models:/models --cpus 4 -e STT_THREADS=4 ai-voice-stt
 
 FROM python:3.13-slim-trixie
 
@@ -36,11 +36,28 @@ RUN apt-get update \
 
 WORKDIR /srv
 
-COPY requirements.txt .
+# The build context is the REPOSITORY ROOT, not this directory. packages/common
+# is a path dependency now, and pip cannot install what the context does not
+# contain — a context of services/stt has no packages/ in it at all. So every
+# COPY below is repo-relative and the build runs from the root:
+#
+#   docker build -f services/stt/Containerfile -t ai-voice-stt .
+#
+# Building from inside services/stt fails on the first COPY. That is the
+# failure worth having: a wrong context otherwise surfaces as a pip error about
+# a path, several minutes into a build.
+COPY packages/common/ ./packages/common/
+COPY services/stt/requirements.txt ./requirements.txt
+
+# Run from /srv, because requirements.txt names `./packages/common` and pip
+# resolves a path requirement against the process's cwd, not against the file
+# it read it from. The tree copied above stays in the image — deleting it in a
+# later layer would not shrink anything, and the copy that actually gets
+# imported is the one pip built into site-packages.
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app/ ./app/
-COPY glossary.txt /etc/stt-stack/glossary.txt
+COPY services/stt/app/ ./app/
+COPY services/stt/glossary.txt /etc/stt-stack/glossary.txt
 
 # HF_HOME points at the volume so models survive container replacement.
 # Without it every restart re-downloads more than a gigabyte.

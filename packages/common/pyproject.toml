@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "voice-common"
 version = "1.0.0"
-description = "Shared wire contract for stt-stack, tts-stack and tts-long."
+description = "Shared wire contract for the ai-voice speech services."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "BSD-2-Clause"
@@ -13,22 +13,22 @@ license-files = ["LICENSE"]
 authors = [{ name = "Gabriel Belli" }]
 
 # Deliberately a floor and not a pin. Each consumer pins its own fastapi in
-# its requirements.txt — all three are on 0.121.2 today — and a pin here would
+# its requirements.txt — all four are on 0.121.2 today — and a pin here would
 # either duplicate that decision or fight it during a resolve.
 dependencies = ["fastapi>=0.115"]
 
 [project.optional-dependencies]
-# numpy is an extra so stt-stack, which needs none of voice_common.audio, does
-# not take it. It is also the one pin that genuinely conflicts across the
-# three: tts-stack is on 2.3.4, and tts-long must leave it unpinned because
-# chatterbox-tts requires numpy<2 on Python 3.12. Unbounded here for that
-# reason; the consumer's own requirements.txt decides.
+# numpy is an extra so services/stt, which needs none of voice_common.audio,
+# does not take it. It is also the one pin that genuinely conflicts across the
+# three: services/tts is on 2.3.4, and services/tts-long must leave it unpinned
+# because chatterbox-tts requires numpy<2 on Python 3.12. Unbounded here for
+# that reason; the consumer's own requirements.txt decides.
 audio = ["numpy"]
 # Needed only to RUN voice_common.conformance, in a consumer's CI or here.
 conformance = ["pytest>=8", "httpx>=0.27"]
 
 [project.urls]
-Homepage = "https://github.com/gabrielbelli/voice-common"
+Homepage = "https://github.com/gabrielbelli/ai-voice"
 
 [tool.setuptools]
 packages = ["voice_common"]

@@ -1,0 +1,497 @@
+name: build
+
+# One pipeline for five things: four images and the package all four of them
+# embed. Each service used to carry its own .github/workflows/build.yml, which
+# worked while each was its own repository and stopped working the moment they
+# were merged — GitHub reads .github at the REPOSITORY root and nowhere else,
+# so after the import nothing built at all. This file is those five workflows,
+# with the per-service conventions kept exactly and the differences between
+# them reconciled where they were accidental.
+#
+# Pre-release lives on `prerelease`; `main` carries only validated versions.
+# Images from `prerelease` are tagged :pre and :pre-<sha> and never :latest, so
+# pulling the default tag can never pick up an unvalidated build.
+on:
+  push:
+    branches: [main, prerelease]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  # buildah's overlay driver leaves overlayfs bookkeeping xattrs on directories
+  # a COPY merges into. vfs produces none. Same reason as the FreeBSD images.
+  STORAGE_DRIVER: vfs
+
+jobs:
+  # ------------------------------------------------------------- filter --
+  #
+  # Which of the four images this commit can possibly have changed. A monorepo
+  # without this rebuilds tts-long — torch, several gigabytes, on two
+  # architectures — because someone fixed a typo in the gateway's README.
+  #
+  # The one rule worth stating twice: a change under packages/common rebuilds
+  # ALL FOUR. Three of them install it as a path dependency, so its code is
+  # inside their images; the gateway does not, and is rebuilt anyway, because
+  # "this service is exempt from the shared package" is exactly the kind of
+  # fact that is true until it quietly is not.
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      services: ${{ steps.filter.outputs.services }}
+      common: ${{ steps.filter.outputs.common }}
+      build_matrix: ${{ steps.filter.outputs.build_matrix }}
+      manifest_matrix: ${{ steps.filter.outputs.manifest_matrix }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The whole history, because a push is diffed against
+          # github.event.before, which can be any number of commits back and is
+          # not reachable from a shallow clone. A missing base is not fatal —
+          # the script below falls back to building everything — but it would
+          # make the filter useless exactly when a branch is busiest.
+          fetch-depth: 0
+
+      - name: Work out which services this commit can affect
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          REF: ${{ github.ref }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, subprocess, sys
+
+          # The four services and everything the rest of this file needs to
+          # know about each. One table rather than four near-identical jobs:
+          # the per-service differences that remain are the test setups below,
+          # which are genuinely different, and the import checks, which each
+          # record a real failure.
+          SERVICES = {
+              "stt":      {"image": "ai-voice-stt",      "base": "python:3.13-slim-trixie"},
+              "tts":      {"image": "ai-voice-tts",      "base": "python:3.13-slim-trixie"},
+              # 3.12, not 3.13: resemble-perth imports pkg_resources. The old
+              # workflow annotated this image as 3.13-slim-trixie while its
+              # Containerfile said 3.12 — an annotation is a claim about the
+              # image and that one was false.
+              "tts-long": {"image": "ai-voice-tts-long", "base": "python:3.12-slim-trixie"},
+              "gateway":  {"image": "ai-voice-gateway",  "base": "python:3.13-slim-trixie"},
+          }
+          # Native runners per architecture rather than qemu. Every one of
+          # these images has RUN instructions (apt, pip), and emulated arm64
+          # pip installs take tens of minutes where a native runner takes two.
+          ARCHES = {"amd64": "ubuntu-24.04", "arm64": "ubuntu-24.04-arm"}
+
+          event, ref = os.environ["EVENT_NAME"], os.environ["REF"]
+
+          def exists(rev):
+              return bool(rev) and subprocess.run(
+                  ["git", "cat-file", "-e", rev + "^{commit}"],
+                  capture_output=True).returncode == 0
+
+          # actions/checkout hands a pull request the MERGE commit, so HEAD^1
+          # is the tip of the base branch and HEAD^1..HEAD is exactly what the
+          # PR proposes. A push has github.event.before.
+          if event == "pull_request":
+              base, why = "HEAD^1", "pull request, against the base branch tip"
+          elif event == "push" and not ref.startswith("refs/tags/"):
+              base, why = os.environ.get("BEFORE", ""), "push, against the previous tip"
+          else:
+              base, why = "", "tag or manual run"
+
+          if not exists(base):
+              # A new branch, a force push, a tag, or workflow_dispatch. There
+              # is nothing to diff against, and guessing narrow would silently
+              # skip an image. A release must publish all four regardless.
+              base, why = None, why + " (no usable base): building everything"
+
+          changed = []
+          if base:
+              changed = subprocess.run(["git", "diff", "--name-only", base, "HEAD"],
+                                       capture_output=True, text=True,
+                                       check=True).stdout.split()
+
+          SHARED = ("packages/common/",)
+          # A change to the pipeline or to the ignore file changes how every
+          # image is built, so neither can be treated as touching no service.
+          PIPELINE = (".github/workflows/build.yml", ".dockerignore")
+
+          if base is None:
+              selected = list(SERVICES)
+          elif any(p.startswith(SHARED) or p in PIPELINE for p in changed):
+              selected = list(SERVICES)
+              why += "; shared code or the pipeline changed, so all four"
+          else:
+              selected = [s for s in SERVICES
+                          if any(p.startswith(f"services/{s}/") for p in changed)]
+              why += f"; changed services: {selected or 'none'}"
+
+          # The pipeline counts here too: a change to this file can change how the
+          # package itself is tested, and a job that validates nothing is worse than
+          # a job that runs when it did not need to.
+          common = base is None or any(p.startswith(SHARED) or p in PIPELINE
+                                       for p in changed)
+
+          print("services=" + json.dumps(selected))
+          print("common=" + ("true" if common else "false"))
+          print("build_matrix=" + json.dumps({"include": [
+              dict(service=s, arch=a, runner=r, **SERVICES[s])
+              for s in selected for a, r in ARCHES.items()]}))
+          print("manifest_matrix=" + json.dumps({"include": [
+              dict(service=s, image=SERVICES[s]["image"]) for s in selected]}))
+
+          print(f"base={base} -> {why}", file=sys.stderr)
+          PY
+
+  # ------------------------------------------------------- the package --
+  #
+  # packages/common is not an image, so what CI has to prove is that it
+  # installs and that its own tests — including the conformance suite it ships
+  # to the three services — pass on both interpreters its consumers run: 3.12
+  # for tts-long, whose resemble-perth needs pkg_resources, and 3.13 for the
+  # other two.
+  common:
+    needs: changes
+    if: needs.changes.outputs.common == 'true'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install
+        # The same fastapi the three services pin, so a version skew shows up
+        # here rather than in a consumer's build.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e './packages/common[audio,conformance]' 'fastapi==0.121.2'
+
+      - name: Test
+        # From the package directory: its pyproject sets testpaths = ["tests"]
+        # and filterwarnings = ["error"], and both are read from the rootdir.
+        working-directory: packages/common
+        run: python -m pytest -q
+
+      - name: Check that a plain path install still ships the entrypoint
+        # This is exactly what the three service images now do, and it is the
+        # one failure a passing test run would not catch: setuptools installs
+        # voice-entrypoint.sh through `script-files`, and a build that stopped
+        # doing so would produce images that build cleanly and then cannot
+        # start, with the first symptom on the host. The old workflow checked
+        # this against an sdist, because an sdist was how the services consumed
+        # the package; they consume the directory now, so that is what is
+        # checked.
+        run: |
+          python -m pip install --force-reinstall --no-deps './packages/common'
+          test -x "$(python -c 'import sysconfig; print(sysconfig.get_path("scripts"))')/voice-entrypoint.sh"
+
+  # ------------------------------------------------------- the services --
+  #
+  # Four jobs rather than one matrix, because the four setups differ in ways
+  # that matter and each difference is a scar: tts needs the ffmpeg its
+  # encoders shell out to, tts-long needs 3.12 and installs a deliberate subset
+  # instead of gigabytes of torch, gateway is the only one with tests of its
+  # own rather than the shared suite.
+  #
+  # All four install from the REPOSITORY ROOT and then run pytest from inside
+  # the service directory. Both halves are required: `./packages/common` in a
+  # requirements file resolves against the process's cwd, and every service's
+  # tests `import app.main`, which resolves only when that service's own
+  # directory is pytest's rootdir. Running pytest from the root would put four
+  # different `app` packages in scope at once.
+
+  stt:
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.services), 'stt')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'   # the version the image is built on
+
+      # packages/common ships the assertions for the wire contract this service
+      # shares with tts and tts-long, and they run here against the app this
+      # repository actually builds. No model is downloaded — the suite never
+      # runs the app's lifespan.
+      #
+      # [conformance] is pytest and httpx at the versions the package was
+      # tested with; requirements.txt above already brings the package itself
+      # in with no extras, and pip unions the two.
+      - name: Install
+        run: pip install -r services/stt/requirements.txt './packages/common[conformance]'
+
+      - name: Run the conformance suite against this app
+        working-directory: services/stt
+        run: python -m pytest tests -q
+
+  tts:
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.services), 'tts')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      # ffmpeg is a runtime dependency pip cannot supply, and this job once ran
+      # without it. That is not a cosmetic gap: `response_format` defaults to
+      # mp3, and every format but wav and pcm is encoded by feeding ffmpeg on a
+      # pipe, so the DEFAULT request shape cannot be answered without the
+      # binary. Popen raised FileNotFoundError, the route returned 500, and
+      # three tests that are about headers and validation rather than audio
+      # failed on it. It also gutted the run in silence — the encoding tests
+      # are marked `needs_ffmpeg` and skipped themselves, 17 skipped against 1,
+      # so the suite reported success over a third of itself never having run.
+      - name: Install ffmpeg, which the encoders shell out to
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Install the runtime and the conformance extra
+        run: pip install -r services/tts/requirements-dev.txt
+
+      - name: Run the conformance suite against this app
+        working-directory: services/tts
+        run: python -m pytest tests/ -q
+
+  tts-long:
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.services), 'tts-long')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'   # what the image runs; see the Containerfile
+
+      # ffmpeg for the three lossy formats. The encoder tests skip without it
+      # and the suite still passes, but skipping the format the schema DEFAULTS
+      # to would leave the most-used path unasserted in CI.
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
+      # Deliberately not `-r requirements.txt`: chatterbox and the CPU torch
+      # wheel are gigabytes and nothing asserted below imports either.
+      # app.synth imports them lazily, inside _ensure_loaded, precisely so this
+      # is possible. uvicorn is here for one test and one test only — the
+      # streaming one measures time-to-first-byte, which needs a real socket
+      # because TestClient runs the application to completion before it answers.
+      #
+      # The shared package is named as a path with both extras. It used to be
+      # grepped out of requirements.txt and rewritten with sed, because the
+      # line there was a tarball URL with a SHA in it that nobody wanted to
+      # keep in two places. A path has no SHA to drift, so it is simply written.
+      - name: Install what the suite actually imports
+        run: |
+          pip install './packages/common[audio,conformance]' \
+            "$(grep '^fastapi==' services/tts-long/requirements.txt)" \
+            "$(grep '^soundfile==' services/tts-long/requirements.txt)" \
+            "$(grep '^uvicorn' services/tts-long/requirements.txt)"
+
+      - name: Run the suite
+        working-directory: services/tts-long
+        run: python -m pytest tests -v
+
+  gateway:
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.services), 'gateway')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      # The siblings run a shared conformance suite because their behaviour is
+      # a model's output, which a unit test cannot assert. This one is a
+      # router, and every rule it implements — which backend a model string
+      # reaches, what a refused connection turns into, that the client's
+      # Authorization header never leaves the process — is assertable against
+      # mock backends in milliseconds.
+      - name: Install
+        run: pip install -r services/gateway/requirements-dev.txt
+
+      # The live smoke test skips itself when orko is unreachable, which from a
+      # GitHub runner it should be. Deselected by name anyway: a CI job must not
+      # depend on someone's NAS being awake, and must not queue work on it.
+      - name: Test
+        working-directory: services/gateway
+        run: pytest -q --deselect tests/test_live.py
+
+  # --------------------------------------------------------- the images --
+  build:
+    needs: [changes, common, stt, tts, tts-long, gateway]
+    # A `needs` job that is SKIPPED skips its dependents too, and skipping is
+    # the normal case here — that is the whole point of the filter. So the
+    # condition is written out: run unless something actually failed, and only
+    # when the filter selected at least one service.
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && needs.changes.outputs.services != '[]' }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      # One entry per (service, architecture) the filter selected, built in the
+      # `changes` job. An `include:` written out here could not be filtered:
+      # GitHub ADDS an include entry that matches no existing combination as a
+      # new one, so a static table would build all four however narrow the
+      # filter was.
+      matrix: ${{ fromJSON(needs.changes.outputs.build_matrix) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install buildah
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y buildah
+
+      # The context is `.`, the repository root, for every service. That is
+      # what lets a Containerfile COPY both its own directory and
+      # packages/common, which is the whole reason the path dependency works.
+      - name: Build
+        env:
+          SERVICE: ${{ matrix.service }}
+          ARCH: ${{ matrix.arch }}
+          BASE: ${{ matrix.base }}
+        run: |
+          buildah bud \
+            --platform "linux/${ARCH}" \
+            --annotation "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --annotation "org.opencontainers.image.revision=${{ github.sha }}" \
+            --annotation "org.opencontainers.image.licenses=BSD-2-Clause" \
+            --annotation "org.opencontainers.image.base.name=docker.io/library/${BASE}" \
+            -t "localhost/build:${SERVICE}-${ARCH}" \
+            -f "services/${SERVICE}/Containerfile" .
+
+      # The per-architecture runtime import check, kept per service because
+      # each one records a defect that really happened. An image is useless if
+      # its runtime cannot import, and that only shows up at run time: these
+      # packages ship per-architecture wheels, and a missing arm64 wheel builds
+      # fine and fails on the first request.
+      #
+      # `av` carries the same risk with none of the warning in stt: it is the
+      # entire decode path now that soundfile and libsndfile1 have gone, so the
+      # only ffmpeg there is the one bundled inside PyAV's wheel, and
+      # app/audio.py imports it lazily inside decode() to keep the codec tables
+      # off module load. Leaving soundfile on the tts line after the dependency
+      # left is what failed both builds with ModuleNotFoundError while the app
+      # itself was correct.
+      - name: Check the runtime imports on this architecture (stt)
+        if: matrix.service == 'stt'
+        run: |
+          buildah run --user root "$(buildah from localhost/build:stt-${{ matrix.arch }})" -- \
+            python -c "import onnx_asr, onnxruntime, av, faster_whisper, ctranslate2; print('ok', onnxruntime.__version__, ctranslate2.__version__, av.__version__)"
+
+      # ffmpeg is checked as well as the wheels, because it is a binary rather
+      # than a wheel and the encoders shell out to it — a missing one is a 500
+      # on the first mp3 request, which is the default format.
+      - name: Check the runtime imports on this architecture (tts)
+        if: matrix.service == 'tts'
+        run: |
+          buildah run --user root "$(buildah from localhost/build:tts-${{ matrix.arch }})" -- \
+            python -c 'import kokoro_onnx, onnxruntime, numpy; print("ok", onnxruntime.__version__, numpy.__version__)'
+          buildah run --user root "$(buildah from localhost/build:tts-${{ matrix.arch }})" -- \
+            ffmpeg -version
+
+      # torch is the reason libgomp1 is in that Containerfile: the amd64 wheels
+      # vendor their own libgomp.so.1 and the arm64 ones do not, so without it
+      # the image built cleanly on both and then failed to import torch on
+      # arm64. This check is what caught that.
+      - name: Check the runtime imports on this architecture (tts-long)
+        if: matrix.service == 'tts-long'
+        run: |
+          buildah run --user root "$(buildah from localhost/build:tts-long-${{ matrix.arch }})" -- \
+            python -c 'import torch, chatterbox, soundfile; print("ok", torch.__version__)'
+
+      # No compiled wheels of consequence here — the reason the siblings check
+      # this — but uvicorn[standard] pulls httptools and uvloop, which are, and
+      # an arm64 wheel that failed to build would install its pure-Python
+      # fallback silently or not at all.
+      - name: Check the runtime imports on this architecture (gateway)
+        if: matrix.service == 'gateway'
+        run: |
+          buildah run --user root "$(buildah from localhost/build:gateway-${{ matrix.arch }})" -- \
+            python -c 'import app.main, httpx, fastapi, uvicorn; print("ok", httpx.__version__, fastapi.__version__)'
+
+      # Every image also carries the shared entrypoint, except the gateway,
+      # which ships its own and depends on none of packages/common. A build
+      # that installed the package but not its `script-files` produces an image
+      # that starts and immediately exits with "exec: voice-entrypoint.sh: not
+      # found", which is a run-time failure this makes a build-time one.
+      - name: Check the shared entrypoint installed
+        if: matrix.service != 'gateway'
+        run: |
+          buildah run --user root "$(buildah from localhost/build:${{ matrix.service }}-${{ matrix.arch }})" -- \
+            sh -c 'command -v voice-entrypoint.sh'
+
+      - name: Log in to the registry
+        if: github.event_name != 'pull_request'
+        run: buildah login -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}" "${REGISTRY}"
+
+      - name: Push the per-architecture tag
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE: ${{ matrix.image }}
+          SERVICE: ${{ matrix.service }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          buildah push "localhost/build:${SERVICE}-${ARCH}" \
+            "docker://${REGISTRY}/${{ github.repository_owner }}/${IMAGE}:${GITHUB_SHA}-${ARCH}"
+
+  manifest:
+    needs: [changes, build]
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && github.event_name != 'pull_request' && needs.changes.outputs.services != '[]' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.manifest_matrix) }}
+    steps:
+      - name: Install buildah
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y buildah
+
+      - name: Log in to the registry
+        run: buildah login -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}" "${REGISTRY}"
+
+      # Which moving tags this ref is allowed to publish. `main` owns :latest;
+      # `prerelease` owns :pre and must never touch :latest. A tag push
+      # publishes its own version and, being cut from main, :latest as well.
+      - name: Assemble the multi-architecture tags
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -eu
+          dest="${REGISTRY}/${{ github.repository_owner }}/${IMAGE}"
+
+          buildah manifest create m
+          for arch in amd64 arm64; do
+            buildah manifest add m "docker://${dest}:${GITHUB_SHA}-${arch}"
+          done
+
+          case "$GITHUB_REF" in
+            refs/heads/main)
+              buildah manifest push --all m "docker://${dest}:latest"
+              buildah manifest push --all m "docker://${dest}:main-${GITHUB_SHA}"
+              ;;
+            refs/heads/prerelease)
+              buildah manifest push --all m "docker://${dest}:pre"
+              buildah manifest push --all m "docker://${dest}:pre-${GITHUB_SHA}"
+              ;;
+            refs/tags/*)
+              buildah manifest push --all m "docker://${dest}:${GITHUB_REF#refs/tags/}"
+              buildah manifest push --all m "docker://${dest}:latest"
+              ;;
+          esac

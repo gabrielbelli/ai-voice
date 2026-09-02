@@ -8,11 +8,22 @@
 # entrypoint that setuptools installs to /usr/local/bin. [audio] pulls numpy,
 # which this image needs anyway.
 #
-# A tarball URL by SHA rather than git+https: python:3.12-slim-trixie has no
-# git binary, and a SHA cannot be moved the way a tag can. The readable name of
-# the pin lives in the comment.
-# voice-common v1.0.0 — https://github.com/gabrielbelli/voice-common
-voice-common[audio] @ https://github.com/gabrielbelli/voice-common/archive/4429e64a97926d17e00e8a5982208e7ffecfab2e.tar.gz
+# A PATH into this repository, not a tarball pinned by SHA. The pin was right
+# while voice-common was its own repository: a change there reached this
+# service only after a push, a tag and a re-pin, and the SHA is what made the
+# build reproducible. In one repository the same pin becomes a liability — it
+# lets packages/common and the services that embed it sit at different
+# revisions inside a single commit, which is the one state a monorepo exists to
+# make unrepresentable. The commit is the pin now, and `git log` is the only
+# place either version is recorded.
+#
+# The path is relative to the CURRENT WORKING DIRECTORY, not to this file: pip
+# resolves a path requirement against the process's cwd. Checked rather than
+# assumed — reading this file from its own directory fails with "Expected
+# package name at the start of dependency specifier", which reads like a syntax
+# error in the file and is not one. So every install runs from the repository
+# root, which is what the Containerfile's WORKDIR and every CI job do.
+./packages/common[audio]
 
 chatterbox-tts==0.1.7
 resemble-perth==1.0.1

@@ -3,7 +3,7 @@
 Long-form text-to-speech. Chatterbox on CPU, as a **job queue** and an
 **SSE stream**.
 
-Sibling of [tts-stack](https://github.com/gabrielbelli/tts-stack), which runs
+Sibling of [services/tts](../tts/README.md), which runs
 Kokoro and answers requests directly. This one cannot: it is roughly twenty
 times slower and twenty times heavier. So it either streams the audio as it is
 made — `stream_format: "sse"`, OpenAI's own shape — or takes the work and
@@ -81,7 +81,7 @@ reasoning; `chunks` in the job body says how many a request became.
 docker run -p 8002:8002 \
   -v tts-long-models:/models -v tts-long-out:/output \
   --cpus 8 -e TTS_THREADS=8 --memory 10g \
-  ghcr.io/gabrielbelli/tts-long:pre
+  ghcr.io/gabrielbelli/ai-voice-tts-long:pre
 ```
 
 First job downloads ~3 GB of weights. The model **loads lazily and unloads
@@ -266,7 +266,7 @@ Chatterbox has no named voices. It **clones from a reference clip**, so a voice
 here is a file:
 
 ```bash
-docker run -v /srv/voices:/voices ... ghcr.io/gabrielbelli/tts-long:pre
+docker run -v /srv/voices:/voices ... ghcr.io/gabrielbelli/ai-voice-tts-long:pre
 # /voices/alloy.wav  -> voice "alloy"
 # /voices/gabriel.wav -> voice "gabriel"
 ```
@@ -366,7 +366,7 @@ docker run -p 8002:8002 \
   -e TTS_TLS_CERT=/certs/fullchain.pem \
   -e TTS_TLS_KEY=/certs/privkey.pem \
   -e TTS_API_KEYS='sk-alpha' \
-  ghcr.io/gabrielbelli/tts-long:pre
+  ghcr.io/gabrielbelli/ai-voice-tts-long:pre
 ```
 
 **Nothing generates a certificate.** A cert that appears by magic is a cert
@@ -376,7 +376,7 @@ your internal CA or Let's Encrypt, or terminate TLS in a reverse proxy in
 front of this and leave the container on HTTP.
 
 The flags are assembled in `voice-entrypoint.sh`, which
-[voice-common](https://github.com/gabrielbelli/voice-common) installs into
+[packages/common](../../packages/common/README.md) installs into
 `/usr/local/bin`, so this applies to the image — and only to the uvicorn
 command it knows how to add them to. If you run uvicorn directly, pass
 `--ssl-certfile` and `--ssl-keyfile` yourself.
@@ -433,31 +433,35 @@ at fp32 regardless.
 
 Authentication, the OpenAI error envelope, the `/health` contract, `Segment`,
 the PCM byte cast and the entrypoint all live in
-[voice-common](https://github.com/gabrielbelli/voice-common), pinned by SHA in
-`requirements.txt` and shared with tts-stack and stt-stack. Three
-hand-vendored copies of that code had drifted by 170 to 197 lines and carried
-three *different* bugs, two of which were this service's: a key with an accent
-in it could never authenticate, and `GET /health/` answered 401.
+[packages/common](../../packages/common/README.md), installed as a path
+dependency in `requirements.txt` and shared with `services/tts` and
+`services/stt`. Three hand-vendored copies of that code had drifted by 170 to
+197 lines and carried three *different* bugs, two of which were this service's:
+a key with an accent in it could never authenticate, and `GET /health/`
+answered 401.
 
-`tests/test_conformance.py` is four lines and runs the suite the package
-ships against this repo's own `app.main:app`, so a bad voice-common bump fails
+`tests/test_conformance.py` is four lines and runs the suite the package ships
+against this service's own `app.main:app`, so a change to the shared code fails
 here rather than on the host. The rest of `tests/` is this service's own: the
 chunker, the encoders' byte-for-byte identity, and the SSE wire format. None of
 it needs a model or torch — `Synth._speak` is the single method faked, so the
 routes, the queue, the chunker and the encoders under test are the real ones:
 
+Install from the repository root, because pip resolves `./packages/common`
+against the working directory; run pytest from here, because `import app.main`
+needs this directory as the rootdir:
+
 ```bash
-pip install pytest fastapi soundfile 'uvicorn[standard]' \
-  "$(grep '^voice-common' requirements.txt | sed 's/\[audio\]/[audio,conformance]/')"
-python -m pytest tests
+pip install './packages/common[audio,conformance]' fastapi soundfile 'uvicorn[standard]'
+cd services/tts-long && python -m pytest tests
 ```
 
-One thing that should live in voice-common and cannot yet: `app/envelope.py`,
+One thing that should live in `packages/common` and did not: `app/envelope.py`,
 which is `voice_common.errors` plus the `param` field OpenAI's schema requires
-and the 404/405/500 handlers it has no equivalent of. The pin in
-`requirements.txt` is a commit SHA on a GitHub tarball, and a pin cannot name a
-commit that has not been published — so it moves up at the next bump, tests
-included.
+and the 404/405/500 handlers it has no equivalent of. What stopped it was the
+pin — a commit SHA on a GitHub tarball cannot name a commit that has not been
+published. **There is no pin now**, so the only thing left between here and
+there is doing it, tests included.
 
 What stays here is what is actually this service's: the job queue, the
 streaming path, the chunker that works around the model's 40-second ceiling,

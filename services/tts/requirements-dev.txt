@@ -4,7 +4,13 @@
 -r requirements.txt
 
 # voice_common.conformance is a pytest suite the shared package ships and this
-# repo runs against its own app object, so a bad voice-common bump fails here
-# rather than on orko. The extra pulls pytest and httpx at the versions the
-# package was tested with.
-voice-common[audio,conformance] @ https://github.com/gabrielbelli/voice-common/archive/4429e64a97926d17e00e8a5982208e7ffecfab2e.tar.gz
+# service runs against its own app object, so a change to packages/common fails
+# here rather than on orko. The extra pulls pytest and httpx at the versions
+# the package was tested with.
+#
+# Naming the same path twice with different extras is not a conflict: pip's
+# resolver unions them, so `-r requirements.txt` above plus this line installs
+# [audio] and [conformance] together — checked with `pip install --dry-run`
+# before this file was written, because "double requirement given" is a real
+# pip error and the old pair of tarball lines never explained why it escaped it.
+./packages/common[audio,conformance]
