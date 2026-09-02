@@ -1,0 +1,26 @@
+# CPU-only torch. The CUDA wheels are several gigabytes and this service is
+# explicitly for machines without a usable GPU — a GTX 1060 is Pascal, whose
+# FP16 runs at 1/64 rate, so it would not help even where one exists.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# The shared wire contract: API key auth, the OpenAI error envelope, the
+# health route, Segment and OpenAISpeechRequest, the PCM byte cast, and the
+# entrypoint that setuptools installs to /usr/local/bin. [audio] pulls numpy,
+# which this image needs anyway.
+#
+# A tarball URL by SHA rather than git+https: python:3.12-slim-trixie has no
+# git binary, and a SHA cannot be moved the way a tag can. The readable name of
+# the pin lives in the comment.
+# voice-common v1.0.0 — https://github.com/gabrielbelli/voice-common
+voice-common[audio] @ https://github.com/gabrielbelli/voice-common/archive/4429e64a97926d17e00e8a5982208e7ffecfab2e.tar.gz
+
+chatterbox-tts==0.1.7
+resemble-perth==1.0.1
+# perth imports pkg_resources, removed from Python 3.14. setuptools puts it
+# back; the image also pins 3.12 so this stays belt and braces.
+setuptools>=75
+fastapi==0.121.2
+uvicorn[standard]==0.38.0
+soundfile==0.13.1
+# numpy is deliberately unpinned. chatterbox-tts requires numpy<2 on Python
+# 3.12, and pinning a 2.x here makes the resolve impossible. Let it choose.
