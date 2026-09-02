@@ -1,0 +1,10 @@
+# Everything the image needs, plus what the conformance suite needs to run it.
+# Deliberately NOT installed into the image: pytest and httpx have no business
+# in a container that serves audio.
+-r requirements.txt
+
+# voice_common.conformance is a pytest suite the shared package ships and this
+# repo runs against its own app object, so a bad voice-common bump fails here
+# rather than on orko. The extra pulls pytest and httpx at the versions the
+# package was tested with.
+voice-common[audio,conformance] @ https://github.com/gabrielbelli/voice-common/archive/4429e64a97926d17e00e8a5982208e7ffecfab2e.tar.gz

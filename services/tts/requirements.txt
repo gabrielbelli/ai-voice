@@ -1,0 +1,31 @@
+# CPU only. No torch.
+#
+# Kokoro is 82M parameters and runs on ONNX Runtime, so the whole image stays
+# under half a gigabyte. A torch-based alternative would cost more in wheels
+# alone than this ships in total.
+kokoro-onnx==0.4.9
+onnxruntime==1.24.1
+fastapi==0.121.2
+uvicorn[standard]==0.38.0
+numpy==2.3.4
+
+# soundfile and libsndfile are gone. Every encoder now feeds ffmpeg on a pipe
+# or writes the 44 bytes of a RIFF header itself, because a file has to be
+# complete before it can be read and that is the whole latency this service was
+# removing. Nothing left in the import graph needs it — checked by importing
+# the app and encoding all six formats with `soundfile` blocked at the import
+# hook — so the library leaves with it.
+
+# The auth middleware, the OpenAI error envelope, the health route and the TLS
+# entrypoint, shared with stt-stack and tts-long instead of hand-copied into
+# each. Three copies of app/auth.py drifted into three DIFFERENT defects, one
+# per repo; that is what this pin exists to stop happening again.
+#
+# Pinned to a commit rather than a tag or a branch: an image build must produce
+# the same bytes next month, and a moving ref in a requirements file is a
+# supply-chain decision made by whoever pushed last. A tarball rather than
+# `git+ssh` so the build needs neither git nor a deploy key.
+#
+# The [audio] extra is numpy, which is pinned above and already in the image;
+# the extra takes no second copy, it only records the dependency honestly.
+voice-common[audio] @ https://github.com/gabrielbelli/voice-common/archive/4429e64a97926d17e00e8a5982208e7ffecfab2e.tar.gz

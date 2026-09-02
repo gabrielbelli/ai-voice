@@ -1,0 +1,9 @@
+models/
+*.wav
+*.opus
+*.mp3
+*.flac
+*.aac
+*.pcm
+__pycache__/
+.venv/
