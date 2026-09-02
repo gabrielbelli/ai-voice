@@ -140,7 +140,7 @@ anything; send any non-empty string when authentication is off.
 
 | Field | Handling |
 |---|---|
-| `model` | Accepted and ignored — there is one model here. Rejecting `tts-1` would break every client that sends it; claiming to honour it would be a lie |
+| `model` | **Accepted and ignored, and the response says so.** There is one model in this image. Rejecting `tts-1` would break every client that sends it, so anything is answered — and named in `X-Ignored-Parameters` unless it is `kokoro`, which is what actually synthesised |
 | `input` | Required. **Rejected over 4096 characters**, the schema's own maximum. Empty or whitespace-only is legal — the schema sets no `minLength` — and returns `200` with the empty form of the container asked for, where it used to be a `500`. See [Deviations](#deviations) |
 | `instructions` | **Accepted and ignored, and the response says so.** See [Deviations](#deviations); the reasoning is that Kokoro has nothing to route a direction into, and OpenAI documents that `instructions` does not work with `tts-1` either |
 | `voice` | All thirteen OpenAI names, the `{"id": "…"}` object form, **or** any of the 54 Kokoro names. Optional, unlike upstream: `TTS_VOICE` answers when it is absent. An id this service does not know is a `400` naming `voice` |
@@ -151,13 +151,21 @@ anything; send any non-empty string when authentication is off.
 Unknown fields are accepted, unlike on `/speak`, because OpenAI keeps adding
 them and a service whose entire purpose is to answer OpenAI's clients must not
 reject one for speaking a newer dialect. **Accepted is not dropped**, though:
-every unrecognised field is listed in `X-Ignored-Parameters` on the response, so
-`{"stream": true}` — the classic confusion with the transcription schema — no
-longer returns an ordinary mp3 with nothing to say it did nothing.
+every field that reached no audio is listed in `X-Ignored-Parameters` on the
+response, so `{"stream": true}` — the classic confusion with the transcription
+schema — no longer returns an ordinary mp3 with nothing to say it did nothing.
+
+Three kinds of field end up in that header, and the rule is the same for all
+three: **if it did not reach the audio, it is named.** An unrecognised field
+like `stream`; `instructions`, which this model has nothing to route into;
+and `model` itself when it asked for something other than `kokoro`. The last
+one is the reason the header is worth reading on an otherwise ordinary
+request — `{"model": "gpt-4o-mini-tts"}` is answered by an 82M-parameter
+model, and a client that never sees that said so has no way to find out.
 
 | Header | When |
 |---|---|
-| `X-Ignored-Parameters` | Any field that reached no audio, `instructions` included |
+| `X-Ignored-Parameters` | Any field that reached no audio, alphabetically: unknown fields, `instructions`, and `model` when it named something other than `kokoro` |
 | `X-Speed-Clamped` | `4 to 2`, when the requested speed was outside Kokoro's range |
 
 Errors come back in OpenAI's envelope, all four keys, `param` included:
@@ -256,6 +264,17 @@ If a synthesis fails after the headers have gone out, the stream carries an
 event with a top-level `error` key, which is the one in-band channel a 200 has
 left. `openai-python` raises `APIError` on it and stops reading.
 
+**A client that hangs up takes its encoder with it.** Starlette stops iterating
+a generator when the socket closes but never closes the generator, so the
+`GeneratorExit` that kills ffmpeg used to wait on the cyclic collector — and on
+a service that is not allocating hard, that wait has no upper bound. Measured:
+an SSE request abandoned after its first delta still had a live ffmpeg 200 s
+later, blocked on a stdin that would never close, on a stream that would have
+finished in 29 s. The response now closes its own generator as it ends, however
+it ends; the same request cleans up in 9.3 to 12.4 s, which is the chunk already
+inside the model finishing. That last part is not removable without cancelling
+a running ONNX call, which the runtime does not offer.
+
 `Transfer-Encoding: chunked` and `X-Accel-Buffering: no` go out with the stream.
 The second is for a reverse proxy in front: nginx buffers a proxied response by
 default and would hold every delta until the last, undoing the whole feature
@@ -349,6 +368,24 @@ work with `tts-1` or `tts-1-hd` either, so a client that sends one already
 tolerates no effect, and a `400` would break clients for a field the upstream
 API also drops. What has changed is that the response now names it in
 `X-Ignored-Parameters`, so the caller can tell.
+
+### An unknown custom voice id is rejected rather than substituted
+
+`VoiceIdsOrCustomVoice` is `anyOf[string, {"id": string}]`, so the schema lets
+`voice` carry any string at all — OpenAI has custom voices and an id like
+`voice_1234` is legal on the wire. **Both forms are accepted here**, and the
+object form used to be a `400` reading `voice: Input should be a valid string`,
+which was a schema error for a request the schema allows. It is unwrapped before
+validation now, so the error `loc` stays flat and `param` reads `voice` rather
+than `voice.str`.
+
+What is still refused is an id this service has no voice for. There are 54
+fixed voices in the image and nothing to map an unknown id onto, so the choice
+is between a `400` naming `voice` and synthesising in a voice nobody asked for;
+the second is worse, and it is worse silently. The rejection is an
+`invalid_value` in the envelope naming the field and listing what is accepted,
+not a schema error — and the thirteen published names are all accepted first,
+which is the half that was actually missing: seven of them used to be a `400`.
 
 ### `speed` outside 0.5–2.0 is clamped
 
@@ -451,6 +488,12 @@ answer to a request the schema allows.
 There is one model per service, so a request that omits it has an unambiguous
 answer, and `TTS_VOICE` answers for the voice. Accepting a body OpenAI would
 reject breaks nothing that works against the real API.
+
+A `model` that names something else is accepted too, for the same reason: every
+OpenAI client sends a name, and refusing `tts-1` refuses the compatibility this
+route exists for. It reaches nothing, though, so it is named in
+`X-Ignored-Parameters` like anything else that did not — a request answered by
+an 82M-parameter model it did not ask for used to be told nothing at all.
 
 ## Authentication
 

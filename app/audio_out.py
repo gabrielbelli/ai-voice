@@ -207,12 +207,22 @@ class _Ffmpeg:
         """Kill the process when the caller gives up part way through.
 
         A client that disconnects mid-stream leaves the generator unfinished,
-        and without this the ffmpeg process survives it.
+        and without this the ffmpeg process survives it — indefinitely, and
+        blocked on a stdin that will never close. Reached deterministically
+        rather than when the collector gets round to it: app.main's
+        ClosingStreamingResponse closes the generator as the response ends,
+        which is what throws GeneratorExit in here.
+
+        `wait()` on the end so the reap is this function's, not something
+        subprocess gets round to on the next Popen. It costs nothing — the
+        process has already been killed and its pipes drained — and it means
+        the process is gone, not merely signalled, when abort() returns.
         """
         if self._proc.poll() is None:
             self._proc.kill()
         for thread in self._readers:
             thread.join(timeout=1.0)
+        self._proc.wait()
 
 
 def encode_stream(chunks: Iterable[np.ndarray], fmt: str) -> Iterator[bytes]:

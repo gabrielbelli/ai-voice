@@ -10,16 +10,21 @@ what is faked is the model and nothing else.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import os
 import random
 import shutil
+import subprocess
+import time
 
 import numpy as np
 import pytest
 from starlette.testclient import TestClient
 from voice_common.conformance import module_app
 
+import app.main as main
 from app.audio_out import FORMATS, encode, encode_stream
 from app.openai_api import VOICE_ALIASES, custom_voice_id, resolve_voice
 from app.synth import MAX_CHUNK_PHONEMES, chunk_phonemes
@@ -29,6 +34,11 @@ needs_ffmpeg = pytest.mark.skipif(shutil.which("ffmpeg") is None,
 
 # A realistic slice of the 54 Kokoro ships, including every alias target.
 VOICES = sorted({*VOICE_ALIASES.values(), "bm_george", "af_nova", "pf_dora"})
+
+# Long enough to plan into several chunks at the default 509-phoneme target,
+# which is what makes a stream observably a stream: a one-chunk request sends
+# one delta and proves nothing about when it left.
+MULTI_CHUNK = "One. Two. Three. Four. Five. Six. Seven. Eight. " * 40
 
 
 class FakeSynth:
@@ -41,6 +51,14 @@ class FakeSynth:
 
     voices = VOICES
 
+    def __init__(self) -> None:
+        # Every call, in order, so a test can see whether a delta left before
+        # the next chunk was synthesised — the one property that separates a
+        # real stream from a buffer sliced up afterwards.
+        self.calls: list[str] = []
+        # Raise on the nth call, to reach the in-band error channel.
+        self.fail_on: int | None = None
+
     def plan(self, text: str, language: str,
              target: int = MAX_CHUNK_PHONEMES) -> list[str]:
         if not text.strip():
@@ -52,6 +70,9 @@ class FakeSynth:
 
     def speak_chunk(self, phonemes: str, voice: str, language: str,
                     speed: float) -> np.ndarray:
+        self.calls.append(phonemes)
+        if self.fail_on is not None and len(self.calls) == self.fail_on:
+            raise RuntimeError("index 510 is out of bounds for axis 0")
         samples = 2400 * len(phonemes)
         t = np.arange(samples, dtype=np.float32) / 24_000.0
         return (0.2 * np.sin(2 * np.pi * 220.0 * t)).astype(np.float32)
@@ -61,8 +82,13 @@ class FakeSynth:
 def client() -> TestClient:
     app = module_app("app.main")()
     import app.main as main
-    main.state["synth"] = FakeSynth()
-    return TestClient(app)
+    synth = FakeSynth()
+    main.state["synth"] = synth
+    test_client = TestClient(app)
+    # Hung off the client so a test can read back what the model was asked for
+    # and when, without a second fixture threaded through every signature.
+    test_client.synth = synth  # type: ignore[attr-defined]
+    return test_client
 
 
 def speech(client: TestClient, **body: object):
@@ -286,17 +312,47 @@ def test_the_speed_clamp_is_announced(client: TestClient) -> None:
     assert "X-Speed-Clamped" not in speech(client, speed=1.5).headers
 
 
+def ignored(response) -> str | None:
+    return response.headers.get("X-Ignored-Parameters")
+
+
 def test_ignored_parameters_are_named(client: TestClient) -> None:
     """instructions cannot be honoured — Kokoro has no style conditioning — and
     `stream: true` is not a field of this schema at all. Both used to return
     200 with an ordinary mp3 and no signal of any kind."""
-    assert speech(client, instructions="Shout.").headers[
-        "X-Ignored-Parameters"] == "instructions"
-    assert speech(client, stream=True).headers[
-        "X-Ignored-Parameters"] == "stream"
-    assert speech(client, stream=True, instructions="Shout.").headers[
-        "X-Ignored-Parameters"] == "stream, instructions"
-    assert "X-Ignored-Parameters" not in speech(client).headers
+    assert ignored(speech(client, model="kokoro",
+                          instructions="Shout.")) == "instructions"
+    assert ignored(speech(client, model="kokoro", stream=True)) == "stream"
+    assert ignored(speech(client, model="kokoro")) is None
+
+
+def test_the_ignored_list_is_sorted_as_a_whole(client: TestClient) -> None:
+    """It used to sort the unknown fields and then append the known ones, so
+    the order depended on which kind of field each name was."""
+    assert ignored(speech(client, model="kokoro", stream=True, alpha=1,
+                          instructions="Shout.")) == "alpha, instructions, stream"
+
+
+def test_a_model_that_did_not_synthesise_is_named(client: TestClient) -> None:
+    """`tts-1` cannot be rejected — every OpenAI client sends a model name and
+    refusing them refuses the compatibility this route is for — but a request
+    answered by an 82M-parameter model it did not ask for was told nothing."""
+    assert speech(client, model="tts-1").status_code == 200
+    assert ignored(speech(client, model="tts-1")) == "model"
+    assert ignored(speech(client, model="gpt-4o-mini-tts",
+                          instructions="Shout.")) == "instructions, model"
+    # The name that did synthesise is not a deviation and is not named.
+    assert ignored(speech(client, model="kokoro")) is None
+
+
+def test_the_stream_carries_the_deviation_headers_too(client: TestClient) -> None:
+    """A caller that asked for a stream is owed the same admission as one that
+    did not: the headers go out before the first delta, not instead of it."""
+    response = speech(client, model="tts-1", speed=4, instructions="Shout.",
+                      stream_format="sse")
+    assert response.status_code == 200
+    assert ignored(response) == "instructions, model"
+    assert response.headers["X-Speed-Clamped"] == "4 to 2"
 
 
 # --- the event stream ------------------------------------------------------
@@ -372,3 +428,159 @@ def test_an_empty_input_is_valid_and_returns_a_valid_empty_body(
                               stream_format="sse").content)
         assert events[-1]["type"] == "speech.audio.done"
         assert events[-1]["usage"]["output_tokens"] == 0
+
+
+def test_the_first_delta_leaves_before_the_last_chunk_is_synthesised() -> None:
+    """The property that separates a stream from a buffer sliced up afterwards.
+
+    Nothing else in this file would catch that regression: the deltas of a
+    faked stream concatenate to the buffered body just as well as a real one's
+    do, and every shape assertion passes either way. So this pulls one frame
+    out of the generator and asks the synthesiser how much work it had been
+    given by the time that frame existed.
+
+    Driven at the generator rather than over HTTP because starlette's
+    TestClient runs the whole ASGI app to completion and hands back a
+    BytesIO — it buffers, so it cannot show when anything left. The
+    HTTP-level proof is a measurement on the running service instead, on the
+    schema's own 4096-character maximum: 12 frames, first byte at 4.32 s of a
+    47.66 s stream, against 50.20 s before the buffered response sends
+    anything at all. 11.6x sooner, first byte at 9% of total.
+
+    `pcm` because it is the one format with no encoder between the model and
+    the wire — a codec's lookahead window is a legitimate reason for a first
+    delta to arrive one chunk late, and this test is not about the codec.
+    """
+    synth = FakeSynth()
+    chunks = synth.plan(MULTI_CHUNK, "en-us")
+    assert len(chunks) > 2, "a one-chunk stream cannot show incrementality"
+
+    stream = main._sse_body(synth, chunks, "bm_fable", "en-gb", 1.0, "pcm", 0)
+    first = next(stream)
+    assert first.startswith(b'data: {"type":"speech.audio.delta"')
+    assert len(synth.calls) == 1, (
+        f"the first delta existed only after {len(synth.calls)} of "
+        f"{len(chunks)} chunks had been synthesised; a genuinely incremental "
+        "stream emits the first piece before it asks the model for the second")
+
+    # …and the rest still arrive, so this is a stream that finishes rather
+    # than one frame followed by nothing.
+    rest = list(stream)
+    assert len(synth.calls) == len(chunks)
+    assert json.loads(rest[-1][len(b"data: "):])["type"] == "speech.audio.done"
+
+
+def test_a_failure_after_the_headers_becomes_an_in_band_error_frame(
+        client: TestClient) -> None:
+    """The only error channel a stream has left once 200 has gone out.
+
+    openai-python raises `APIError(message=data["error"]["message"])` on any
+    frame whose JSON has a top-level `error` key and stops reading, so this is
+    what a mid-stream synthesis failure has to look like. Before it existed the
+    generator simply raised, the connection dropped mid-body, and the client
+    saw a truncated file rather than a reason.
+
+    The failure injected is the real one: `index 510 is out of bounds for axis
+    0`, which ordinary unpunctuated prose reached before app/synth.py bounded
+    its own chunks.
+    """
+    client.synth.fail_on = 2  # type: ignore[attr-defined]
+    events = parse(speech(client, input=MULTI_CHUNK, response_format="pcm",
+                          stream_format="sse").content)
+
+    # The chunks synthesised before the failure still went out as audio.
+    assert events[0]["type"] == "speech.audio.delta"
+    error = events[-1]["error"]
+    assert "index 510 is out of bounds" in error["message"]
+    # The same four keys as every buffered error on this route, `param`
+    # included — it is required-but-nullable, not optional.
+    assert set(error) == {"message", "type", "param", "code"}
+    assert error["param"] is None and error["code"] == "synthesis_failed"
+    # No done event: the usage it is required to carry would be a lie about an
+    # utterance that was never finished.
+    assert not [e for e in events if e.get("type") == "speech.audio.done"]
+
+
+def _ffmpeg_children() -> list[int]:
+    """The pids of this process's ffmpeg children. No psutil in the image."""
+    found = subprocess.run(["pgrep", "-P", str(os.getpid()), "ffmpeg"],
+                           capture_output=True, text=True).stdout.split()
+    return [int(pid) for pid in found]
+
+
+def _gone(pid: int, timeout: float = 5.0) -> bool:
+    """True once the pid is neither running nor an unreaped zombie."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pid not in _ffmpeg_children():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@needs_ffmpeg
+def test_closing_a_half_read_stream_kills_the_encoder() -> None:
+    """An abandoned encode_stream must not leave an ffmpeg blocked on a pipe.
+
+    `close()` is what a caller that gives up has to reach, because ffmpeg is
+    waiting on a stdin nobody will ever close and would otherwise sit there for
+    as long as this process lives.
+
+    Guards the kill. It does not guard the reap: a zombie was not observable
+    on this platform either way, so asserting one would be asserting something
+    that is not true here.
+    """
+    chunk = np.zeros(24_000, dtype=np.float32)
+    stream = encode_stream((chunk for _ in range(200)), "mp3")
+    next(stream)  # an encoder is now running
+
+    running = _ffmpeg_children()
+    assert running, "expected a running encoder to abandon"
+    stream.close()
+    assert all(_gone(pid) for pid in running)
+
+
+def test_the_response_closes_its_generator_when_the_client_hangs_up() -> None:
+    """The fix for a leak that had no upper bound on it.
+
+    Starlette stops iterating a generator on disconnect but never closes it, so
+    `encode_stream`'s GeneratorExit branch — the one that kills ffmpeg — waited
+    on the cyclic collector. Measured before the fix: a stream abandoned after
+    its first delta still had a live encoder 200 s later, on a stream that
+    would have finished in 29 s. After it, on the same request: gone in 9.3,
+    9.6 and 12.4 s over three runs, which is the chunk already in flight
+    finishing and nothing more.
+
+    Built through the route rather than by hand, so it also fails if the route
+    goes back to a plain StreamingResponse. Driven at the response rather than
+    over HTTP because starlette's TestClient buffers the whole body and never
+    disconnects.
+    """
+    import app.main as main_module
+    main_module.state["synth"] = FakeSynth()
+    request = main_module.SpeechRequest(model="tts-1", input=MULTI_CHUNK,
+                                        voice="fable", response_format="pcm",
+                                        stream_format="sse")
+    response = main_module.openai_speech(request)
+    assert isinstance(response, main_module.ClosingStreamingResponse)
+
+    async def receive():
+        return {"type": "http.request"}
+
+    async def send(message):
+        # What uvicorn does to a send on a socket the client has closed, and
+        # the exception starlette turns into ClientDisconnect.
+        if message["type"] == "http.response.body":
+            raise OSError("client disconnected")
+
+    scope = {"type": "http", "method": "POST", "path": "/v1/audio/speech",
+             "headers": [], "asgi": {"spec_version": "2.4", "version": "3.0"}}
+    with pytest.raises(Exception):
+        asyncio.run(response(scope, receive, send))
+
+    # A generator with no frame has been closed or has run to the end; this one
+    # was suspended at its first yield a moment ago, so it was closed.
+    assert response._source.gi_frame is None, (
+        "the generator was left suspended, so the encoder it owns lives until "
+        "the cyclic collector runs — which on an idle service can be minutes, "
+        "or never")

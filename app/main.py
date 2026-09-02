@@ -36,6 +36,7 @@ from typing import Literal
 
 import numpy as np
 from fastapi import FastAPI, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from voice_common import auth, logging as voice_logging
@@ -78,6 +79,11 @@ CHUNK_PHONEMES = min(max(int(os.getenv("TTS_CHUNK_PHONEMES",
 # OpenAI's own maximum for `input`, and the schema's. It was not enforced, so a
 # single synchronous request had no upper bound on how long it could run.
 MAX_INPUT_CHARS = 4096
+
+# What actually synthesises, and so the one `model` value that is not a
+# deviation. There is one model in this image; see _deviations for why any
+# other name is answered rather than rejected.
+MODEL_NAME = "kokoro"
 
 # Same one line of configuration this always had, plus the TTS_LOG_LEVEL switch
 # it never had: getting DEBUG out of a running container used to mean editing
@@ -199,8 +205,9 @@ class SpeechRequest(OpenAISpeechRequest):
     """
 
     # "kokoro" rather than the base's "default", because that is what this
-    # service answers with and something may well be reading it back.
-    model: str = "kokoro"
+    # service answers with and something may well be reading it back. Any other
+    # name is accepted and named in X-Ignored-Parameters: see _deviations.
+    model: str = MODEL_NAME
 
     # maxLength 4096 is in the schema and was not enforced here: bodies well
     # past it were accepted and attempted, which left no upper bound at all on
@@ -292,13 +299,26 @@ def _deviations(req: SpeechRequest, speed: float) -> dict[str, str]:
     A header rather than a field in the body because the body is audio, and
     rather than a 400 because every one of these is either a model limit the
     caller cannot act on or a field OpenAI itself ignores.
+
+    `model` is in the list for the same reason `instructions` is. There is one
+    model in this image and `tts-1` cannot be rejected — every OpenAI client
+    sends a name, and refusing them is refusing the compatibility this route
+    exists for — but a request that asked for `gpt-4o-mini-tts` and got Kokoro
+    was told nothing at all. Named only when it differs from what actually
+    synthesised, so a caller that asks for `kokoro` gets no noise for having
+    been right.
     """
     headers: dict[str, str] = {}
-    ignored = sorted(req.model_extra or {})
+    ignored = set(req.model_extra or ())
     if req.instructions is not None:
-        ignored.append("instructions")
+        ignored.add("instructions")
+    if req.model != MODEL_NAME:
+        ignored.add("model")
     if ignored:
-        headers["X-Ignored-Parameters"] = ", ".join(ignored)
+        # Sorted as a whole. It used to sort the unknown fields and then append
+        # the known ones, so `stream` came out before `instructions` and the
+        # order depended on which kind of field it was.
+        headers["X-Ignored-Parameters"] = ", ".join(sorted(ignored))
     if speed != req.speed:
         headers["X-Speed-Clamped"] = f"{req.speed:g} to {speed:g}"
     return headers
@@ -325,6 +345,53 @@ def _frame(event: dict[str, object]) -> bytes:
     event is already `speech.audio.done`.
     """
     return b"data: " + json.dumps(event, separators=(",", ":")).encode() + b"\n\n"
+
+
+class ClosingStreamingResponse(StreamingResponse):
+    """A StreamingResponse that closes its generator when the response ends.
+
+    **This exists because otherwise a client that hangs up leaks an ffmpeg
+    process, and leaks it for good.** Measured: abandon an SSE request after
+    the first delta and the encoder is still running 200 s later, on a stream
+    that would have finished in 29 s — blocked on a pipe read, holding its
+    memory, waiting for a stdin that will never close.
+
+    Starlette stops iterating the generator on disconnect, correctly. What it
+    does not do is close it, so `encode_stream`'s `except GeneratorExit` — the
+    branch that kills the encoder — runs only when the suspended generator is
+    finally collected. Proved with an instrumented generator under uvicorn:
+    after the client closed the socket, iteration stopped immediately, and
+    `GeneratorExit` did not arrive until a `gc.collect()` was forced by hand.
+    It is a reference cycle, so refcounting never frees it, and on a service
+    that is not allocating hard the cyclic collector may not run for minutes.
+
+    Closing it here makes that deterministic and owes nothing to the garbage
+    collector: whichever way the response ended — finished, disconnected, or
+    raised — `close()` throws GeneratorExit in at the yield, and the encoder
+    is killed before this coroutine returns.
+
+    Safe to call at this point, and only at this point: starlette awaits each
+    chunk before sending it, and anyio waits for an in-flight worker thread
+    before propagating a cancellation, so by the time `__call__` returns the
+    generator is suspended at a yield rather than mid-`next()` — which would
+    raise "generator already executing" instead of cleaning anything up.
+    """
+
+    def __init__(self, content: Iterator[bytes], *args: object,
+                 **kwargs: object) -> None:
+        # Kept because `self.body_iterator` is the async wrapper starlette
+        # builds around this, and closing that is GC-dependent all over again.
+        self._source = content
+        super().__init__(content, *args, **kwargs)  # type: ignore[arg-type]
+
+    async def __call__(self, scope, receive, send) -> None:  # type: ignore[no-untyped-def]
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # In the threadpool because closing kills a process and joins its
+            # reader threads, and the event loop should not wait on either.
+            # A generator that already finished ignores this.
+            await run_in_threadpool(self._source.close)
 
 
 # Deliberately `def`, not `async def`: synthesis is blocking CPU work, and on
@@ -508,7 +575,7 @@ def openai_speech(req: SpeechRequest) -> Response:
         # proxy in front: nginx buffers a proxied response by default and would
         # hold every delta until the last, undoing the entire feature without
         # changing a byte of it.
-        return StreamingResponse(
+        return ClosingStreamingResponse(
             _sse_body(synth, chunks, voice, language, speed,  # type: ignore[arg-type]
                       req.response_format, input_tokens),
             media_type="text/event-stream",
