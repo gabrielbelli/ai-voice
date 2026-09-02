@@ -52,6 +52,12 @@ from . import config, guard, metube, probe
 
 log = logging.getLogger("voice-ui.ingest")
 
+# What /v1/audio/transcriptions accepts. Kept here rather than imported from
+# the gateway because this service must not depend on that one's internals,
+# and kept as a set rather than a regex because the whole vocabulary is five
+# words -- see the interpolation guard in fetch() for why it is checked at all.
+RESPONSE_FORMATS = frozenset({"json", "text", "srt", "vtt", "verbose_json"})
+
 router = APIRouter()
 
 # Per-caller budget for /ui/resolve. That route spawns a process which makes an
@@ -106,6 +112,14 @@ def _client(request: Request) -> metube.MeTube:
 
 
 def _unavailable(exc: metube.MeTubeError) -> Response:
+    """Render a MeTube failure as the thing that actually went wrong.
+
+    A refusal is the caller's link; anything else is our dependency. Getting
+    this backwards sent someone to debug a healthy MeTube because their own
+    URL was rejected.
+    """
+    if isinstance(exc, metube.MeTubeRefused):
+        return error_response(400, str(exc), code="refused_url", param="url")
     return error_response(502, str(exc), type_="server_error",
                           code="ingestion_unavailable")
 
@@ -201,6 +215,25 @@ async def commit(request: Request, body: CommitRequest) -> Response:
         url = guard.check(body.token)
     except guard.GuardError as exc:
         return error_response(400, str(exc), code="refused_url", param="token")
+
+    # THE GATE IS ENFORCED HERE, NOT ONLY IN THE PAGE. Without this, POST
+    # /ui/commit succeeded on a token that had never been resolved, and with
+    # clip_start or captions set it went straight to /add {auto_start:true} --
+    # a download starting with no resolve step and no dialog. The page never
+    # takes that path, and the caller is already authenticated, so it was a UX
+    # gate rather than a boundary; "nothing is fetched until the user agrees"
+    # was a property of the page and not of the service. Requiring the pending
+    # record that /ui/resolve leaves behind makes it a property of both.
+    try:
+        parked = await client.find(url)
+    except metube.MeTubeError as exc:
+        return _unavailable(exc)
+    if parked is None:
+        return error_response(
+            409,
+            "That link was never resolved, so there is nothing to confirm. "
+            "POST /ui/resolve first and commit the token it returns.",
+            code="not_resolved", param="token")
 
     trimmed = body.clip_start is not None or body.clip_end is not None
     try:
@@ -328,11 +361,25 @@ async def fetch(request: Request, body: TokenRequest) -> Response:
     source = client.audio_url(str(filename))
     http: httpx.AsyncClient = request.app.state.client
     query = dict(request.query_params)
+    # ALLOWLISTED, because this string is interpolated into a multipart frame
+    # this module builds by hand. Unvalidated, a value carrying CRLF and a
+    # boundary marker closes the part and opens another: a crafted
+    # ?response_format= put a SECOND `name="model"` part on the wire, and the
+    # gateway received model=parakeet followed by model=whisper. No privilege
+    # is gained -- the same caller can POST arbitrary multipart straight at
+    # /v1/audio/transcriptions -- but a hand-built protocol frame must not take
+    # an unvalidated string, and the set of valid values is this short.
+    wanted = query.get("response_format", "json")
+    if wanted not in RESPONSE_FORMATS:
+        return error_response(
+            400, f"response_format must be one of "
+                 f"{', '.join(sorted(RESPONSE_FORMATS))}, not {wanted!r}",
+            code="invalid_response_format", param="response_format")
     fields = {
         # Required by /v1 validation, and it does NOT choose an engine --
         # Parakeet runs regardless and says so in x-stt-engine.
         "model": "parakeet",
-        "response_format": query.get("response_format", "json"),
+        "response_format": wanted,
     }
 
     async def upstream() -> AsyncIterator[bytes]:

@@ -62,13 +62,16 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response, Streamin
 from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import ClientDisconnect
+from voice_common import logging as voice_logging
 from voice_common.errors import error_response, http_error_response, v1_path
 
 from . import clips, config, ingest, metube, probe
 
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("voice-ui")
+# The shared setup, not a fourth basicConfig. The format string here was
+# byte-identical to voice_common.logging.FORMAT, and using the shared one also
+# brings UI_LOG_LEVEL: without it there was no way to get DEBUG output of this
+# service without editing the source and rebuilding the image.
+log = voice_logging.setup("voice-ui", "UI")
 # One access line per request is this service's whole observability budget, as
 # it is the gateway's. httpx logging one of its own would double every line and
 # say less.
@@ -406,9 +409,22 @@ async def list_clips(request: Request) -> Response:
 async def add_clip(request: Request, name: str = Form(...),
                    replace: bool = Form(default=False),
                    file: UploadFile = File(...)) -> Response:
-    # read() is bounded by the size cap the store applies immediately after --
-    # a clip is 10-30 s of 24 kHz mono, about 1.4 MB, and the ceiling is 25 MB.
-    # This is the one upload in the service small enough to hold.
+    # THE SAME CHECK _forward ALREADY MAKES, and it was missing here. The
+    # comment above that one calls out services/stt for reading an UploadFile
+    # whole with no Content-Length check; this route then did exactly that. The
+    # cap in clips.save is applied AFTER the body is in memory, so a 200 MB POST
+    # grew peak RSS by about 800 MB before returning "that clip is 200.0 MB" --
+    # and compose.yaml gives this service mem_limit: 384m, so the real outcome
+    # was an OOM kill, not the message. Declared length first, and only then
+    # read; clips.save still bounds the undeclared case.
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > config.MAX_CLIP_BYTES:
+        return error_response(
+            413,
+            f"that clip is {int(declared) / 1024**2:.1f} MB; the ceiling is "
+            f"{config.MAX_CLIP_BYTES / 1024**2:.0f} MB. Chatterbox wants ten "
+            f"to thirty seconds of clean speech, which is about 1.4 MB.",
+            code="clip_too_large", param="file")
     data = await file.read()
     try:
         saved = clips.save(name, data, replace=replace)

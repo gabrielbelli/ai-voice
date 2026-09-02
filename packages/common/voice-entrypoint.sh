@@ -109,6 +109,16 @@ fi
 # skip straight to exec.
 if [ "$(id -u)" = "0" ]; then
     for d in $CHOWN_DIRS; do
+        # A DIRECTORY THAT IS NOT THERE IS NOT AN ERROR, it is a volume nobody
+        # mounted. Without this line the container dies at boot instead of
+        # starting: `[ ! -w "$d" ]` is true for a path that does not exist, so
+        # the chown runs, fails, and `set -e` takes the process with it. A
+        # service whose volume is optional -- voice-ui's /voices, which only
+        # exists once someone clones a voice -- could not start at all.
+        #
+        # Found in the two copies of this file that had drifted; it was the one
+        # thing they did better than the original.
+        [ -d "$d" ] || continue
         if [ ! -w "$d" ] || [ "$(stat -c %u "$d")" != "$UID_TARGET" ]; then
             echo "entrypoint: taking ownership of $d for uid $UID_TARGET"
             chown -R "$UID_TARGET:$GID_TARGET" "$d"

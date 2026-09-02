@@ -73,14 +73,52 @@ def test_our_guard_refuses_before_metube_is_even_told(client):
     assert tube.calls == [], "a URL our guard hates must not become MeTube's problem"
 
 
-def test_metubes_own_refusal_is_returned_verbatim(client):
+def test_a_refused_link_is_a_400_about_the_link_not_a_502_about_metube(client):
+    """It used to be a 502, and that sent people to debug a healthy MeTube.
+
+    Every MeTubeError funnelled through _unavailable() and came back as
+    ingestion_unavailable, so someone who pasted a link MeTube's own url_guard
+    rejected was told the downloader was broken. The refusal is a fact about
+    their input; only an unreachable or unusable MeTube is a 502.
+    """
     api, _, tube = client()
     tube.refuse = 'Refusing to fetch internal host "localhost"'
     response = api.post("/ui/resolve", json={"url": URL})
-    assert response.status_code == 502
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "refused_url"
     # MeTube's url_guard says something more useful and more true than
     # anything we would write over the top of it.
     assert 'internal host "localhost"' in response.json()["error"]["message"]
+
+
+def test_an_unreachable_metube_is_still_a_502(client):
+    """The other half of the split above: an outage must not become a 400.
+
+    If a refusal is a 400, the risk is that everything becomes a 400 and a
+    genuine outage is reported as the user's fault.
+    """
+    api, _, tube = client()
+    tube.down = True
+    response = api.post("/ui/resolve", json={"url": URL})
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "ingestion_unavailable"
+
+
+def test_commit_refuses_a_token_that_was_never_resolved(client):
+    """The confirm gate is the server's, not only the page's.
+
+    POST /ui/commit used to succeed on any URL, and with clip_start set it went
+    straight to /add auto_start:true -- a download starting with no resolve step
+    and no dialog. The page never took that path, so "nothing is fetched until
+    the user agrees" was a property of the page rather than of the service.
+    """
+    api, _, tube = client()
+    response = api.post("/ui/commit",
+                        json={"token": URL, "clip_start": 0, "clip_end": 600})
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "not_resolved"
+    assert not any(path == "/add" for path, _ in tube.calls), \
+        "a commit without a resolve must not reach MeTube's /add at all"
 
 
 def test_committing_starts_the_pending_item_by_url_not_by_id(client):

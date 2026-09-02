@@ -62,7 +62,6 @@ COPY services/ui/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY services/ui/app/ ./app/
-COPY services/ui/entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Named here rather than left to the application's defaults so `docker inspect`
 # shows what this container will talk to.
@@ -74,8 +73,19 @@ COPY services/ui/entrypoint.sh /usr/local/bin/entrypoint.sh
 # every deployment but one. Unset means the link box is not rendered at all and
 # the page says "link ingestion not configured". Uploads and TTS never depend
 # on it.
+#
+# VOICE_CHOWN_DIRS and VOICE_TLS_PREFIX drive the SHARED voice-entrypoint.sh,
+# which packages/common installs onto PATH. This service used to carry its own
+# copy; it differed from the gateway's only in comments and one variable name,
+# and the reason it gave -- that the shared script's TLS half would be dead
+# code here -- was wrong: that half is gated on `[ -n "$CERT" ] || [ -n "$KEY" ]`
+# and is already skipped at runtime when neither is set. It bought a few
+# hundred bytes of inert shell at the price of a FIFTH copy of a file whose own
+# header records three copies drifting into three different holes.
 ENV UI_GATEWAY_URL=http://voice-gateway:8080 \
     UI_VOICE_DIR=/voices \
+    VOICE_CHOWN_DIRS=/voices \
+    VOICE_TLS_PREFIX=UI \
     PYTHONUNBUFFERED=1
 
 # uid 1000, created rather than reused: the slim base has no non-root account.
@@ -112,5 +122,5 @@ EXPOSE 8090
 # orchestrator because tts-long was restarting would be gone at exactly the
 # moment someone wanted to open the page and find out why.
 
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["voice-entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8090"]

@@ -519,6 +519,26 @@ const store = {
   set(k, v) { try { localStorage.setItem("aiv." + k, JSON.stringify(v)); } catch {} },
 };
 
+/* THE ONE ESCAPER. Every value that did not come from this file goes through
+   it before reaching innerHTML, and there is exactly one so that the next
+   template literal cannot quietly become the seventeenth unescaped sink.
+
+   It exists because there was a real hole rather than a theoretical one: the
+   title of a pasted link went straight into innerHTML, and a link to media
+   titled `<img src=x onerror="...">` executed. The CSP this page sets is
+   script-src 'self' 'unsafe-inline' -- the 'unsafe-inline' is there for this
+   file's own inline block -- so an injected event handler RUNS, and the API
+   key is in localStorage next to it. That title is remote, attacker-chosen
+   data arriving through the most ordinary use of the page.
+
+   All five characters, not the two the old hand-rolled version at the
+   glossary line covered: quotes matter because some of these land in
+   attributes (value="...", data-get="..."), where escaping < and & alone
+   still lets a value close its own attribute and add another. */
+const esc = (s) => String(s === null || s === undefined ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
 function human(bytes) {
   if (bytes === null || bytes === undefined) return "unknown";
   const mb = bytes / 1048576;
@@ -780,7 +800,7 @@ document.querySelectorAll("#fmt button").forEach(b => b.addEventListener("click"
 async function pick(file) {
   stt.file = file; stt.token = null; stt.prepared = null; stt.facts = null;
   $("picked").hidden = false;
-  $("picked").innerHTML = `<span class="filechip">${file.name}
+  $("picked").innerHTML = `<span class="filechip">${esc(file.name)}
     <span class="hint">${human(file.size)}</span>
     <button class="small" id="unpick" type="button">×</button></span>`;
   $("unpick").addEventListener("click", () => {
@@ -867,7 +887,7 @@ async function resolveLink() {
       body: JSON.stringify({ url }) });
     stt.facts = facts; stt.token = facts.token; stt.file = null; stt.prepared = null;
     $("picked").hidden = false;
-    $("picked").innerHTML = `<span class="filechip">${facts.title}
+    $("picked").innerHTML = `<span class="filechip">${esc(facts.title)}
       <span class="hint">${facts.duration ? clock(facts.duration) : "duration unknown"}</span>
       <button class="small" id="unpick" type="button">×</button></span>`;
     $("unpick").addEventListener("click", abandon);
@@ -877,7 +897,7 @@ async function resolveLink() {
        everything is a dialog people dismiss without reading. */
     if (facts.confirm) showConfirm(facts); else startFetch({});
   } catch (err) {
-    $("linkhint").innerHTML = `<span style="color:var(--bad)">${err.message}</span>`;
+    $("linkhint").innerHTML = `<span style="color:var(--bad)">${esc(err.message)}</span>`;
   } finally {
     $("resolve").disabled = false;
   }
@@ -1145,8 +1165,7 @@ async function render(response, format) {
   if (repaired && repaired.length) {
     $("repaired").hidden = false;
     $("repaired").innerHTML = "Glossary rewrote: <strong>" +
-      repaired.map(t => String(t).replace(/[<&]/g, c => c === "<" ? "&lt;" : "&amp;"))
-              .join("</strong>, <strong>") + "</strong>";
+      repaired.map(esc).join("</strong>, <strong>") + "</strong>";
   } else if (format !== "native") {
     $("repaired").hidden = false;
     $("repaired").className = "note flat";
@@ -1211,7 +1230,7 @@ async function loadVoices() {
   const factor = (1 / rate.clone()).toFixed(0);
   if (clones.length) {
     html += `<optgroup label="Cloned voices — slow, about ${factor}× the length of the audio">` +
-      clones.map(c => `<option value="c:${c.name}">${c.name}</option>`).join("") +
+      clones.map(c => `<option value="c:${esc(c.name)}">${esc(c.name)}</option>`).join("") +
       "</optgroup>";
   }
   html += `<option value="new">+ Use my own voice…</option>`;
@@ -1364,7 +1383,7 @@ function addSegment(text) {
   const row = document.createElement("div");
   row.className = "row";
   row.style.marginTop = "8px";
-  row.innerHTML = `<input type="text" class="seg-text" placeholder="one segment of speech" value="${text || ""}">
+  row.innerHTML = `<input type="text" class="seg-text" placeholder="one segment of speech" value="${esc(text || "")}">
     <div class="tight" style="min-width:110px"><label>pause after (s)</label>
       <input type="number" class="seg-pause" min="0" max="10" step="0.1" value="0"></div>
     <div class="tight" style="min-width:150px"><label>voice</label>
@@ -1629,8 +1648,8 @@ function renderJobs() {
     return `<div class="job ${expired ? "expired" : ""}">
       <div class="top">
         <span class="status ${statusClass(job.status)}">${job.status}</span>
-        <strong>${job.voice || "default"}</strong>
-        <span class="id">${job.id}</span>
+        <strong>${esc(job.voice || "default")}</strong>
+        <span class="id">${esc(job.id)}</span>
         <span class="spacer"></span>
         <span class="hint">${job.chunks ? job.chunks + " chunks" : ""}${
           job.queued_ahead ? " · " + job.queued_ahead + " ahead" : ""}</span>
@@ -1639,16 +1658,16 @@ function renderJobs() {
         <div class="hint">${over
           ? `still going — ${clock(elapsed)} in, past the ${clock(budget)} estimate`
           : `${clock(elapsed)} in, ${roughly(budget - elapsed)} left`} · estimate</div>` : ""}
-      ${job.status === "failed" ? `<div class="note bad">${job.error || "no reason given"}</div>` : ""}
+      ${job.status === "failed" ? `<div class="note bad">${esc(job.error || "no reason given")}</div>` : ""}
       ${expired ? `<div class="hint">expired — the audio was deleted after ${TTL / 3600} hours</div>` : ""}
       ${job.realtime_factor ? `<div class="hint">${job.audio_seconds.toFixed(0)} s of audio in
         ${job.compute_seconds.toFixed(0)} s · ${job.realtime_factor.toFixed(3)}× realtime</div>` : ""}
       <div class="acts">
         ${(job.status === "done" || job.status === "cancelled") && !expired
-          ? `<button class="small" data-get="${job.id}" type="button">Download the audio</button>` : ""}
-        ${live ? `<button class="small" data-stop="${job.id}" type="button">Stop and keep what's done</button>` : ""}
-        ${job.status === "failed" ? `<button class="small" data-retry="${job.id}" type="button">Retry</button>` : ""}
-        <button class="small" data-forget="${job.id}" type="button">Forget</button>
+          ? `<button class="small" data-get="${esc(job.id)}" type="button">Download the audio</button>` : ""}
+        ${live ? `<button class="small" data-stop="${esc(job.id)}" type="button">Stop and keep what's done</button>` : ""}
+        ${job.status === "failed" ? `<button class="small" data-retry="${esc(job.id)}" type="button">Retry</button>` : ""}
+        <button class="small" data-forget="${esc(job.id)}" type="button">Forget</button>
       </div>
       ${live ? `<div class="hint">You can close this page. The job runs on the
         server; come back to Jobs.</div>` : ""}

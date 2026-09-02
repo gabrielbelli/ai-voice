@@ -61,7 +61,7 @@ from . import config
 
 log = logging.getLogger("voice-ui.metube")
 
-__all__ = ["MeTubeError", "MeTube", "configured"]
+__all__ = ["MeTubeError", "MeTubeRefused", "MeTube", "configured"]
 
 # Terminal success. Anything else in `done` means _post_download_cleanup
 # rewrote the status to "error" and nulled filename.
@@ -69,7 +69,27 @@ FINISHED = "finished"
 
 
 class MeTubeError(RuntimeError):
-    """MeTube refused, or could not be reached. The message is user-facing."""
+    """MeTube could not be reached, or answered something unusable.
+
+    This is an OUTAGE: the ingestion service is the thing that is wrong, and
+    the caller's link may well be fine.
+    """
+
+
+class MeTubeRefused(MeTubeError):
+    """MeTube answered, understood the request, and declined the URL.
+
+    Split out because collapsing the two told the user the wrong thing. A link
+    MeTube's own url_guard rejects -- 'Refusing to fetch internal host
+    "localhost"' -- came back as 502 ingestion_unavailable, so someone who
+    pasted a bad link was told the downloader was broken and would sensibly go
+    and check a service that was working perfectly. It is a 400 about their
+    input, not a 502 about our dependency.
+
+    A subclass rather than a sibling so that every `except MeTubeError` site
+    still catches it and nothing escapes uncaught; only the handlers that care
+    about the distinction need to look for it.
+    """
 
 
 def configured() -> bool:
@@ -107,8 +127,8 @@ class MeTube:
             # says things like 'Refusing to fetch internal host "localhost"',
             # which is more useful and more true than anything we would write
             # over the top of it.
-            raise MeTubeError(str(payload.get("msg")
-                                  or f"MeTube refused with {response.status_code}"))
+            raise MeTubeRefused(str(payload.get("msg")
+                                    or f"MeTube refused with {response.status_code}"))
         return payload
 
     async def history(self) -> dict[str, list[dict[str, Any]]]:

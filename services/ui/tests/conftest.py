@@ -75,9 +75,15 @@ class FakeMeTube:
         self.queue: dict[str, dict] = {}
         self.done: dict[str, dict] = {}
         self.refuse: str | None = None
+        # An OUTAGE rather than a refusal: MeTube unreachable, which must stay
+        # a 502 now that a refusal is a 400. See
+        # test_an_unreachable_metube_is_still_a_502.
+        self.down: bool = False
         self.calls: list[tuple[str, dict]] = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
+        if self.down:
+            raise httpx.ConnectError("connection refused", request=request)
         path = request.url.path
         if request.method == "GET":
             if path == "/history":
