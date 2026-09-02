@@ -25,7 +25,8 @@ jobs:
   #
   # Deliberately no model. The suite never enters the app's lifespan, so
   # nothing here downloads the 340 MB of weights, and the whole job is under a
-  # minute on one runner.
+  # minute on one runner. The ENCODERS are a different matter: they are real,
+  # they are the thing under test, and they are not a pip install. See below.
   conformance:
     runs-on: ubuntu-24.04
     steps:
@@ -33,6 +34,29 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      # ffmpeg is a runtime dependency pip cannot supply, and this job ran
+      # without it. The Containerfile installs it; this runner did not, and
+      # ubuntu-24.04 does not carry it as standard.
+      #
+      # That is not a cosmetic gap. `response_format` defaults to mp3 — the
+      # schema's default and OpenAI's — and every format but wav and pcm is
+      # encoded by feeding ffmpeg on a pipe, so the DEFAULT request shape
+      # cannot be answered at all without the binary. Popen raised
+      # FileNotFoundError, the route returned 500, and three tests that are
+      # about headers and validation rather than audio failed on it:
+      # test_the_speed_clamp_is_announced and test_ignored_parameters_are_named
+      # with KeyError on the header they assert, because a 500 carries neither,
+      # and test_stream_format_is_validated_against_its_enum on
+      # `stream_format: "audio"` — the spec default — coming back 500 not 200.
+      #
+      # It also silently gutted the run. The tests that encode are marked
+      # `needs_ffmpeg` and skipped themselves: 17 skipped without it against 1
+      # with, so the suite reported success over a third of itself never
+      # having run.
+      - name: Install ffmpeg, which the encoders shell out to
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Install the runtime and the conformance extra
         run: pip install -r requirements-dev.txt
       # `python -m pytest`, not `pytest`: the module form puts the working

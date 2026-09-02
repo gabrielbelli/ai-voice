@@ -125,12 +125,31 @@ class _Ffmpeg:
 
     def __init__(self, fmt: str) -> None:
         args, muxer = _FFMPEG[fmt]
-        self._proc = subprocess.Popen(
-            ["ffmpeg", "-loglevel", "error",
-             "-f", "s16le", "-ar", str(SAMPLE_RATE), "-ac", "1", "-i", "pipe:0",
-             *args, "-f", muxer, "pipe:1"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE)
+        try:
+            self._proc = subprocess.Popen(
+                ["ffmpeg", "-loglevel", "error",
+                 "-f", "s16le", "-ar", str(SAMPLE_RATE), "-ac", "1",
+                 "-i", "pipe:0", *args, "-f", muxer, "pipe:1"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE)
+        except FileNotFoundError as exc:
+            # ffmpeg absent from PATH entirely, which is the one failure this
+            # class had nothing to say about: `finish()` turns a non-zero exit
+            # into ffmpeg's own words, but a binary that never started has no
+            # stderr to quote, so Popen's bare "No such file or directory:
+            # 'ffmpeg'" was all that reached the 500.
+            #
+            # It cost a full CI round to read. The conformance job had no
+            # ffmpeg, so the default mp3 request 500ed, and the failures
+            # surfaced as KeyError on X-Speed-Clamped and X-Ignored-Parameters
+            # in tests that never mention encoding — sending the search to the
+            # header code in app.main, which was correct all along. Naming the
+            # missing dependency and the format that wanted it puts the next
+            # reader at the cause rather than three frames downstream of it.
+            raise RuntimeError(
+                f"ffmpeg is not on PATH, and {fmt} is encoded by it. Install "
+                "ffmpeg, or ask for a format that needs no encoder: wav and "
+                "pcm are written here.") from exc
         # deque.append and popleft are atomic, so the reader thread and the
         # request thread need no lock between them.
         self._out: collections.deque[bytes] = collections.deque()
