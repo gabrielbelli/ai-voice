@@ -623,3 +623,104 @@ async def test_one_log_line_per_request_carries_the_model_and_the_rate(monkeypat
     for fragment in ("route=/v1/audio/speech", "backend=tts-stack", "model=tts-1",
                      "status=200", "duration=", "rtf=1.4"):
         assert fragment in lines[0]
+
+
+async def test_a_client_that_hangs_up_mid_upload_still_writes_its_line(monkeypatch, backends, caplog):
+    """A 499 used to return silently, which made "one line per request" false.
+
+    /v1/audio/speech is the one route that reads the whole body before it can
+    route, so it is the one route that can lose the client before a backend is
+    ever chosen. It answered 499 and logged nothing, so the disconnects were
+    invisible to the grep that is this service's entire observability budget.
+
+    Driven as raw ASGI rather than through httpx: the disconnect has to arrive
+    as an `http.disconnect` message while the handler is reading the body, and
+    a transport that delivers a complete request cannot produce that.
+    """
+    stt, tts, long = backends
+    sent: list[dict] = []
+
+    async def receive():
+        # The client vanished before any body arrived. Starlette turns this
+        # message into ClientDisconnect inside request.body().
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+        "method": "POST", "path": SPEECH, "raw_path": SPEECH.encode(),
+        "query_string": b"", "root_path": "", "scheme": "http",
+        "headers": [(b"host", b"gateway.test"),
+                    (b"content-type", b"application/json"),
+                    (b"content-length", b"64")],
+        "client": ("10.0.0.9", 51234), "server": ("gateway.test", 8080),
+    }
+
+    with caplog.at_level("INFO", logger="voice-gateway"):
+        async with gateway(monkeypatch, stt=stt, tts=tts, long=long) as (_, main):
+            await main.app(scope, receive, send)
+
+    assert [m["status"] for m in sent if m["type"] == "http.response.start"] == [499]
+    # Nothing was forwarded: the request died before a backend was picked.
+    assert not tts.seen and not long.seen
+
+    lines = [r.getMessage() for r in caplog.records
+             if r.getMessage().startswith("route=")]
+    assert len(lines) == 1
+    assert "status=client-disconnect" in lines[0]
+    assert "route=/v1/audio/speech" in lines[0]
+
+
+async def test_a_repeated_response_header_is_not_collapsed_into_one(monkeypatch, backends):
+    """Two Set-Cookies must stay two, not become `a=1, b=2`.
+
+    The proxy built its response headers with a dict comprehension over httpx's
+    Headers.items(), which is a Mapping view: it joins duplicates with a comma.
+    Measured — httpx.Headers([("set-cookie","a=1"),("set-cookie","b=2")])
+    .items() yields 'a=1, b=2', which is one malformed cookie rather than two
+    good ones.
+
+    No backend in this stack sends a duplicate header today, so this never bit
+    anyone. It is asserted because the day one starts to, the symptom is a
+    broken login somewhere else entirely and nothing points back here.
+    """
+    stt, tts, long = backends
+    tts.reply = lambda record: (200, [("content-type", "audio/mpeg"),
+                                      ("set-cookie", "a=1"),
+                                      ("set-cookie", "b=2"),
+                                      ("vary", "accept"),
+                                      ("vary", "origin")], b"ID3audio")
+
+    async with gateway(monkeypatch, stt=stt, tts=tts, long=long) as (client, _):
+        response = await client.post(SPEECH, content=body())
+
+    assert response.status_code == 200
+    assert response.content == b"ID3audio"
+    pairs = response.headers.multi_items()
+    assert ("set-cookie", "a=1") in pairs and ("set-cookie", "b=2") in pairs
+    assert ("vary", "accept") in pairs and ("vary", "origin") in pairs
+    # The failure this guards against, stated as the thing that must not appear.
+    assert not any(", " in v for k, v in pairs if k in ("set-cookie", "vary"))
+
+
+async def test_a_repeated_request_header_reaches_the_backend_intact(monkeypatch, backends):
+    """The same collapsing, in the other direction and with the other cause.
+
+    Starlette's Headers.items() yields every pair, so a dict comprehension did
+    not comma-join here — it let the LAST duplicate overwrite the first and
+    dropped one silently. Two Cookie headers must arrive as two.
+    """
+    stt, tts, long = backends
+
+    async with gateway(monkeypatch, stt=stt, tts=tts, long=long) as (client, _):
+        response = await client.post(
+            SPEECH, content=body(),
+            headers=[("content-type", "application/json"),
+                     ("cookie", "a=1"), ("cookie", "b=2")])
+
+    assert response.status_code == 200
+    assert len(tts.seen) == 1
+    cookies = [v for k, v in tts.last["raw_headers"] if k == "cookie"]
+    assert cookies == ["a=1", "b=2"]

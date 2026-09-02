@@ -11,8 +11,13 @@
 # containers already share a network: they are one app.
 #
 # No torch, no numpy, no model, no volume. The image is fastapi + httpx on the
-# slim base and lands around 150 MB. Nothing here decodes audio; bytes are
-# streamed between two sockets and never held.
+# slim base and measures 283 MB (`docker images voice-gateway`). 215 MB of
+# that is python:3.13-slim-trixie itself, so everything this repository adds
+# is the remaining ~68 MB: fastapi, httpx, uvicorn[standard] and their
+# dependencies. The figure is written down because it is the cheap check on
+# this file — an audio or model library arriving by accident moves it by
+# gigabytes, not megabytes. Nothing here decodes audio; bytes are streamed
+# between two sockets and never held.
 #
 # Build:
 #   docker build -t voice-gateway .

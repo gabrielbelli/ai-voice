@@ -65,6 +65,11 @@ class MockBackend:
             "path": scope["path"],
             "query": scope["query_string"].decode(),
             "headers": {k.decode().lower(): v.decode() for k, v in scope["headers"]},
+            # The same headers undeduplicated. The dict above cannot show a
+            # field name arriving twice, which is exactly what the duplicate-
+            # header tests have to assert on.
+            "raw_headers": [(k.decode().lower(), v.decode())
+                            for k, v in scope["headers"]],
             "body": b"".join(chunks),
             # One ASGI message per chunk the gateway forwarded, which is how
             # the streaming tests tell a pass-through from a buffer.
@@ -73,8 +78,14 @@ class MockBackend:
         self.seen.append(record)
 
         status, headers, body = self.reply(record)
+        # A list of pairs is accepted as well as a dict, because a dict cannot
+        # express the case the proxy has to get right: the same field name
+        # twice. Real HTTP allows it (Set-Cookie above all) and a dict silently
+        # loses one of them, so a dict-only mock could not have caught the
+        # header collapsing that this fixture now tests for.
+        pairs = headers.items() if isinstance(headers, dict) else headers
         await send({"type": "http.response.start", "status": status,
-                    "headers": [(k.encode(), v.encode()) for k, v in headers.items()]})
+                    "headers": [(k.encode(), v.encode()) for k, v in pairs]})
         await send({"type": "http.response.body", "body": body})
 
     @property

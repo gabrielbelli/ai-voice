@@ -68,6 +68,7 @@ from typing import AsyncIterator, NamedTuple
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import Response, StreamingResponse
+from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import ClientDisconnect
 
@@ -226,19 +227,51 @@ async def _http_error(request: Request, exc: StarletteHTTPException) -> Response
 # ------------------------------------------------------------------ proxy --
 
 
-def _request_headers(request: Request) -> dict[str, str]:
+# Both directions carry a LIST of pairs, never a dict. HTTP allows a field
+# name to repeat, and collapsing the repeats corrupts the message in two
+# different ways depending on which side you are on:
+#
+#   dict(httpx_headers.items())  -> {"set-cookie": "a=1, b=2"}   two cookies
+#                                   comma-joined into one invalid one, because
+#                                   httpx's Mapping view joins duplicates
+#   dict(starlette_headers)      -> the LAST duplicate silently wins, because
+#                                   Starlette's view yields every pair and the
+#                                   comprehension overwrites
+#
+# Measured, not assumed: httpx.Headers([("set-cookie","a=1"),("set-cookie",
+# "b=2")]).items() gives 'a=1, b=2'. Neither backend sends a duplicate header
+# today — no Set-Cookie, no repeated Vary or WWW-Authenticate anywhere in the
+# three — so this was harmless in practice, and it is fixed rather than
+# documented because a proxy that mangles a header the day a backend starts
+# sending one is a bug that surfaces as someone else's broken login.
+#
+# multi_items() and Starlette's MutableHeaders are the duplicate-preserving
+# views on each side; Response.init_headers calls .items(), which on
+# MutableHeaders returns every pair rather than a deduplicated mapping.
+
+
+def _request_headers(request: Request) -> list[tuple[str, str]]:
     # content-length is kept deliberately. httpx only adds
     # `transfer-encoding: chunked` for an iterator body when content-length is
     # absent, so keeping it lets a streamed upload keep its known length.
-    return {k: v for k, v in request.headers.items()
-            if k.lower() not in DROP_FROM_REQUEST}
+    #
+    # httpx replaces its own defaults (user-agent, accept-encoding) with what
+    # is passed rather than appending to them, so forwarding a list does not
+    # produce a doubled header.
+    return [(k, v) for k, v in request.headers.items()
+            if k.lower() not in DROP_FROM_REQUEST]
 
 
-def _response_headers(upstream: httpx.Response) -> dict[str, str]:
+def _response_headers(upstream: httpx.Response) -> MutableHeaders:
     # content-length and content-encoding survive because the body is
     # forwarded raw and undecoded — see aiter_raw below — so both stay true.
-    return {k: v for k, v in upstream.headers.items()
-            if k.lower() not in HOP_BY_HOP}
+    #
+    # MutableHeaders rather than a plain list so the Retry-After branch below
+    # can still ask `in` and assign by name.
+    return MutableHeaders(raw=[
+        (k.encode("latin-1"), v.encode("latin-1"))
+        for k, v in upstream.headers.multi_items()
+        if k.lower() not in HOP_BY_HOP])
 
 
 def _log(*, request: Request, backend: str, model: str | None, status: object,
@@ -428,9 +461,22 @@ async def speech(request: Request) -> Response:
     name, so no unmodified client meets it by accident, and the Content-Type
     is application/json rather than audio/*, so a client that checks can tell.
     """
+    # Started here rather than inside _proxy because the two ways out below
+    # never reach a backend, and their duration is still the client's wait.
+    # Passing time.monotonic() at the point of logging — as this route used to
+    # — reports duration=0.000 for a body read that may have taken a minute.
+    started = time.monotonic()
+
     try:
         raw = await request.body()
     except ClientDisconnect:
+        # The client hung up while we were still reading its upload; nothing
+        # can be delivered. This is the same case _proxy handles, and it logs
+        # here for the same reason: the README promises one line per request,
+        # and this was the one path that answered without writing one — the
+        # 499s were invisible to grep, which is the whole observability budget.
+        _log(request=request, backend="-", model=None,
+             status="client-disconnect", started=started)
         return Response(status_code=499)
 
     try:
@@ -441,7 +487,7 @@ async def speech(request: Request) -> Response:
         # bad voice, an unsupported response_format or speed — belongs to the
         # backend, which has better messages for all of them.
         _log(request=request, backend="-", model=None, status="400-badjson",
-             started=time.monotonic())
+             started=started)
         return error_response(400, f"request body is not valid JSON: {exc}",
                               "invalid_request_error", "invalid_value")
 

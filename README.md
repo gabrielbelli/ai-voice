@@ -313,6 +313,14 @@ status, the duration this process observed, and the backend's own
 far, which is why there is no Prometheus, no OpenTelemetry and no sidecar for
 three containers and one user.
 
+A request that never reached a backend still writes its line, with `backend=-`
+and a status naming what went wrong instead of a code — `client-disconnect`
+when the caller hung up mid-upload (answered `499`, nginx's code for it, which
+never leaves this process) and `400-badjson` when the body could not be parsed
+to route it. Both are on `POST /v1/audio/speech`, the one route that has to
+read the whole body before it can choose. `duration` on those lines is the
+time the client actually waited, not zero.
+
 `rtf` is populated from the `X-Realtime-Factor` **header**, which only
 tts-stack sends. stt-stack and tts-long report `realtime_factor` in their JSON
 bodies, and the gateway does not read it: reading it would mean buffering a
