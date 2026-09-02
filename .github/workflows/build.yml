@@ -1,6 +1,6 @@
 name: build
 
-# One pipeline for five things: four images and the package all four of them
+# One pipeline for six things: five images and the package all five of them
 # embed. Each service used to carry its own .github/workflows/build.yml, which
 # worked while each was its own repository and stopped working the moment they
 # were merged — GitHub reads .github at the REPOSITORY root and nowhere else,
@@ -27,12 +27,12 @@ env:
 jobs:
   # ------------------------------------------------------------- filter --
   #
-  # Which of the four images this commit can possibly have changed. A monorepo
+  # Which of the five images this commit can possibly have changed. A monorepo
   # without this rebuilds tts-long — torch, several gigabytes, on two
   # architectures — because someone fixed a typo in the gateway's README.
   #
   # The one rule worth stating twice: a change under packages/common rebuilds
-  # ALL FOUR. All four install it as a path dependency now, so its code is
+  # ALL FIVE. All five install it as a path dependency now, so its code is
   # inside every image. This rule was written while the gateway installed none
   # of it and was rebuilt anyway, on the grounds that "this service is exempt
   # from the shared package" is exactly the kind of fact that is true until it
@@ -80,6 +80,11 @@ jobs:
               # image and that one was false.
               "tts-long": {"image": "ai-voice-tts-long", "base": "python:3.12-slim-trixie"},
               "gateway":  {"image": "ai-voice-gateway",  "base": "python:3.13-slim-trixie"},
+              # The page, and the ingestion routes behind it. Same base and
+              # nearly the same weight as the gateway: no torch, no numpy, no
+              # ffmpeg and no audio library at all, because the decoding this
+              # feature needs happens in the browser.
+              "ui":       {"image": "ai-voice-ui",       "base": "python:3.13-slim-trixie"},
           }
           # Native runners per architecture rather than qemu. Every one of
           # these images has RUN instructions (apt, pip), and emulated arm64
@@ -106,7 +111,7 @@ jobs:
           if not exists(base):
               # A new branch, a force push, a tag, or workflow_dispatch. There
               # is nothing to diff against, and guessing narrow would silently
-              # skip an image. A release must publish all four regardless.
+              # skip an image. A release must publish all five regardless.
               base, why = None, why + " (no usable base): building everything"
 
           changed = []
@@ -124,7 +129,7 @@ jobs:
               selected = list(SERVICES)
           elif any(p.startswith(SHARED) or p in PIPELINE for p in changed):
               selected = list(SERVICES)
-              why += "; shared code or the pipeline changed, so all four"
+              why += "; shared code or the pipeline changed, so all five"
           else:
               selected = [s for s in SERVICES
                           if any(p.startswith(f"services/{s}/") for p in changed)]
@@ -196,13 +201,13 @@ jobs:
 
   # ------------------------------------------------------- the services --
   #
-  # Four jobs rather than one matrix, because the four setups differ in ways
-  # that matter and each difference is a scar: tts needs the ffmpeg its
-  # encoders shell out to, tts-long needs 3.12 and installs a deliberate subset
-  # instead of gigabytes of torch, gateway is the only one with tests of its
+  # Five jobs rather than one matrix, because the setups differ in ways that
+  # matter and each difference is a scar: tts needs the ffmpeg its encoders
+  # shell out to, tts-long needs 3.12 and installs a deliberate subset instead
+  # of gigabytes of torch, and gateway and ui are the two with tests of their
   # own rather than the shared suite.
   #
-  # All four install from the REPOSITORY ROOT and then run pytest from inside
+  # All five install from the REPOSITORY ROOT and then run pytest from inside
   # the service directory. Both halves are required: `./packages/common` in a
   # requirements file resolves against the process's cwd, and every service's
   # tests `import app.main`, which resolves only when that service's own
@@ -333,9 +338,39 @@ jobs:
         working-directory: services/gateway
         run: pytest -q --deselect tests/test_live.py
 
+  ui:
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.services), 'ui')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      # Like the gateway and unlike the three model services, this one is
+      # assertable in milliseconds: every rule it implements — which paths are
+      # forwarded, that an oversized upload never reaches stt-stack, that our
+      # SSRF pre-filter refuses a name resolving into RFC 1918, that abandoning
+      # a declined link actually reaps MeTube's pending record — is a unit test
+      # against mock backends. It cannot run the shared conformance suite whole
+      # either: it publishes no /openapi.json and has no auth module of its
+      # own. It calls the one assertion that does describe it,
+      # conformance.assert_four_field_envelope, from its own tests.
+      #
+      # NOTHING HERE STARTS A SERVER, and nothing may: the suite is
+      # fastapi.testclient over an httpx MockTransport, and yt-dlp is never
+      # spawned — app.probe.run is replaced.
+      - name: Install
+        run: pip install -r services/ui/requirements-dev.txt
+
+      - name: Test
+        working-directory: services/ui
+        run: pytest -q
+
   # --------------------------------------------------------- the images --
   build:
-    needs: [changes, common, stt, tts, tts-long, gateway]
+    needs: [changes, common, stt, tts, tts-long, gateway, ui]
     # A `needs` job that is SKIPPED skips its dependents too, and skipping is
     # the normal case here — that is the whole point of the filter. So the
     # condition is written out: run unless something actually failed, and only
@@ -350,7 +385,7 @@ jobs:
       # One entry per (service, architecture) the filter selected, built in the
       # `changes` job. An `include:` written out here could not be filtered:
       # GitHub ADDS an include entry that matches no existing combination as a
-      # new one, so a static table would build all four however narrow the
+      # new one, so a static table would build all five however narrow the
       # filter was.
       matrix: ${{ fromJSON(needs.changes.outputs.build_matrix) }}
     steps:
@@ -429,15 +464,39 @@ jobs:
           buildah run --user root "$(buildah from localhost/build:gateway-${{ matrix.arch }})" -- \
             python -c 'import app.main, voice_common.errors, httpx, fastapi, uvicorn; print("ok", httpx.__version__, fastapi.__version__)'
 
-      # Every image also carries the shared entrypoint, except the gateway,
-      # which ships its own: it has no TLS and no volume to take ownership of.
+      # Same uvicorn[standard] risk as the gateway — httptools and uvloop are
+      # compiled — plus two of this image's own. python-multipart is what
+      # UploadFile needs and its absence is a RuntimeError at the first upload
+      # rather than at import, so it is imported explicitly here. And yt-dlp is
+      # checked as a BINARY on PATH, not only as a module: app/probe.py spawns
+      # `yt-dlp`, so an install that shipped the package without its console
+      # script would build cleanly and degrade every confirm card to a title.
+      - name: Check the runtime imports on this architecture (ui)
+        if: matrix.service == 'ui'
+        run: |
+          buildah run --user root "$(buildah from localhost/build:ui-${{ matrix.arch }})" -- \
+            python -c 'import app.main, voice_common.errors, httpx, fastapi, uvicorn, multipart; print("ok", httpx.__version__, fastapi.__version__)'
+          buildah run --user root "$(buildah from localhost/build:ui-${{ matrix.arch }})" -- \
+            sh -c 'command -v yt-dlp && yt-dlp --version'
+
+      # The page is the product here, and it is COPYd rather than built, so the
+      # one way it goes missing is a Containerfile that forgot app/static.
+      - name: Check the page is in the image (ui)
+        if: matrix.service == 'ui'
+        run: |
+          buildah run --user root "$(buildah from localhost/build:ui-${{ matrix.arch }})" -- \
+            python -c "import pathlib,sys; p=pathlib.Path('/srv/app/static/ui.html'); sys.exit(0 if p.is_file() and '<title>ai-voice</title>' in p.read_text() else 'the page is missing from the image')"
+
+      # Every image also carries the shared entrypoint, except the gateway and
+      # the ui, which ship their own: neither terminates TLS, and the ui's
+      # volume loop is one directory rather than the models tree.
       # It does install packages/common — for voice_common.errors, and for
       # nothing else. A build
       # that installed the package but not its `script-files` produces an image
       # that starts and immediately exits with "exec: voice-entrypoint.sh: not
       # found", which is a run-time failure this makes a build-time one.
       - name: Check the shared entrypoint installed
-        if: matrix.service != 'gateway'
+        if: matrix.service != 'gateway' && matrix.service != 'ui'
         run: |
           buildah run --user root "$(buildah from localhost/build:${{ matrix.service }}-${{ matrix.arch }})" -- \
             sh -c 'command -v voice-entrypoint.sh'

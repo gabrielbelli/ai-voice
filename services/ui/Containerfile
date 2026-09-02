@@ -1,0 +1,116 @@
+# The page, and the three things a browser cannot do for itself.
+#
+#   :8090  ->  /ui                      one HTML file, no build step
+#              /ui/resolve /commit
+#              /abandon /fetch          MeTube ingestion, behind the gateway's key
+#              /ui/clips                the reference-clip store for voice cloning
+#              everything else in the
+#              forwarding table         -> voice-gateway:8080
+#
+# THIS SERVICE TALKS TO THE GATEWAY AND TO METUBE, AND TO NOTHING ELSE. Not
+# stt-stack:8000, not tts-stack:8001, not tts-long:8002 — those three have no
+# `ports` entry in compose.yaml, and a UI that addressed them would work on a
+# laptop running all five containers and fail on the NAS. The gateway stays the
+# single auth boundary: this process holds no key list and compares no token,
+# it asks the gateway whether a presented key is good.
+#
+# No torch, no numpy, no model, no ffmpeg and no PyAV. Audio decoding happens
+# in the BROWSER — OfflineAudioContext turns any playable file into the 16 kHz
+# mono WAV the transcriber wants and the 24 kHz mono WAV a reference clip must
+# be — so this image needs no codec library at all. The figure to watch is the
+# same one the gateway's Containerfile watches: python:3.13-slim-trixie is
+# 215 MB, the gateway is 283 MB, and this image is that plus yt-dlp and
+# python-multipart. If it ever moves by gigabytes rather than megabytes, an
+# audio or model library has arrived by accident.
+#
+# Build, from the repository root — the context is the root for every service
+# here, which is what lets a Containerfile COPY both its own directory and
+# packages/common:
+#   docker build -f services/ui/Containerfile -t ai-voice-ui .
+#
+# Run (on the network the gateway shares):
+#   docker run -p 30081:8090 \
+#     -e UI_GATEWAY_URL=http://voice-gateway:8080 \
+#     -e UI_METUBE_URL=http://192.0.2.10:30097 \
+#     -v voices:/voices \
+#     ai-voice-ui
+
+FROM python:3.13-slim-trixie
+
+# util-linux supplies setpriv for the entrypoint's privilege drop. It is
+# normally already in the slim base; naming it means a base image change cannot
+# silently remove it, and `command -v` fails the build rather than the
+# container if it ever does.
+#
+# Nothing else is installed. In particular no ffmpeg: yt-dlp is used here ONLY
+# with --skip-download, so it never post-processes anything and never needs a
+# muxer. MeTube has its own ffmpeg and does the actual fetching.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends util-linux \
+ && rm -rf /var/lib/apt/lists/* \
+ && command -v setpriv
+
+WORKDIR /srv
+
+# Repo-relative, because the context is the repository root. The shared package
+# comes in for voice_common.errors and for nothing else: this service emits the
+# same four-field OpenAI envelope as the four it sits in front of, and a fifth
+# hand-written copy of that envelope is exactly the defect the package exists
+# to have stopped.
+COPY packages/common/ ./packages/common/
+COPY services/ui/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY services/ui/app/ ./app/
+COPY services/ui/entrypoint.sh /usr/local/bin/entrypoint.sh
+
+# Named here rather than left to the application's defaults so `docker inspect`
+# shows what this container will talk to.
+#
+# UI_METUBE_URL is deliberately absent: it is a HOST address, not a compose
+# service name — MeTube is a separate TrueNAS app with host_network:false and
+# its port published at 30097, so it shares no DNS with this app's internal
+# network — and an address baked into a published image would be wrong for
+# every deployment but one. Unset means the link box is not rendered at all and
+# the page says "link ingestion not configured". Uploads and TTS never depend
+# on it.
+ENV UI_GATEWAY_URL=http://voice-gateway:8080 \
+    UI_VOICE_DIR=/voices \
+    PYTHONUNBUFFERED=1
+
+# uid 1000, created rather than reused: the slim base has no non-root account.
+# There is no USER instruction, for the same reason as in the four siblings —
+# the entrypoint starts as root so it can take ownership of the mounted voices
+# volume, then drops to uid 1000 before uvicorn runs. Nothing here ever serves
+# as root, and the yt-dlp subprocess inherits the dropped uid.
+RUN useradd --create-home --uid 1000 ui
+
+# The reference-clip store, shared read-only with tts-long. Declared so that a
+# `docker run` with no -v still starts and still writes somewhere — into an
+# anonymous volume, which is honest about being ephemeral — rather than failing
+# at the first recorded clip. compose.yaml names it properly; without a NAMED
+# volume every cloned voice dies on the next restart, which would be the worst
+# possible version of this feature.
+VOLUME ["/voices"]
+
+# 8090, not 8080. The gateway's container port is 8080 and these two are on the
+# same network; picking a different one means a compose file that maps both can
+# never be ambiguous about which it meant.
+EXPOSE 8090
+
+# There is no HEALTHCHECK instruction, and this is not an oversight. HEALTHCHECK
+# is not a field in the OCI image spec, so an OCI-format build drops it
+# silently — and OCI is buildah's DEFAULT format, which is what CI runs. The
+# four sibling images have none for the same reason. The probe is passed at run
+# time instead, where every runtime honours it, and compose.yaml at the
+# repository root carries it:
+#
+#   python -c "import urllib.request as u; u.urlopen('http://127.0.0.1:8090/health')"
+#
+# That endpoint never needs a key and always answers 200, reporting the
+# gateway's state in the body rather than adopting it: a UI killed by the
+# orchestrator because tts-long was restarting would be gone at exactly the
+# moment someone wanted to open the page and find out why.
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8090"]

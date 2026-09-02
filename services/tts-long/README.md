@@ -413,7 +413,7 @@ sentence.
 | `TTS_LOG_LEVEL` | `INFO` | Root log level. An unrecognised name warns and falls back to `INFO` rather than refusing to start |
 | `TTS_TLS_CERT` | *(unset)* | PEM certificate. Both this and the key are needed for HTTPS; half a pair refuses to start |
 | `TTS_TLS_KEY` | *(unset)* | PEM private key. Only applied to the `uvicorn` command; overriding `CMD` with TLS set refuses to start |
-| `TTS_VOICE_DIR` | `/voices` | Reference clips. `<name>.wav` becomes voice `<name>` |
+| `TTS_VOICE_DIR` | `/voices` | Reference clips. `<name>.wav` becomes voice `<name>`. Rescanned when the directory changes, so a clip copied in is usable on the next request rather than after a restart |
 | `TTS_VOICE_STRICT` | *(off)* | Refuse OpenAI voice names that have no clip, instead of aliasing them to `default` |
 | `TTS_OPENAI_SYNC_MAX_CHARS` | `300` | Hard ceiling on input answered synchronously; `0` always returns 202 |
 | `TTS_OPENAI_SYNC_TIMEOUT` | `180` | Seconds to wait before giving up and returning 202 instead |

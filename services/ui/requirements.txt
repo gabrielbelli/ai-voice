@@ -1,0 +1,33 @@
+# Four dependencies and one binary, and no model, no torch, no numpy.
+#
+# This process serves one HTML file, forwards bytes to the gateway, and spawns
+# a metadata probe. Nothing in it decodes audio: the browser does that with
+# OfflineAudioContext, which is why there is no PyAV here and no ffmpeg in the
+# image. That is a deliberate difference from services/tts and services/stt,
+# and it is what keeps this image in the same weight class as the gateway.
+fastapi==0.121.2
+uvicorn[standard]==0.38.0
+httpx==0.28.1
+
+# UploadFile on the reference-clip route. FastAPI does not vendor it, and a
+# missing python-multipart is a RuntimeError raised at the first upload rather
+# than at import, so it is pinned here alongside the rest.
+python-multipart==0.0.20
+
+# THE ONLY THING THIS SERVICE DOWNLOADS IS METADATA. yt-dlp is used with
+# --skip-download, --no-config and --no-cache-dir, in a subprocess with a hard
+# kill and a cwd it cannot write, purely to obtain the duration and audio size
+# that MeTube resolves and then throws away (_PUBLIC_EXCLUDED_FIELDS strips the
+# info-dict, and DownloadInfo has no duration field at all). MeTube does the
+# fetching. See app/probe.py for the full argument, including why this is a
+# probe and not a second downloader.
+#
+# Pinned rather than floated even though extractors rot: an unpinned yt-dlp
+# makes two builds of the same commit different images. UI_PROBE=0 removes it
+# from the running system without a rebuild.
+yt-dlp==2026.8.19
+
+# The OpenAI error envelope, shared with the four siblings rather than
+# hand-copied into a fifth file. Resolved relative to the process's CWD, which
+# is the repository root for every install here and in the Containerfile.
+./packages/common

@@ -1,7 +1,7 @@
 # ai-voice
 
-Self-hosted speech-to-text and text-to-speech. Four images and the package they
-share, one repository, deployed as a single app behind one published port.
+Self-hosted speech-to-text and text-to-speech. Five images and the package they
+share, one repository, deployed as a single app.
 
 ```text
                        :8080  services/gateway
@@ -17,9 +17,18 @@ share, one repository, deployed as a single app behind one published port.
                           │
   /v1/models              ├─ answered at the gateway
   /health                 └─ all three, fanned out, no key required
+                          ▲
+                          │  the gateway, and nothing else
+                       :8090  services/ui
+                              one HTML page, plus link ingestion via MeTube
 
-  packages/common            the wire contract all four services import
+  packages/common            the wire contract all five services import
 ```
+
+Two ports are published: **30080** for the gateway, which is the API, and
+**30081** for the page. 8000, 8001 and 8002 stay closed, which is what makes
+the single auth boundary real — `services/ui` is a client of the gateway, not a
+way round it.
 
 Every service keeps its own README, and those are the reference: what each
 route accepts, every OpenAI deviation and the measurement forcing it, the
@@ -31,6 +40,7 @@ configuration table, the deployment notes. This file is about the repository.
 | [`services/tts`](services/tts/README.md) | `ai-voice-tts` | Kokoro-82M, 54 voices, six output formats |
 | [`services/tts-long`](services/tts-long/README.md) | `ai-voice-tts-long` | Chatterbox, a queue and an SSE stream |
 | [`services/gateway`](services/gateway/README.md) | `ai-voice-gateway` | One address, one key, one health answer |
+| [`services/ui`](services/ui/README.md) | `ai-voice-ui` | One page, no build step; links ingested through MeTube |
 | [`packages/common`](packages/common/README.md) | — | Auth, the error envelope, `/health`, the entrypoint |
 
 ## Why one repository

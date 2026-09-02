@@ -56,9 +56,55 @@ _SUFFIXES = (".wav", ".flac", ".mp3", ".ogg", ".m4a", ".opus")
 class Registry:
     """The voices this process can actually produce."""
 
-    def __init__(self, clips: dict[str, Path], strict: bool = False) -> None:
+    def __init__(self, clips: dict[str, Path], strict: bool = False,
+                 directory: Path | None = None,
+                 stamp: tuple[float, int] | None = None) -> None:
         self.clips = clips
         self.strict = strict
+        # Where the clips came from, and what the directory looked like when
+        # they were read. Both optional so a hand-built Registry — every one in
+        # the test suite — still works and simply never refreshes.
+        self.directory = directory
+        self.stamp = stamp
+
+    def refresh(self) -> None:
+        """Rescan if, and only if, the directory has changed since last time.
+
+        THE ORIGINAL DECISION WAS "SCAN ONCE, AT STARTUP", and the argument for
+        it was sound as far as it went: a directory listing on every /v1 call
+        is a syscall per request to answer a question that hardly ever changes.
+        What it also meant, though, was that a clip arriving by ANY route — a
+        copy over SMB, an scp, or the UI service writing into the shared
+        volume — was invisible until someone restarted a container that holds
+        6.5 GB of Chatterbox and pays a ~60 s model load on its next job. That
+        is a heavy price for a file appearing in a directory.
+
+        So the listing is still not done per request: st_mtime_ns and st_ino
+        are one stat() and change only when an entry is created, renamed or
+        removed in the directory. A rescan happens on the request AFTER a clip
+        lands and never again until the next one. The cost the original comment
+        was avoiding is avoided; the restart is not required.
+
+        st_ino is in the stamp because a volume can be swapped underneath a
+        running container — remounted, or replaced by a deploy — and the new
+        directory's mtime can plausibly be older than the one we recorded.
+        """
+        if self.directory is None:
+            return
+        try:
+            info = self.directory.stat()
+        except OSError:
+            # The volume went away. Keep what we had rather than emptying the
+            # registry: a request for a voice whose file is gone fails with a
+            # decode error, which is a better story than every voice silently
+            # becoming "unknown voice" the moment a mount hiccups.
+            return
+        stamp = (info.st_mtime_ns, info.st_ino)
+        if stamp == self.stamp:
+            return
+        fresh = load_registry(self.directory, self.strict)
+        self.clips = fresh.clips
+        self.stamp = fresh.stamp
 
     @property
     def names(self) -> list[str]:
@@ -93,11 +139,11 @@ class Registry:
 
 def load_registry(directory: str | os.PathLike[str] | None = None,
                   strict: bool | None = None) -> Registry:
-    """Scan the voice directory once, at startup.
+    """Scan the voice directory, and record what it looked like.
 
-    Once rather than per request: a directory listing on every /v1 call is a
-    syscall per request to answer a question that changes when someone copies a
-    file in, and a restart is already how this service picks up configuration.
+    Called once at startup and then only from Registry.refresh, which fires
+    when the directory's stat() says something in it has changed. See that
+    method for why "once, at startup" was narrowed rather than kept.
     """
     path = Path(directory if directory is not None
                 else os.getenv("TTS_VOICE_DIR", "/voices"))
@@ -105,6 +151,7 @@ def load_registry(directory: str | os.PathLike[str] | None = None,
         strict = os.getenv("TTS_VOICE_STRICT", "").strip().lower() in {
             "1", "true", "yes", "on"}
     clips: dict[str, Path] = {}
+    stamp: tuple[float, int] | None = None
     if path.is_dir():
         for entry in sorted(path.iterdir()):
             if entry.is_file() and entry.suffix.lower() in _SUFFIXES:
@@ -112,4 +159,9 @@ def load_registry(directory: str | os.PathLike[str] | None = None,
                 # alloy.flac beats alloy.wav every start rather than whichever
                 # the filesystem happened to hand over first.
                 clips.setdefault(entry.stem, entry)
-    return Registry(clips, strict=strict)
+        try:
+            info = path.stat()
+            stamp = (info.st_mtime_ns, info.st_ino)
+        except OSError:
+            stamp = None
+    return Registry(clips, strict=strict, directory=path, stamp=stamp)

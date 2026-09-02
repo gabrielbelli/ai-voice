@@ -9,6 +9,7 @@
 
     POST /v1/audio/speech   model=chatterbox|tts-long    ►  tts-long:8002
     POST /jobs  GET /jobs  GET /jobs/{id}[/audio]        ►  tts-long:8002
+    DELETE /jobs/{id}                                    ►  tts-long:8002
 
     GET  /v1/models    answered here, from a static table, with no backend call
     GET  /health       all three, fanned out, unauthenticated
@@ -582,6 +583,24 @@ async def list_jobs(request: Request) -> Response:
 
 @app.get("/jobs/{job_id}")
 async def get_job(request: Request, job_id: str) -> Response:
+    return await _proxy(request, LONG, content=None)
+
+
+@app.delete("/jobs/{job_id}")
+async def cancel_job(request: Request, job_id: str) -> Response:
+    """Cancel a queued job, or discard a finished one.
+
+    tts-long has had this route all along (`@app.delete("/jobs/{job_id}")`,
+    main.py:580); this table simply never carried it, so a DELETE through the
+    gateway met Starlette's 405 and `method_not_supported`. The consequence was
+    that a Chatterbox job could be started through the front door and not
+    called off through it — and at 0.138x realtime the jobs that most need
+    calling off are the ones measured in tens of minutes.
+
+    Not routing it was never a decision, and the asymmetry says so: POST /jobs
+    and both GETs were here from the start. Adding it is three lines and closes
+    the one thing a UI could not offer.
+    """
     return await _proxy(request, LONG, content=None)
 
 

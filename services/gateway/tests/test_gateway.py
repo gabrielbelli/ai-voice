@@ -95,6 +95,21 @@ async def test_job_routes_mount_flat_and_are_not_rewritten(monkeypatch, backends
     assert long.seen[-1]["query"] == "format=wav"
 
 
+async def test_a_job_can_be_cancelled_through_the_gateway(monkeypatch, backends):
+    """tts-long has had DELETE /jobs/{id} all along (main.py:580); this table
+    simply never carried it, so the request met Starlette's 405 and
+    `method_not_supported`. At 0.138x realtime the jobs that most need calling
+    off are the ones measured in tens of minutes, and a job that can be started
+    through the front door should be stoppable through it.
+    """
+    stt, tts, long = backends
+    async with gateway(monkeypatch, stt=stt, tts=tts, long=long) as (client, _):
+        response = await client.delete("/jobs/abc-123")
+
+    assert response.status_code == 200
+    assert (long.seen[-1]["method"], long.seen[-1]["path"]) == ("DELETE", "/jobs/abc-123")
+
+
 async def test_advertised_models_route_where_the_list_says_they_do(monkeypatch, backends):
     """GET /v1/models is the routing table, so it must not drift from it.
 

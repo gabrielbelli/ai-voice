@@ -12,7 +12,7 @@ One port, one key, three speech services.
   /speak  /voices         │                             Kokoro, 1.2-1.5x
                           │
   /v1/audio/speech  model=│chatterbox tts-long      ─►  tts-long:8002
-  /jobs  /jobs/{id}[/audio]                             Chatterbox, 0.138x
+  /jobs  /jobs/{id}[/audio]  DELETE /jobs/{id}           Chatterbox, 0.138x
                           │
   /v1/models              ├─  answered here, from a static table
   /health                 └─  all three, fanned out, no key required
@@ -104,6 +104,7 @@ here would quietly undo that.
 | `GET /voices` | tts-stack | — |
 | `POST /jobs` | tts-long | streamed through |
 | `GET /jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/audio` | tts-long | — |
+| `DELETE /jobs/{id}` | tts-long | cancel a queued job, or discard a finished one |
 | `GET /v1/models` | answered here | — |
 | `GET /health` | all three | — |
 

@@ -145,6 +145,11 @@ state: dict[str, object] = {}
 # thread, and asyncio primitives are not thread-safe to touch from outside.
 events: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Event]] = {}
 
+# A module-level singleton, and the CMD is a bare `uvicorn app.main:app` with
+# no --workers, so there is exactly ONE process holding exactly one of these.
+# That is what makes Registry.refresh worth having: a clip written into the
+# shared volume by services/ui becomes resolvable on the next request rather
+# than on the next restart of a container that carries 6.5 GB of Chatterbox.
 VOICES = voice_registry.load_registry()
 FORMATS = available_formats()
 
@@ -501,6 +506,9 @@ def create_job(req: JobRequest) -> dict[str, object]:
     if req.language not in SUPPORTED_LANGUAGES:
         raise HTTPException(400, f"unsupported language {req.language!r}; "
                                  f"chatterbox has {', '.join(SUPPORTED_LANGUAGES)}")
+    # One stat() before resolving, so a voice that arrived since this process
+    # started is found. See Registry.refresh for why it is not a full listing.
+    VOICES.refresh()
     resolved = VOICES.resolve(req.voice)
     if resolved is None:
         raise HTTPException(400, f"unknown voice {req.voice!r}; this service "
@@ -625,7 +633,13 @@ def get_audio(job_id: str) -> Response:
 
 @app.get("/voices")
 def list_voices() -> dict[str, object]:
-    """What `voice` may name. Unknown names are a 400, so they are listed."""
+    """What `voice` may name. Unknown names are a 400, so they are listed.
+
+    Refreshed first, because this is the call a UI makes to build a voice
+    picker and a picker that cannot see a clip someone just added is the whole
+    reason the registry stopped being immutable.
+    """
+    VOICES.refresh()
     return {"voices": VOICES.names,
             "openai_aliases": {name: voice_registry.BUILTIN
                                for name in VOICES.aliased},
@@ -760,6 +774,7 @@ def _validate(req: SpeechRequest) -> tuple[str, str | None] | JSONResponse:
             code="unsupported_value", param="language")
 
     requested = req.voice.id if isinstance(req.voice, CustomVoice) else req.voice
+    VOICES.refresh()
     resolved = VOICES.resolve(requested)
     if resolved is None:
         return error_response(

@@ -1,0 +1,1933 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ai-voice</title>
+<!--
+  ONE FILE. No build step, no node_modules, no framework, no CDN, no external
+  font, no analytics. The page makes requests to its own origin and nowhere
+  else, which is also why it works on a NAS with no internet.
+
+  Three native primitives do the work a framework would otherwise have been
+  brought in for:
+    <dialog>.showModal()   the confirm-before-fetch step, which is the
+                           requirement the user pressed hardest on and which
+                           Gradio has no component for at all
+    OfflineAudioContext    the transcoder: it turns any browser-decodable
+                           media into 16 kHz mono WAV for transcription and
+                           24 kHz mono WAV for a reference clip, which is what
+                           makes both "upload a 2 GB video" and "record my own
+                           voice" work with zero dependencies on either side
+    Notification           the ping when a 36-minute Chatterbox job lands
+-->
+<style>
+/* ------------------------------------------------------------- tokens -- */
+:root{
+  --bg:#f6f7f9; --panel:#fff; --line:#dfe3e8; --ink:#14181d; --dim:#5b6672;
+  --accent:#2f6fed; --accent-ink:#fff; --warn:#8a5300; --warn-bg:#fff5e0;
+  --bad:#a3231d; --bad-bg:#fdeceb; --good:#1c6b3f; --good-bg:#e8f5ed;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --radius:10px;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#14171c; --panel:#1b1f26; --line:#2c323b; --ink:#e6eaef; --dim:#98a3b0;
+    --accent:#5a8dff; --accent-ink:#0b1220; --warn:#ffce7a; --warn-bg:#3a2f16;
+    --bad:#ff9d97; --bad-bg:#3a1f1d; --good:#8ee0ae; --good-bg:#16301f;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+h1,h2,h3{margin:0;font-weight:600}
+h2{font-size:15px}
+h3{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
+a{color:var(--accent)}
+code,.num{font-family:var(--mono)}
+.wrap{max-width:920px;margin:0 auto;padding:0 16px 64px}
+
+/* ------------------------------------------------------------- header -- */
+header{position:sticky;top:0;z-index:5;background:var(--panel);
+  border-bottom:1px solid var(--line)}
+.bar{max-width:920px;margin:0 auto;padding:10px 16px;display:flex;
+  gap:12px;align-items:center;flex-wrap:wrap}
+.brand{font-weight:700;letter-spacing:-.01em}
+.brand small{font-weight:400;color:var(--dim);margin-left:6px}
+.spacer{flex:1}
+.pills{display:flex;gap:6px;flex-wrap:wrap}
+.pill{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);
+  background:var(--bg);color:var(--dim);white-space:nowrap}
+.pill.ok{background:var(--good-bg);color:var(--good);border-color:transparent}
+.pill.bad{background:var(--bad-bg);color:var(--bad);border-color:transparent}
+.pill.warn{background:var(--warn-bg);color:var(--warn);border-color:transparent}
+.keybox{display:flex;gap:4px;align-items:center}
+.keybox input{width:150px}
+
+/* -------------------------------------------------------------- forms -- */
+input,select,textarea,button{font:inherit;color:inherit}
+input[type=text],input[type=password],input[type=number],select,textarea{
+  background:var(--bg);border:1px solid var(--line);border-radius:8px;
+  padding:7px 9px;width:100%}
+textarea{resize:vertical;min-height:120px;font-family:inherit}
+button{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+  padding:7px 13px;cursor:pointer}
+button:hover:not(:disabled){border-color:var(--accent)}
+button:disabled{opacity:.5;cursor:not-allowed}
+button.primary{background:var(--accent);color:var(--accent-ink);border-color:transparent;
+  font-weight:600}
+button.small{padding:3px 9px;font-size:12px}
+button.link{background:none;border:none;color:var(--accent);padding:2px 4px;
+  text-decoration:underline}
+label{display:block;font-size:12px;color:var(--dim);margin-bottom:4px}
+.row{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
+.row>*{flex:1;min-width:130px}
+.row>.tight{flex:0 0 auto;min-width:0}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg button{border:none;border-radius:0;background:var(--panel);padding:6px 14px}
+.seg button[aria-pressed=true]{background:var(--accent);color:var(--accent-ink)}
+.tabs{display:flex;gap:4px;margin:16px 0 12px}
+.tabs button{border-radius:999px}
+.tabs button[aria-selected=true]{background:var(--accent);color:var(--accent-ink);
+  border-color:transparent;font-weight:600}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  padding:14px;margin-bottom:12px}
+.hint{font-size:12px;color:var(--dim);margin-top:6px}
+.note{font-size:12px;border-radius:8px;padding:8px 10px;margin-top:8px}
+.note.warn{background:var(--warn-bg);color:var(--warn)}
+.note.bad{background:var(--bad-bg);color:var(--bad)}
+.note.ok{background:var(--good-bg);color:var(--good)}
+.note.flat{background:var(--bg);color:var(--dim)}
+.note .acts{margin-top:8px;display:flex;gap:8px;flex-wrap:wrap}
+[hidden]{display:none !important}
+
+/* ------------------------------------------------------------- expert -- */
+details{border:1px solid var(--line);border-radius:var(--radius);margin-top:12px;
+  background:var(--panel)}
+details>summary{cursor:pointer;padding:9px 12px;font-size:13px;font-weight:600;
+  list-style:none}
+details>summary::-webkit-details-marker{display:none}
+details>summary::before{content:"▸ ";color:var(--dim)}
+details[open]>summary::before{content:"▾ "}
+details .body{padding:0 12px 12px;border-top:1px solid var(--line);padding-top:12px}
+body:not(.expert) .expert-only{display:none}
+.slider{display:grid;grid-template-columns:1fr auto;gap:6px;align-items:center}
+.slider input[type=range]{width:100%}
+.slider output{font-family:var(--mono);font-size:12px;color:var(--dim)}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+
+/* ---------------------------------------------------------- drop zone -- */
+.drop{border:2px dashed var(--line);border-radius:var(--radius);padding:22px 14px;
+  text-align:center;background:var(--panel);transition:border-color .12s}
+.drop.over{border-color:var(--accent);background:var(--bg)}
+.drop .big{font-weight:600;margin-bottom:4px}
+.filechip{display:inline-flex;gap:8px;align-items:center;background:var(--bg);
+  border:1px solid var(--line);border-radius:999px;padding:4px 6px 4px 12px;
+  font-size:13px;margin-top:10px}
+
+/* ---------------------------------------------------------- progress --- */
+.bar-track{height:6px;border-radius:999px;background:var(--line);overflow:hidden;
+  margin:8px 0 4px}
+.bar-fill{height:100%;background:var(--accent);width:0;transition:width .4s linear}
+.job{border:1px solid var(--line);border-radius:var(--radius);padding:11px 12px;
+  margin-bottom:8px;background:var(--panel)}
+.job.expired{opacity:.55}
+.job .top{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.job .id{font-family:var(--mono);font-size:11px;color:var(--dim)}
+.job .acts{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.status{font-size:11px;padding:1px 7px;border-radius:999px;background:var(--bg);
+  border:1px solid var(--line)}
+.status.running{background:var(--warn-bg);color:var(--warn);border-color:transparent}
+.status.done{background:var(--good-bg);color:var(--good);border-color:transparent}
+.status.failed{background:var(--bad-bg);color:var(--bad);border-color:transparent}
+
+/* -------------------------------------------------------------- modal -- */
+dialog{border:1px solid var(--line);border-radius:14px;background:var(--panel);
+  color:var(--ink);padding:0;max-width:520px;width:calc(100% - 32px)}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+dialog .head{padding:16px 18px 0}
+dialog .body{padding:12px 18px}
+dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-end;
+  flex-wrap:wrap}
+.facts{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:13px;
+  margin:10px 0}
+.facts dt{color:var(--dim)}
+.facts dd{margin:0;font-family:var(--mono)}
+
+/* --------------------------------------------------------- transcript -- */
+.out{white-space:pre-wrap;word-break:break-word;background:var(--bg);
+  border:1px solid var(--line);border-radius:8px;padding:11px;min-height:60px;
+  max-height:420px;overflow:auto;font-size:13px}
+.meter{height:8px;border-radius:999px;background:var(--line);overflow:hidden;
+  margin-top:8px}
+.meter div{height:100%;background:var(--good);width:0}
+.ring{font-family:var(--mono);font-size:26px;font-weight:700}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="bar">
+    <span class="brand">ai-voice<small>speech in, speech out</small></span>
+    <span class="spacer"></span>
+    <div class="pills" id="pills"></div>
+    <div class="keybox">
+      <input id="key" type="password" placeholder="API key" autocomplete="off"
+             spellcheck="false" aria-label="API key">
+      <button class="small" id="keyshow" type="button" title="Show or hide the key">show</button>
+    </div>
+    <label style="margin:0;display:flex;gap:5px;align-items:center;cursor:pointer">
+      <input type="checkbox" id="expert" style="width:auto"> Expert
+    </label>
+  </div>
+</header>
+
+<div class="wrap">
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="transcribe" aria-selected="true">Transcribe</button>
+    <button role="tab" data-tab="speak" aria-selected="false">Speak</button>
+    <button role="tab" data-tab="jobs" aria-selected="false">Jobs <span id="jobcount"></span></button>
+  </nav>
+
+  <!-- ================================================== TRANSCRIBE == -->
+  <section id="tab-transcribe">
+    <div class="card">
+      <div class="drop" id="drop">
+        <div class="big">Drop an audio or video file here</div>
+        <div class="hint">or <button class="link" id="browse" type="button">choose a file</button>
+          — video is fine, the audio is taken out of it</div>
+        <input type="file" id="file" hidden
+               accept="audio/*,video/*,.mkv,.mp4,.mov,.webm,.m4a,.opus,.flac">
+        <div id="linkrow" style="margin-top:12px" hidden>
+          <div class="row">
+            <input type="text" id="url" placeholder="…or paste a link (YouTube, podcast, anything yt-dlp knows)">
+            <button class="tight" id="resolve" type="button">Resolve</button>
+          </div>
+          <div class="hint" id="linkhint"></div>
+        </div>
+        <div id="picked" hidden></div>
+      </div>
+
+      <div class="row" style="margin-top:14px">
+        <div class="tight">
+          <label>Output</label>
+          <div class="seg" id="fmt">
+            <button data-fmt="text" aria-pressed="true">Text</button>
+            <button data-fmt="srt" aria-pressed="false">Subtitles (SRT)</button>
+            <button data-fmt="vtt" aria-pressed="false">Subtitles (VTT)</button>
+          </div>
+        </div>
+        <span class="spacer"></span>
+        <button class="primary tight" id="go-stt" type="button" disabled>Transcribe</button>
+      </div>
+      <div id="stt-note"></div>
+
+      <details class="expert-only" id="stt-expert">
+        <summary>Expert — transcription</summary>
+        <div class="body">
+          <div class="grid2">
+            <div>
+              <label for="x-rf">response_format</label>
+              <select id="x-rf">
+                <option value="">follow the Output control above</option>
+                <option value="json">json</option>
+                <option value="text">text</option>
+                <option value="verbose_json">verbose_json</option>
+                <option value="srt">srt</option>
+                <option value="vtt">vtt</option>
+              </select>
+              <div class="hint">diarized_json is a 400 on this stack, so it is not offered.</div>
+            </div>
+            <div>
+              <label for="x-gran">timestamp_granularities[]</label>
+              <select id="x-gran">
+                <option value="">none</option>
+                <option value="segment">segment</option>
+                <option value="word">word</option>
+              </select>
+              <div class="hint">Forces verbose_json — anything else is a 400.</div>
+            </div>
+            <div>
+              <label><input type="checkbox" id="x-logprobs" style="width:auto"> include[]=logprobs</label>
+              <div class="hint">Forces json. Honoured on Parakeet.</div>
+            </div>
+            <div>
+              <label for="x-route">Route</label>
+              <select id="x-route">
+                <option value="v1">/v1/audio/transcriptions — resamples, does subtitles</option>
+                <option value="native">/transcribe — richer, 16 kHz only</option>
+              </select>
+              <div class="hint" id="x-route-hint">The native route returns
+                <code>repaired</code>, <code>audio_seconds</code> and
+                <code>realtime_factor</code>, and refuses anything that is not 16 kHz.</div>
+            </div>
+          </div>
+
+          <h3 style="margin-top:14px">Voice activity detection (Silero)</h3>
+          <div class="grid2">
+            <div><label>threshold <span class="hint">deployment default 0.5</span></label>
+              <div class="slider"><input type="range" id="x-vad-t" min="0" max="1" step="0.01" value="0.5"><output>0.50</output></div></div>
+            <div><label>prefix_padding_ms <span class="hint">default 100, not OpenAI's</span></label>
+              <div class="slider"><input type="range" id="x-vad-p" min="0" max="5000" step="10" value="100"><output>100</output></div></div>
+            <div><label>silence_duration_ms <span class="hint">default 300, not OpenAI's</span></label>
+              <div class="slider"><input type="range" id="x-vad-s" min="0" max="30000" step="50" value="300"><output>300</output></div></div>
+          </div>
+
+          <div class="note flat">
+            <strong>There is no preprocessing stage in this codebase</strong> — the
+            pipeline is decode → VAD → ASR → glossary — so there is no denoise
+            toggle to offer. Denoising measured <strong>+26% mean WER</strong> on
+            this stack, worse in 9 of 13 conditions, one case above WER 1.0 from
+            hallucination. This note exists so nobody adds it back.
+          </div>
+          <div class="note flat">
+            <strong>The glossary is a startup file</strong>
+            (<code>/etc/stt-stack/glossary.txt</code>), not a request field. The
+            per-request vocabulary fields <code>prompt</code> and
+            <code>keywords[]</code> are both 400 on Parakeet. An <em>irrelevant</em>
+            glossary cost +12% WER on Parakeet and +28% on Whisper, which is a
+            finding no slider can express.
+          </div>
+          <div class="note flat">
+            <strong>No language control, in either mode.</strong> It is a 400
+            <code>unsupported_parameter</code> on <code>/v1</code> under Parakeet
+            and silently ignored on <code>/transcribe</code>
+            (<code>accepts_language = False</code>). <code>STT_LANGUAGE</code> is
+            deliberately unset on this deployment because pinning it breaks
+            English/Portuguese code-switching — agreement collapsed to 0.017 when
+            the service translated instead of transcribing. Auto-detect is not a
+            default here, it is the only correct behaviour.
+          </div>
+          <div class="note flat">
+            Under Parakeet, <code>verbose_json.language</code> is the literal
+            string <code>"unknown"</code>, and every <code>segment.seek</code> is
+            0, every <code>no_speech_prob</code> 0.0 and every <code>tokens</code>
+            empty. They are placeholders, not measurements.
+          </div>
+        </div>
+      </details>
+    </div>
+
+    <div class="card" id="result" hidden>
+      <div class="row" style="align-items:center">
+        <h2 class="tight">Transcript</h2><span class="spacer"></span>
+        <span class="hint tight" id="result-meta"></span>
+        <button class="small tight" id="copy" type="button">Copy</button>
+        <button class="small tight" id="download" type="button">Download</button>
+      </div>
+      <div class="note ok" id="repaired" hidden></div>
+      <div class="out" id="transcript" style="margin-top:10px"></div>
+    </div>
+  </section>
+
+  <!-- ======================================================= SPEAK == -->
+  <section id="tab-speak" hidden>
+    <div class="card">
+      <label for="text">Text</label>
+      <textarea id="text" placeholder="Type or paste what you want spoken."></textarea>
+      <div class="hint"><span id="chars">0</span> / 4096 characters</div>
+      <div id="codeswitch"></div>
+
+      <div class="row" style="margin-top:12px">
+        <div>
+          <label for="voice">Voice</label>
+          <select id="voice"></select>
+          <div class="hint" id="voicehint"></div>
+          <button class="small link" id="delvoice" type="button" hidden>Remove this cloned voice</button>
+        </div>
+        <div>
+          <label for="speed">Speed <output id="speedout" class="num">1.00</output></label>
+          <input type="range" id="speed" min="0.5" max="2" step="0.05" value="1">
+          <div class="hint" id="speedhint">0.5 – 2.0</div>
+        </div>
+      </div>
+
+      <!-- The clone sheet: ONE revealed row, and it appears only when the
+           picker's last option is chosen. Recording is primary and uploading
+           is the fallback, because the user asked for their own voice and
+           sending them to find a file is the expert path. -->
+      <div class="card" id="clone" hidden style="margin-top:12px;background:var(--bg)">
+        <h2>Use my own voice</h2>
+        <div class="hint">10–30 seconds, one speaker, no music, speaking the
+          language you intend to synthesise.</div>
+        <div class="row" style="margin-top:10px;align-items:center">
+          <button class="primary tight" id="rec" type="button">● Record 15 s</button>
+          <span class="ring tight" id="ring">15</span>
+          <div><div class="meter"><div id="level"></div></div></div>
+          <button class="tight" id="cliporfile" type="button">Upload a clip instead</button>
+          <input type="file" id="clipfile" hidden accept="audio/*,video/*">
+        </div>
+        <div class="row" style="margin-top:10px">
+          <div><label for="clipname">Save this voice as</label>
+            <input type="text" id="clipname" placeholder="gabriel"></div>
+          <button class="primary tight" id="saveclip" type="button" disabled>Save voice</button>
+          <button class="tight" id="cancelclip" type="button">Cancel</button>
+        </div>
+        <audio id="clippreview" controls style="width:100%;margin-top:10px" hidden></audio>
+        <div id="clipnote"></div>
+      </div>
+
+      <div id="speak-note"></div>
+      <div class="row" style="margin-top:12px">
+        <span class="spacer"></span>
+        <button class="primary tight" id="go-tts" type="button">Speak</button>
+      </div>
+      <audio id="player" controls style="width:100%;margin-top:12px" hidden></audio>
+      <div class="row" id="playrow" hidden style="margin-top:8px">
+        <span class="hint tight" id="speak-meta"></span><span class="spacer"></span>
+        <button class="small tight" id="dl-audio" type="button">Download</button>
+      </div>
+
+      <details class="expert-only" id="tts-expert-fast">
+        <summary>Expert — instant voices (Kokoro)</summary>
+        <div class="body">
+          <div class="grid2">
+            <div><label for="x-lang">language override</label>
+              <select id="x-lang">
+                <option value="">inferred from the voice prefix</option>
+                <option>en-us</option><option>en-gb</option><option>pt-br</option>
+                <option>es</option><option>fr-fr</option><option>hi</option>
+                <option>it</option><option>ja</option><option>cmn</option>
+              </select>
+              <div class="hint">The prefix map is published:
+                a→en-us, b→en-gb, e→es, f→fr-fr, h→hi, i→it, j→ja, p→pt-br, z→cmn.
+                <code>/speak</code> defaults to en-us, so a UI that omitted this
+                would mispronounce every Portuguese request while looking right.</div>
+            </div>
+            <div><label for="x-tfmt">format</label>
+              <select id="x-tfmt">
+                <option>mp3</option><option>opus</option><option>aac</option>
+                <option>flac</option><option>wav</option><option>pcm</option>
+              </select>
+              <div class="hint">The field is <code>format</code> on
+                <code>/speak</code> (default wav) and <code>response_format</code>
+                on <code>/v1</code> (default mp3). Different names, different
+                defaults — they do not share a request builder.</div>
+            </div>
+            <div><label for="x-troute">route</label>
+              <select id="x-troute">
+                <option value="speak">/speak — segments, per-segment voice, hard 0.5–2.0 speed</option>
+                <option value="v1">/v1/audio/speech — accepts 0.25–4.0 and silently clamps</option>
+              </select>
+              <div class="hint"><code>/speak</code> is <code>extra="forbid"</code>:
+                an unknown field is a 422. <code>/v1</code> is
+                <code>extra="allow"</code> and reports what it ignored in
+                <code>X-Ignored-Parameters</code>, which this page surfaces.</div>
+            </div>
+            <div><label for="x-stream">stream_format</label>
+              <select id="x-stream"><option value="audio">audio</option>
+                <option value="sse">sse</option></select>
+              <div class="hint">SSE reports time-to-first-audio; measured 5.49 s
+                into a 55.06 s generation, against 58.98 s buffered.</div>
+            </div>
+          </div>
+          <h3 style="margin-top:14px">Segments</h3>
+          <div class="hint">Each row is one <code>/speak</code> segment with a
+            pause after it. Per-segment voice exists only on <code>/speak</code>,
+            never on tts-long, so the column disappears for a cloned voice.</div>
+          <div id="segments"></div>
+          <button class="small" id="addseg" type="button" style="margin-top:8px">+ Add segment</button>
+        </div>
+      </details>
+
+      <details class="expert-only" id="tts-expert-clone">
+        <summary>Expert — cloned voices (Chatterbox)</summary>
+        <div class="body">
+          <div class="note flat">This deployment is <strong>calmer than stock</strong>:
+            compose pins exaggeration 0.3, cfg_weight 0.3 and temperature 0.6 where
+            stock Chatterbox is 0.5 / 0.5 / 0.8. The sliders are not broken.
+            Resemble's own demo offers exaggeration 0.25–2.0; our backend validates
+            <code>ge=0.0, le=1.0</code>, so that range would 422 — these are
+            reconciled, not copied.</div>
+          <div class="grid2" style="margin-top:12px">
+            <div><label>exaggeration <span class="hint">0–1, here 0.3, stock 0.5</span></label>
+              <div class="slider"><input type="range" id="x-exag" min="0" max="1" step="0.05" value="0.3"><output>0.30</output></div></div>
+            <div><label>cfg_weight <span class="hint">0–1, here 0.3, stock 0.5</span></label>
+              <div class="slider"><input type="range" id="x-cfg" min="0" max="1" step="0.05" value="0.3"><output>0.30</output></div></div>
+            <div><label>temperature <span class="hint">0.1–1.5, here 0.6, stock 0.8</span></label>
+              <div class="slider"><input type="range" id="x-temp" min="0.1" max="1.5" step="0.05" value="0.6"><output>0.60</output></div></div>
+            <div><label for="x-clang">language</label>
+              <select id="x-clang"></select>
+              <div class="hint">Resemble's note, where the only person who can act
+                on it will see it: for cross-language transfer, take cfg_weight to 0.</div>
+            </div>
+          </div>
+          <div class="row" style="margin-top:12px">
+            <button class="small tight" id="resetclone" type="button">Reset to deployment defaults</button>
+            <span class="hint">Three sliders at non-stock values is exactly the state people get lost in.</span>
+          </div>
+          <div class="note flat">Submission is always <code>POST /jobs</code>:
+            it answers 202 every time, with <code>chunks</code> and the server's own
+            <code>estimated_seconds</code>, and it survives a closed laptop. The
+            <code>/v1</code> SSE path is not offered as a default because closing
+            that stream <em>cancels the job</em>, and because the same request can
+            answer 200-audio, 200-event-stream or <strong>202 with JSON</strong>
+            depending on arithmetic — a naive client writes the third into a .wav.</div>
+        </div>
+      </details>
+    </div>
+  </section>
+
+  <!-- ======================================================== JOBS == -->
+  <section id="tab-jobs" hidden>
+    <div class="card">
+      <div class="row" style="align-items:center">
+        <h2 class="tight">Jobs</h2>
+        <span class="hint tight">Chatterbox runs at about 0.138× realtime, so a job
+          is minutes. You can close this page — they run on the server.</span>
+        <span class="spacer"></span>
+        <button class="small tight" id="refresh" type="button">Refresh</button>
+      </div>
+      <div id="joblist" style="margin-top:12px"></div>
+    </div>
+  </section>
+</div>
+
+<!-- ============================================ CONFIRM BEFORE FETCH == -->
+<dialog id="confirm">
+  <div class="head"><h2 id="c-title">Fetch this?</h2>
+    <div class="hint" id="c-sub"></div></div>
+  <div class="body">
+    <dl class="facts" id="c-facts"></dl>
+    <div id="c-live"></div>
+    <div class="row">
+      <div><label for="c-start">Start at (seconds)</label>
+        <input type="number" id="c-start" min="0" step="1" placeholder="0"></div>
+      <div><label for="c-end">Stop at (seconds)</label>
+        <input type="number" id="c-end" min="0" step="1" placeholder="whole thing"></div>
+    </div>
+    <div class="hint">Trimming happens on the source, before anything is
+      downloaded — so a three-hour stream can be transcribed as a ten-minute
+      excerpt without fetching the rest.</div>
+    <div id="c-subs"></div>
+  </div>
+  <div class="foot">
+    <button id="c-cancel" type="button">Don't fetch</button>
+    <button class="primary" id="c-go" type="button">Fetch and transcribe</button>
+  </div>
+</dialog>
+
+<script>
+"use strict";
+
+/* ===================================================== small helpers === */
+const $  = (id) => document.getElementById(id);
+const el = (sel, root) => (root || document).querySelector(sel);
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("aiv." + k);
+                    return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("aiv." + k, JSON.stringify(v)); } catch {} },
+};
+
+function human(bytes) {
+  if (bytes === null || bytes === undefined) return "unknown";
+  const mb = bytes / 1048576;
+  return mb >= 1024 ? (mb / 1024).toFixed(1) + " GB" : mb.toFixed(mb < 10 ? 1 : 0) + " MB";
+}
+function clock(seconds) {
+  if (seconds === null || seconds === undefined || !isFinite(seconds)) return "unknown";
+  seconds = Math.max(0, Math.round(seconds));
+  const h = Math.floor(seconds / 3600), m = Math.floor(seconds % 3600 / 60), s = seconds % 60;
+  return h ? `${h}h ${String(m).padStart(2,"0")}m` : m ? `${m}m ${String(s).padStart(2,"0")}s` : `${s}s`;
+}
+/* Deliberately vague above a minute. A confirm dialog that says "about 2
+   minutes" is believed and acted on; one that says "1m 47s" invites someone to
+   time it and find out the estimate was built on a rate this repository states
+   three different values for. */
+function roughly(seconds) {
+  if (!isFinite(seconds)) return "unknown";
+  if (seconds < 45) return "a few seconds";
+  if (seconds < 90) return "about a minute";
+  if (seconds < 3600) return "about " + Math.round(seconds / 60) + " minutes";
+  const h = seconds / 3600;
+  return "about " + (h < 2 ? "an hour" : Math.round(h) + " hours");
+}
+function note(host, kind, html) {
+  host.innerHTML = html ? `<div class="note ${kind}">${html}</div>` : "";
+}
+
+/* The two error shapes this stack emits, and both really occur: /v1 routes and
+   everything the gateway itself generates use {"error":{...}}, while native
+   routes' own failures use {"detail": ...} — a string for an HTTPException and
+   a LIST for a 422. A UI that reads only one shows "[object Object]" for half
+   the failures in the system. */
+function reason(payload, fallback) {
+  if (!payload) return fallback;
+  if (payload.error && payload.error.message) return payload.error.message;
+  if (typeof payload.detail === "string") return payload.detail;
+  if (Array.isArray(payload.detail)) {
+    return payload.detail.map(d => (d.loc ? d.loc.join(".") + ": " : "") + d.msg).join("; ");
+  }
+  return fallback;
+}
+
+async function api(path, options) {
+  options = options || {};
+  const headers = new Headers(options.headers || {});
+  const key = ($("key").value || "").trim();
+  if (key) headers.set("Authorization", "Bearer " + key);
+  const response = await fetch(path, Object.assign({}, options, { headers }));
+  return response;
+}
+
+async function json(path, options) {
+  const response = await api(path, options);
+  let payload = null;
+  try { payload = await response.json(); } catch {}
+  if (!response.ok) {
+    const err = new Error(reason(payload, `${response.status} ${response.statusText}`));
+    err.status = response.status;
+    err.retryAfter = Number(response.headers.get("Retry-After")) || null;
+    throw err;
+  }
+  return payload;
+}
+
+/* ============================================================= state === */
+let CONFIG = { ingestion:false, probe:false, cloning:false, stt_rtf_seed:8.5,
+               stt_budget_seconds:900, max_clip_seconds:30, confirm_seconds:600,
+               confirm_bytes:52428800, max_upload_bytes:2147483648 };
+let VOICES = { kokoro:{}, clones:[] };
+let HEALTH = null;
+
+/* The measured rate, kept per browser. Seeded conservatively from the server
+   and corrected by every native transcription, because the repository states
+   47-63x (root README), 8.5-10.4x (the gateway, which is what its 900 s
+   timeout was built on) and about 5x (the stt README) for the same model. A
+   number this page measured on this box beats all three. */
+const rate = {
+  stt: () => store.get("rtf.stt", CONFIG.stt_rtf_seed),
+  learn(observed) {
+    if (!(observed > 0) || !isFinite(observed)) return;
+    const prior = store.get("rtf.stt", CONFIG.stt_rtf_seed);
+    store.set("rtf.stt", prior * 0.7 + observed * 0.3);
+  },
+  /* Chatterbox's own EMA, live from /health, seeded 0.21 by the service and
+     corrected by every finished job. Never a constant here. */
+  clone: () => {
+    const h = HEALTH && HEALTH.gateway && HEALTH.gateway.health;
+    const f = h && h.backends && h.backends.tts_long && h.backends.tts_long.health
+              && h.backends.tts_long.health.realtime_factor;
+    return f > 0 ? f : 0.138;
+  },
+  /* The gateway's own figure for tts-stack, from its 300 s timeout comment. */
+  kokoro: () => 1.3,
+};
+
+/* chars/15 is the service's own arithmetic (TTS_CHARS_PER_SECOND=15, measured
+   9.8-19.3), so the page and the backend agree about how long the audio will
+   be before either of them agrees about how long it takes to make. */
+const speechSeconds = (text) => (text || "").length / 15;
+
+/* ================================================= key box and header === */
+$("key").value = store.get("key", "");
+$("key").addEventListener("change", () => { store.set("key", $("key").value.trim()); poll(); });
+$("keyshow").addEventListener("click", () => {
+  const box = $("key");
+  box.type = box.type === "password" ? "text" : "password";
+  $("keyshow").textContent = box.type === "password" ? "show" : "hide";
+});
+
+$("expert").checked = store.get("expert", false);
+document.body.classList.toggle("expert", $("expert").checked);
+$("expert").addEventListener("change", () => {
+  /* Reveals panels beneath the controls that are already there. It does not
+     swap pages, relayout or lose typed text, so flipping it mid-task is free. */
+  store.set("expert", $("expert").checked);
+  document.body.classList.toggle("expert", $("expert").checked);
+});
+
+document.querySelectorAll('[role=tab]').forEach(button => {
+  button.addEventListener("click", () => {
+    document.querySelectorAll('[role=tab]').forEach(b =>
+      b.setAttribute("aria-selected", String(b === button)));
+    ["transcribe","speak","jobs"].forEach(name =>
+      $("tab-" + name).hidden = name !== button.dataset.tab);
+  });
+});
+
+/* --------------------------------------------------------- health ----- */
+function pill(label, kind, title) {
+  return `<span class="pill ${kind}" title="${title || ""}">${label}</span>`;
+}
+async function poll() {
+  let out = "";
+  try {
+    /* /health is unauthenticated everywhere in this stack and always answers
+       200 even when a backend is down, so the code is not the signal — the
+       body is. */
+    HEALTH = await (await fetch("/health")).json();
+    const g = HEALTH.gateway && HEALTH.gateway.health;
+    if (!g) throw new Error("gateway unreachable");
+    const b = g.backends || {};
+    const up = (x) => x && x.reachable ? "ok" : "bad";
+    out += pill("STT " + (up(b.stt) === "ok" ? "up" : "down"), up(b.stt),
+                b.stt && b.stt.health ? "model: " + b.stt.health.model : "");
+    const tts = b.tts && b.tts.health;
+    out += pill("Speak " + (up(b.tts) === "ok" ? "up" : "down"), up(b.tts),
+                tts ? tts.voices + " voices" : "");
+    const long = b.tts_long && b.tts_long.health;
+    if (!b.tts_long || !b.tts_long.reachable) {
+      out += pill("Clone down", "bad");
+    } else if (long && long.model_loaded === false) {
+      out += pill("Clone cold — first job pays ~60 s", "warn",
+                  "and ~3 GB downloaded on the very first run");
+    } else {
+      out += pill("Clone " + (1 / rate.clone()).toFixed(1) + "× slower than realtime", "ok",
+                  "live realtime_factor " + rate.clone().toFixed(3));
+    }
+    if (long) out += pill(`queue ${long.queued}/${long.queue_capacity}`, "");
+  } catch {
+    out = pill("gateway unreachable", "bad");
+  }
+  $("pills").innerHTML = out;
+}
+
+/* ================================================== the transcoder ===== */
+/*
+  ONE TRANSCODER, TWO FEATURES, ZERO PACKAGES ADDED TO ANY IMAGE.
+
+  (1) Transcription. services/stt/app/main.py:138 reads an UploadFile whole
+      into RAM with no cap, so a 2 GB MKV is 2 GB resident in a container
+      limited to 6 GB. Decoding here and sending 16 kHz mono turns that same
+      MKV into about 15 MB. It also makes the native /transcribe route usable:
+      that route calls decode(allow_resample=False) and 400s with "expected
+      16000 Hz, got 44100 Hz", and video audio is always 44.1 or 48 kHz — so
+      without this the richer response, and its `repaired` glossary field, is
+      unreachable for every video anyone owns.
+  (2) Reference clips. MediaRecorder produces audio/webm;codecs=opus on Chrome
+      and Firefox and audio/mp4 on Safari. tts-long's registry decodes
+      .wav .flac .mp3 .ogg .m4a .opus via librosa, and a webm renamed .ogg does
+      not decode. Everything goes out as a WAV the server is certain to read.
+
+  The ceiling is decodeAudioData's, not ours: it needs the whole file resident
+  as a decoded float buffer, so a 500 MB source is already hundreds of MB of
+  ArrayBuffer. Above that the file is uploaded raw with a warning, which is
+  the honest failure rather than a tab that dies silently.
+*/
+const CAN_DECODE = 500 * 1024 * 1024;
+
+function wav(samples, sampleRate) {
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+  const ascii = (offset, text) => { for (let i = 0; i < text.length; i++)
+    view.setUint8(offset + i, text.charCodeAt(i)); };
+  ascii(0, "RIFF"); view.setUint32(4, 36 + samples.length * 2, true);
+  ascii(8, "WAVEfmt "); view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  ascii(36, "data"); view.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    /* Clipped BEFORE scaling. The other order wraps a sample above 1.0 round
+       to full-scale negative, which is an audible click rather than a quiet
+       distortion — the same ordering voice_common.audio.pcm_bytes documents. */
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
+async function toWav(file, targetRate, maxSeconds) {
+  const bytes = await file.arrayBuffer();
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  let decoded;
+  try { decoded = await ctx.decodeAudioData(bytes); }
+  finally { ctx.close(); }
+  let seconds = decoded.duration;
+  if (maxSeconds && seconds > maxSeconds) seconds = maxSeconds;  /* trimmed, not refused */
+  const frames = Math.max(1, Math.round(seconds * targetRate));
+  const off = new OfflineAudioContext(1, frames, targetRate);
+  const source = off.createBufferSource();
+  source.buffer = decoded;
+  source.connect(off.destination);
+  source.start(0);
+  const rendered = await off.startRendering();
+  return { blob: wav(rendered.getChannelData(0), targetRate),
+           seconds: rendered.duration, originalRate: decoded.sampleRate };
+}
+
+/* ==================================================== transcribe tab === */
+const stt = { file:null, prepared:null, rate:null, seconds:null, token:null,
+              facts:null, format:"text" };
+
+$("browse").addEventListener("click", () => $("file").click());
+$("file").addEventListener("change", () => { if ($("file").files[0]) pick($("file").files[0]); });
+["dragenter","dragover"].forEach(e => $("drop").addEventListener(e, ev => {
+  ev.preventDefault(); $("drop").classList.add("over"); }));
+["dragleave","drop"].forEach(e => $("drop").addEventListener(e, ev => {
+  ev.preventDefault(); $("drop").classList.remove("over"); }));
+$("drop").addEventListener("drop", ev => {
+  const f = ev.dataTransfer.files[0];
+  if (f) pick(f);
+  else { const text = ev.dataTransfer.getData("text"); if (text) { $("url").value = text; resolveLink(); } }
+});
+document.addEventListener("paste", ev => {
+  if ($("tab-transcribe").hidden) return;
+  const text = (ev.clipboardData || {}).getData ? ev.clipboardData.getData("text") : "";
+  if (/^https?:\/\//i.test((text || "").trim()) && CONFIG.ingestion) {
+    $("url").value = text.trim(); resolveLink();
+  }
+});
+
+document.querySelectorAll("#fmt button").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll("#fmt button").forEach(o =>
+    o.setAttribute("aria-pressed", String(o === b)));
+  stt.format = b.dataset.fmt;
+}));
+
+async function pick(file) {
+  stt.file = file; stt.token = null; stt.prepared = null; stt.facts = null;
+  $("picked").hidden = false;
+  $("picked").innerHTML = `<span class="filechip">${file.name}
+    <span class="hint">${human(file.size)}</span>
+    <button class="small" id="unpick" type="button">×</button></span>`;
+  $("unpick").addEventListener("click", () => {
+    stt.file = null; stt.prepared = null; $("picked").hidden = true;
+    $("file").value = ""; $("go-stt").disabled = true; note($("stt-note"), "", "");
+  });
+  $("go-stt").disabled = false;
+
+  if (file.size > CONFIG.max_upload_bytes) {
+    note($("stt-note"), "bad", `That file is ${human(file.size)}. The server
+      refuses anything over ${human(CONFIG.max_upload_bytes)} — and it would be
+      read whole into the transcription container's memory if it did not.`);
+    $("go-stt").disabled = true;
+    return;
+  }
+  if (file.size > CAN_DECODE) {
+    note($("stt-note"), "warn", `${human(file.size)} is too large to decode in
+      the browser (<code>decodeAudioData</code> needs the whole file resident),
+      so it will be uploaded as it is. Expect it to be slow, and expect the
+      transcription container to hold all of it in memory while it works.`);
+    return;
+  }
+  note($("stt-note"), "flat", "Extracting the audio…");
+  try {
+    /* 16 kHz mono is what the model wants anyway — stt resamples to exactly
+       this — so nothing is lost by doing it here, and a 2 GB MKV becomes
+       about 15 MB before it crosses the network. */
+    const out = await toWav(file, 16000, null);
+    stt.prepared = new File([out.blob], file.name.replace(/\.[^.]+$/, "") + ".wav",
+                            { type: "audio/wav" });
+    stt.seconds = out.seconds; stt.rate = 16000;
+    const compute = out.seconds / rate.stt();
+    note($("stt-note"), "ok", `Audio extracted: ${clock(out.seconds)}, now
+      ${human(stt.prepared.size)} instead of ${human(file.size)}.
+      Transcription should take ${roughly(compute)}
+      <span class="hint">(at the ${rate.stt().toFixed(1)}× this browser has
+      measured on this box — an estimate, not a promise)</span>.`);
+    if (compute > CONFIG.stt_budget_seconds) {
+      note($("stt-note"), "warn", `That is ${roughly(compute)} of compute, past
+        the gateway's own ${CONFIG.stt_budget_seconds} s ceiling for one
+        request — it would come back as a 504 with the work thrown away. Split
+        the recording, or paste it as a link instead and trim it on the card.`);
+    }
+  } catch (err) {
+    /* A container the browser cannot decode (some MKV subtitle tracks, AC-3,
+       DTS) is not a failure: stt decodes with libav and will manage it. */
+    stt.prepared = null;
+    note($("stt-note"), "flat", `Your browser could not decode that one
+      (${err.message || err}), so it will be uploaded as it is —
+      the server decodes with libav and handles far more than a browser does.`);
+  }
+  updateRouteAvailability();
+}
+
+/* The native route is 16 kHz only, and we know the rate because the browser
+   decoded the file. Offering a path that 400s on every MP4 is worse than not
+   offering it, so it is disabled with the reason written on it. */
+function updateRouteAvailability() {
+  const select = $("x-route");
+  const native = select.querySelector('option[value=native]');
+  const ok = !!stt.prepared || !stt.file;
+  native.disabled = !ok;
+  native.textContent = ok
+    ? "/transcribe — richer, 16 kHz only"
+    : "/transcribe — unavailable: this file is not 16 kHz and was not decoded here";
+  if (!ok && select.value === "native") select.value = "v1";
+}
+$("x-gran").addEventListener("change", () => {
+  if ($("x-gran").value) $("x-rf").value = "verbose_json";
+});
+$("x-logprobs").addEventListener("change", () => {
+  if ($("x-logprobs").checked) { $("x-rf").value = "json"; $("x-gran").value = ""; }
+});
+
+/* ------------------------------------------------ resolve, confirm ---- */
+async function resolveLink() {
+  const url = ($("url").value || "").trim();
+  if (!url) return;
+  $("resolve").disabled = true;
+  $("linkhint").textContent = "Resolving — nothing is being downloaded yet.";
+  try {
+    const facts = await json("/ui/resolve", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url }) });
+    stt.facts = facts; stt.token = facts.token; stt.file = null; stt.prepared = null;
+    $("picked").hidden = false;
+    $("picked").innerHTML = `<span class="filechip">${facts.title}
+      <span class="hint">${facts.duration ? clock(facts.duration) : "duration unknown"}</span>
+      <button class="small" id="unpick" type="button">×</button></span>`;
+    $("unpick").addEventListener("click", abandon);
+    $("linkhint").textContent = "";
+    /* SMALL AND OBVIOUSLY SHORT MEDIA DOES NOT NAG. The server decides, from
+       the two thresholds in app/config.py, and a dialog that fires on
+       everything is a dialog people dismiss without reading. */
+    if (facts.confirm) showConfirm(facts); else startFetch({});
+  } catch (err) {
+    $("linkhint").innerHTML = `<span style="color:var(--bad)">${err.message}</span>`;
+  } finally {
+    $("resolve").disabled = false;
+  }
+}
+$("resolve").addEventListener("click", resolveLink);
+$("url").addEventListener("keydown", e => { if (e.key === "Enter") resolveLink(); });
+
+async function abandon() {
+  const token = stt.token;
+  stt.token = null; stt.facts = null; $("picked").hidden = true;
+  $("go-stt").disabled = true;
+  if (!token) return;
+  try {
+    /* NOT OPTIONAL. Resolving calls MeTube's /add before probing — on purpose,
+       so its url_guard is what decides whether a URL may be fetched — which
+       means every declined link has left a pending record behind. */
+    const out = await json("/ui/abandon", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token }) });
+    if (!out.reaped) {
+      note($("stt-note"), "warn", `Told MeTube to drop that link, but it still
+        has a record of it. Deleting by the wrong id there answers
+        <code>{"status":"ok"}</code> and does nothing, so this is worth a look
+        at the queue on port 30097.`);
+    }
+  } catch (err) { note($("stt-note"), "warn", "Could not abandon it: " + err.message); }
+}
+
+function showConfirm(facts) {
+  const dialog = $("confirm");
+  const compute = facts.duration ? facts.duration / rate.stt() : null;
+  $("c-title").textContent = facts.is_live ? "This is a live stream." : "Fetch this?";
+  $("c-sub").textContent = facts.uploader ? facts.title + " — " + facts.uploader : facts.title;
+
+  /* THE TWO ESTIMATES ARE NEVER BLENDED. For long media the download is the
+     slow half, and one merged number hides which half to blame when it drags.
+     The download half is deliberately shown as a SIZE and not as a time: this
+     container has no idea what the source's bandwidth is, and a fabricated
+     "about 40 seconds" would be the one number on this card that was invented
+     rather than measured. MeTube reports the real speed and eta once it is
+     actually downloading, and that is what the progress line shows. */
+  const facts_html = [
+    ["Length", facts.duration ? clock(facts.duration) : "unknown"],
+    ["Download", facts.bytes ? human(facts.bytes) + " of audio only"
+                             : "unknown — audio only, roughly 1 MB a minute"],
+    ["Transcribe", compute ? roughly(compute) + ` at ${rate.stt().toFixed(1)}×`
+                           : "unknown, because the length is unknown"],
+  ];
+  $("c-facts").innerHTML = facts_html
+    .map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+
+  let live = "";
+  if (facts.is_live) {
+    /* A live stream has no end. Fetching it is not "big", it is unbounded, so
+       it gets its own wording and its own escape rather than the generic one. */
+    live = `<div class="note bad"><strong>This is a live stream. It has no end.</strong>
+      Downloading it runs until something stops it, and the transcription
+      estimate below is meaningless because there is no length to compute from.
+      <div class="acts"><button class="small" id="c-ten" type="button">Take the first 10 minutes</button></div></div>`;
+  } else if (compute && compute > CONFIG.stt_budget_seconds) {
+    live = `<div class="note warn"><strong>This will not finish in one request.</strong>
+      ${roughly(compute)} of compute is past the gateway's
+      ${CONFIG.stt_budget_seconds} s ceiling, so it would come back as a 504
+      with the work thrown away. Trim it below.</div>`;
+  }
+  if (!facts.probed) {
+    live += `<div class="note flat">The metadata probe ${
+      facts.probe_enabled ? "could not read this link" : "is switched off in this image"},
+      so there is no length or size here — MeTube resolves both and does not
+      expose either. Everything below still works; the estimate does not.</div>`;
+  }
+  $("c-live").innerHTML = live;
+  if (facts.is_live) $("c-ten") && $("c-ten").addEventListener("click", () => {
+    $("c-start").value = 0; $("c-end").value = 600;
+  });
+
+  $("c-subs").innerHTML = facts.has_subtitles
+    ? `<div class="note ok"><strong>This has real subtitles already</strong> —
+       written by a person, not machine captions. Taking those costs about two
+       seconds and no transcription at all.
+       <div class="acts"><button class="small" id="c-caps" type="button">Use the existing subtitles</button></div></div>`
+    : "";
+  if (facts.has_subtitles) $("c-caps").addEventListener("click", () => {
+    dialog.close(); startFetch({ captions: true });
+  });
+
+  $("c-start").value = ""; $("c-end").value = facts.is_live ? 600 : "";
+  dialog.showModal();
+}
+
+$("c-cancel").addEventListener("click", () => { $("confirm").close(); abandon(); });
+$("confirm").addEventListener("cancel", () => { abandon(); });   /* Escape key */
+$("c-go").addEventListener("click", () => {
+  const start = $("c-start").value === "" ? null : Number($("c-start").value);
+  const end = $("c-end").value === "" ? null : Number($("c-end").value);
+  $("confirm").close();
+  startFetch({ clip_start: start, clip_end: end });
+});
+
+async function startFetch(options) {
+  note($("stt-note"), "flat", "Queued with MeTube…");
+  try {
+    await json("/ui/commit", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify(Object.assign({ token: stt.token }, options)) });
+  } catch (err) {
+    note($("stt-note"), "bad", "Could not start the download: " + err.message);
+    return;
+  }
+  $("go-stt").disabled = true;
+  watchDownload();
+}
+
+async function watchDownload() {
+  const host = $("stt-note");
+  for (;;) {
+    let state;
+    try {
+      state = await json("/ui/progress?token=" + encodeURIComponent(stt.token));
+    } catch (err) {
+      note(host, "bad", "Lost track of the download: " + err.message);
+      return;
+    }
+    if (state.ready) {
+      note(host, "ok", "Downloaded. Transcribing…");
+      transcribeToken();
+      return;
+    }
+    if (state.where === "done" || state.status === "error") {
+      note(host, "bad", "MeTube could not download that: " +
+           (state.error || "no reason given") + ".");
+      $("go-stt").disabled = false;
+      return;
+    }
+    const percent = Number(state.percent) || 0;
+    note(host, "flat", `Downloading — ${percent.toFixed(0)}%${
+      state.speed ? " at " + human(state.speed) + "/s" : ""}${
+      state.eta ? ", " + clock(state.eta) + " left" : ""}
+      <div class="bar-track"><div class="bar-fill" style="width:${percent}%"></div></div>
+      <button class="link" id="stopdl" type="button">Stop and forget it</button>`);
+    const stop = $("stopdl");
+    if (stop) stop.addEventListener("click", abandon, { once: true });
+    if (!stt.token) return;                       /* abandoned mid-poll */
+    await new Promise(r => setTimeout(r, 2000));
+  }
+}
+
+/* ---------------------------------------------------- transcription --- */
+function chosenFormat() {
+  /* Expert wins if it was set; otherwise the plain three-way control. json is
+     what the native route always answers, whatever this says. */
+  return $("x-rf").value || (stt.format === "text" ? "text" : stt.format);
+}
+
+async function transcribeToken() {
+  /* The bytes never touch this laptop: the UI container streams MeTube's file
+     straight into a multipart POST at the gateway. That is also the only way
+     it can work — MeTube emits no CORS headers at all, so a browser cannot
+     fetch from it. */
+  const format = chosenFormat();
+  try {
+    const response = await api("/ui/fetch?response_format=" + encodeURIComponent(format), {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: stt.token }) });
+    await render(response, format);
+    note($("stt-note"), "", "");
+  } catch (err) {
+    note($("stt-note"), "bad", "Transcription failed: " + err.message);
+  } finally {
+    $("go-stt").disabled = false;
+  }
+}
+
+$("go-stt").addEventListener("click", async () => {
+  if (stt.token && !stt.file) return transcribeToken();
+  const file = stt.prepared || stt.file;
+  if (!file) return;
+  $("go-stt").disabled = true;
+  note($("stt-note"), "flat", "Transcribing…");
+
+  const native = $("x-route").value === "native" && !!stt.prepared;
+  const form = new FormData();
+  form.append("file", file, file.name);
+  let path, format;
+  if (native) {
+    path = "/transcribe"; format = "native";
+    /* No `language` field, in either mode. It is a 400 on /v1 and silently
+       ignored here, and pinning it is what once made this service translate
+       rather than transcribe. */
+  } else {
+    path = "/v1/audio/transcriptions";
+    format = chosenFormat();
+    /* `model` is required by /v1 validation and does NOT choose an engine —
+       Parakeet runs regardless and the response says so in x-stt-engine. */
+    form.append("model", "parakeet");
+    form.append("response_format", format);
+    if ($("x-gran").value) form.append("timestamp_granularities[]", $("x-gran").value);
+    if ($("x-logprobs").checked) form.append("include[]", "logprobs");
+    const t = $("x-vad-t").value, p = $("x-vad-p").value, s = $("x-vad-s").value;
+    if (t !== "0.5" || p !== "100" || s !== "300") {
+      form.append("chunking_strategy[type]", "server_vad");
+      form.append("chunking_strategy[threshold]", t);
+      form.append("chunking_strategy[prefix_padding_ms]", p);
+      form.append("chunking_strategy[silence_duration_ms]", s);
+    }
+  }
+  try {
+    const response = await api(path, { method: "POST", body: form });
+    await render(response, format);
+    note($("stt-note"), "", "");
+  } catch (err) {
+    note($("stt-note"), "bad", "Transcription failed: " + (err.message || err));
+  } finally {
+    $("go-stt").disabled = false;
+  }
+});
+
+let lastTranscript = { text: "", name: "transcript.txt" };
+
+async function render(response, format) {
+  const type = response.headers.get("content-type") || "";
+  if (!response.ok) {
+    let payload = null;
+    try { payload = JSON.parse(await response.text()); } catch {}
+    throw new Error(reason(payload, response.status + " " + response.statusText));
+  }
+  const engine = response.headers.get("x-stt-engine");
+  let text = "", meta = [], repaired = null;
+
+  if (type.includes("json")) {
+    const body = await response.json();
+    if (format === "native") {
+      text = body.text;
+      repaired = body.repaired;
+      meta.push(`${body.audio_seconds.toFixed(1)} s of audio`,
+                `${body.compute_seconds.toFixed(1)} s of compute`,
+                `${body.realtime_factor.toFixed(1)}× realtime`);
+      /* The one place this page learns. Every native transcription corrects
+         the EMA the confirm dialog quotes. */
+      rate.learn(body.realtime_factor);
+    } else {
+      text = body.text !== undefined ? body.text : JSON.stringify(body, null, 2);
+      if (body.duration) meta.push(clock(body.duration) + " of audio");
+      if (body.usage && body.usage.seconds) meta.push(body.usage.seconds + " s billed");
+    }
+  } else {
+    text = await response.text();
+  }
+  if (engine) meta.push("engine: " + engine);
+
+  lastTranscript = { text, name: "transcript." + (format === "srt" ? "srt"
+                     : format === "vtt" ? "vtt" : "txt") };
+  $("result").hidden = false;
+  $("transcript").textContent = text;
+  $("result-meta").textContent = meta.join(" · ");
+
+  /* THE GLOSSARY SUBSTITUTIONS, SURFACED. A silent rewrite is worse than no
+     rewrite, and this field is the only thing in the stack that says one
+     happened. It exists only on the native route today, which is exactly why
+     the browser-side 16 kHz extraction above matters: it is what makes the
+     native route reachable for a file that was not already 16 kHz. Until
+     an X-Glossary-Repaired header lands on /v1 (about five lines in stt), the
+     /v1 path genuinely cannot report this, and saying so is better than
+     pretending nothing was rewritten. */
+  if (repaired && repaired.length) {
+    $("repaired").hidden = false;
+    $("repaired").innerHTML = "Glossary rewrote: <strong>" +
+      repaired.map(t => String(t).replace(/[<&]/g, c => c === "<" ? "&lt;" : "&amp;"))
+              .join("</strong>, <strong>") + "</strong>";
+  } else if (format !== "native") {
+    $("repaired").hidden = false;
+    $("repaired").className = "note flat";
+    $("repaired").innerHTML = `This route cannot report glossary substitutions —
+      only the native <code>/transcribe</code> returns <code>repaired</code>.
+      Terms may have been rewritten without this line saying so.`;
+  } else {
+    $("repaired").hidden = true;
+  }
+}
+
+$("copy").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText(lastTranscript.text);
+        $("copy").textContent = "Copied"; setTimeout(() => $("copy").textContent = "Copy", 1200); }
+  catch { /* clipboard is permissioned; the transcript is selectable anyway */ }
+});
+$("download").addEventListener("click", () => {
+  const url = URL.createObjectURL(new Blob([lastTranscript.text], { type: "text/plain" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = lastTranscript.name; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+});
+
+/* ======================================================== speak tab === */
+/* The published prefix map, tts/app/openai_api.py:60-70. This is the single
+   best easy-mode win available: /speak defaults to en-us, so a UI that simply
+   omitted `language` would mispronounce every Portuguese request while looking
+   entirely correct. Choosing pf_dora sends language:"pt-br" without asking. */
+const PREFIX = { a:"en-us", b:"en-gb", e:"es", f:"fr-fr", h:"hi", i:"it",
+                 j:"ja", p:"pt-br", z:"cmn" };
+const CHATTERBOX_LANGS = "ar da de el en es fi fr he hi it ja ko ms nl no pl pt ru sv sw tr zh".split(" ");
+const CLONE_DEFAULTS = { exag:0.3, cfg:0.3, temp:0.6 };
+
+$("x-clang").innerHTML = CHATTERBOX_LANGS
+  .map(c => `<option${c === "en" ? " selected" : ""}>${c}</option>`).join("");
+
+async function loadVoices() {
+  const select = $("voice");
+  let kokoro = null, clones = [];
+  try { kokoro = await json("/voices"); }
+  catch (err) { note($("speak-note"), "bad", "Could not list voices: " + err.message); }
+  try { clones = (await json("/ui/clips")).voices || []; } catch { clones = []; }
+  VOICES = { kokoro: kokoro || {}, clones };
+
+  const group = (label, names) => names && names.length
+    ? `<optgroup label="${label}">` +
+      names.map(n => `<option value="k:${n}">${n}</option>`).join("") + "</optgroup>"
+    : "";
+
+  const all = (kokoro && kokoro.voices) || [];
+  const known = new Set([...(kokoro && kokoro.en_us || []),
+                         ...(kokoro && kokoro.en_gb || []),
+                         ...(kokoro && kokoro.pt_br || [])]);
+  let html = "";
+  html += group("Instant — English (US)", kokoro && kokoro.en_us);
+  html += group("Instant — English (UK)", kokoro && kokoro.en_gb);
+  html += group("Instant — Portuguese (Brazil)", kokoro && kokoro.pt_br);
+  html += group("Instant — other languages", all.filter(v => !known.has(v)));
+  /* THE COST GOES IN THE GROUP HEADER, not in a line that appears after the
+     click. Someone choosing a cloned voice should see what it costs before
+     they choose it, not after. */
+  const factor = (1 / rate.clone()).toFixed(0);
+  if (clones.length) {
+    html += `<optgroup label="Cloned voices — slow, about ${factor}× the length of the audio">` +
+      clones.map(c => `<option value="c:${c.name}">${c.name}</option>`).join("") +
+      "</optgroup>";
+  }
+  html += `<option value="new">+ Use my own voice…</option>`;
+  const previous = select.value;
+  select.innerHTML = html;
+  /* bm_george is TTS_VOICE on this deployment, so it is what the service would
+     have picked anyway. */
+  select.value = previous && [...select.options].some(o => o.value === previous)
+    ? previous : (all.includes("bm_george") ? "k:bm_george" : select.options[0].value);
+  onVoiceChange();
+}
+
+function currentVoice() {
+  const value = $("voice").value || "";
+  if (value === "new") return { kind:"new" };
+  return { kind: value.slice(0, 1) === "c" ? "clone" : "kokoro", name: value.slice(2) };
+}
+
+function onVoiceChange() {
+  const voice = currentVoice();
+  $("clone").hidden = voice.kind !== "new";
+  if (voice.kind === "new") { $("clipname").focus(); return; }
+
+  const clone = voice.kind === "clone";
+  /* PICKING THE VOICE PICKS THE ENGINE. The user never chooses between Kokoro
+     and Chatterbox; each row carries its speed and the page routes to /speak
+     or /jobs accordingly. Cloning stops being an advanced feature the moment
+     it stops requiring a mode decision. */
+  $("speed").disabled = clone;
+  $("speedhint").innerHTML = clone
+    ? "Fixed at 1.0 — Chatterbox has no rate control, and anything else is a 400."
+    : "0.5 – 2.0";
+  if (clone) { $("speed").value = 1; $("speedout").textContent = "1.00"; }
+  $("voicehint").innerHTML = clone
+    ? `Cloned voices use Chatterbox: about ${(1 / rate.clone()).toFixed(0)}×
+       the length of the audio in compute, queued as a job you can leave.`
+    : `Instant. Language <code>${PREFIX[voice.name[0]] || "en-us"}</code>,
+       inferred from the voice's prefix.`;
+  $("tts-expert-fast").hidden = clone;
+  $("tts-expert-clone").hidden = !clone;
+  /* Without this a bad clip is stuck in the picker for ever, and the only way
+     out is shelling into a container to delete a file. */
+  $("delvoice").hidden = !clone;
+  estimate();
+}
+$("voice").addEventListener("change", onVoiceChange);
+$("delvoice").addEventListener("click", async () => {
+  const voice = currentVoice();
+  if (voice.kind !== "clone") return;
+  if (!confirm(`Delete the cloned voice "${voice.name}"? The clip is removed from disk.`)) return;
+  try {
+    await json("/ui/clips/" + encodeURIComponent(voice.name), { method: "DELETE" });
+    await loadVoices();
+    note($("speak-note"), "ok", `Removed <strong>${voice.name}</strong>.`);
+  } catch (err) { note($("speak-note"), "bad", err.message); }
+});
+$("speed").addEventListener("input", () =>
+  $("speedout").textContent = Number($("speed").value).toFixed(2));
+document.querySelectorAll(".slider input[type=range]").forEach(input => {
+  const out = input.parentElement.querySelector("output");
+  input.addEventListener("input", () => out.textContent =
+    Number(input.value).toFixed(input.step.includes(".") ? 2 : 0));
+});
+$("resetclone").addEventListener("click", () => {
+  $("x-exag").value = CLONE_DEFAULTS.exag; $("x-cfg").value = CLONE_DEFAULTS.cfg;
+  $("x-temp").value = CLONE_DEFAULTS.temp;
+  document.querySelectorAll("#tts-expert-clone .slider").forEach(s =>
+    s.querySelector("output").textContent = Number(s.querySelector("input").value).toFixed(2));
+});
+
+/* ------------------------------------------------- the ETA, and the way out */
+$("text").addEventListener("input", estimate);
+
+function estimate() {
+  const text = $("text").value;
+  $("chars").textContent = text.length;
+  $("chars").style.color = text.length > 4096 ? "var(--bad)" : "";
+  const voice = currentVoice();
+  const audio = speechSeconds(text);
+
+  if (voice.kind !== "clone") {
+    $("go-tts").textContent = "Speak";
+    note($("speak-note"), "", "");
+  } else {
+    const compute = audio / rate.clone();
+    /* THE ETA IS IN THE BUTTON. Nobody presses "Generate — about 36 minutes"
+       by accident, and nobody has to go looking for a warning. Kokoro's button
+       just says "Speak"; the asymmetry is the message. */
+    $("go-tts").textContent = text.trim()
+      ? "Generate — " + roughly(compute) : "Generate";
+    if (compute > 600) {
+      /* A WARNING WITH NO ESCAPE IS JUST AN OBSTACLE. The cheap path is
+         offered as a button, not described in a sentence. */
+      const quick = nearestKokoro();
+      note($("speak-note"), "warn",
+        `${Math.round(text.trim().split(/\s+/).length)} words in this voice is
+         ${roughly(compute)} of compute.${quick ? ` <strong>${quick}</strong>
+         would do it in ${roughly(audio / rate.kokoro())}.` : ""}
+         <div class="acts">
+           ${quick ? `<button class="small" id="useq" type="button">Use ${quick} instead</button>` : ""}
+           <button class="small" id="anyway" type="button">Queue it anyway</button>
+         </div>`);
+      const use = $("useq");
+      if (use) use.addEventListener("click", () => {
+        $("voice").value = "k:" + quick; onVoiceChange();
+      });
+      $("anyway").addEventListener("click", () => note($("speak-note"), "", ""));
+    } else {
+      note($("speak-note"), "", "");
+    }
+  }
+  codeSwitchNote(text);
+}
+
+/* The nearest instant voice by language, so "use a quick voice instead" picks
+   something that will pronounce the text rather than the first name in a list. */
+function nearestKokoro() {
+  const wanted = $("x-clang").value || "en";
+  const all = (VOICES.kokoro && VOICES.kokoro.voices) || [];
+  const want = wanted === "pt" ? "p" : wanted === "en" ? "b" : wanted[0];
+  return all.find(v => v[0] === want) || all.find(v => v[0] === "b") || all[0] || null;
+}
+
+/* This user code-switches between English and Brazilian Portuguese inside one
+   sentence. Nothing in either engine handles that: a request carries ONE
+   language, and per-segment voice — /speak only, never tts-long — is the only
+   real answer in the stack. Saying so once, dismissibly, is better than
+   letting it be the first complaint. */
+function codeSwitchNote(text) {
+  const pt = /\b(que|não|você|para|com|uma|mais|muito|então|porque|obrigado|coisa|fazer|agora)\b|ção\b|ções\b|[ãõçáéíóúâêô]/i.test(text);
+  const en = /\b(the|and|with|that|this|about|would|there|because|something|really|actually)\b/i.test(text);
+  if (pt && en && !store.get("dismissed.codeswitch", false)) {
+    $("codeswitch").innerHTML = `<div class="note flat">This text mixes English
+      and Portuguese. A request carries one language, so whichever you send will
+      be applied to all of it. The only real answer here is the
+      <strong>segments editor</strong> in the expert panel, where each segment
+      gets its own voice — and it exists on <code>/speak</code> only, never on
+      cloned voices. <div class="acts">
+      <button class="small" id="dismisscs" type="button">Don't tell me again</button></div></div>`;
+    $("dismisscs").addEventListener("click", () => {
+      store.set("dismissed.codeswitch", true); $("codeswitch").innerHTML = "";
+    });
+  } else if (!pt || !en) {
+    $("codeswitch").innerHTML = "";
+  }
+}
+
+/* --------------------------------------------------- segments editor -- */
+function addSegment(text) {
+  const row = document.createElement("div");
+  row.className = "row";
+  row.style.marginTop = "8px";
+  row.innerHTML = `<input type="text" class="seg-text" placeholder="one segment of speech" value="${text || ""}">
+    <div class="tight" style="min-width:110px"><label>pause after (s)</label>
+      <input type="number" class="seg-pause" min="0" max="10" step="0.1" value="0"></div>
+    <div class="tight" style="min-width:150px"><label>voice</label>
+      <select class="seg-voice"><option value="">same as above</option>${
+        ((VOICES.kokoro && VOICES.kokoro.voices) || [])
+          .map(v => `<option>${v}</option>`).join("")}</select></div>
+    <button class="small tight seg-del" type="button">×</button>`;
+  el(".seg-del", row).addEventListener("click", () => row.remove());
+  $("segments").appendChild(row);
+}
+$("addseg").addEventListener("click", () => addSegment(""));
+
+function segments() {
+  const rows = [...$("segments").children];
+  if (!rows.length) return null;
+  const out = rows.map(row => {
+    const segment = { text: el(".seg-text", row).value };
+    const pause = Number(el(".seg-pause", row).value);
+    if (pause) segment.pause_after = pause;
+    const voice = el(".seg-voice", row).value;
+    if (voice) segment.voice = voice;
+    return segment;
+  }).filter(s => s.text.trim());
+  return out.length ? out : null;
+}
+
+/* --------------------------------------------------------- speaking --- */
+$("go-tts").addEventListener("click", async () => {
+  const voice = currentVoice();
+  if (voice.kind === "new") return;
+  const text = $("text").value;
+  if (!text.trim() && !segments()) return;
+  $("go-tts").disabled = true;
+  try {
+    if (voice.kind === "clone") await queueJob(voice.name, text);
+    else await speakNow(voice.name, text);
+  } catch (err) {
+    note($("speak-note"), "bad", err.message || String(err));
+  } finally {
+    $("go-tts").disabled = false;
+  }
+});
+
+async function speakNow(voice, text) {
+  const useV1 = $("x-troute").value === "v1";
+  const format = $("x-tfmt").value || (useV1 ? "mp3" : "wav");
+  const language = $("x-lang").value || PREFIX[voice[0]] || "en-us";
+  const speed = Number($("speed").value);
+  const parts = segments();
+
+  let path, body;
+  if (useV1) {
+    /* /v1 is extra="allow" and SILENTLY CLAMPS speed to 0.5-2.0 while
+       accepting 0.25-4.0; the clamp is announced in X-Speed-Clamped, which is
+       read below. It has no segments and no per-segment voice, so choosing
+       this route means giving those up. */
+    path = "/v1/audio/speech";
+    body = { model:"kokoro", input:text, voice, response_format:format, speed };
+    if ($("x-stream").value === "sse") body.stream_format = "sse";
+  } else {
+    /* /speak is extra="forbid": an unknown field is a 422, so nothing
+       speculative is sent. The field is `format`, not `response_format`. */
+    path = "/speak";
+    body = { voice, language, speed, format };
+    if (parts) body.segments = parts; else body.text = text;
+  }
+
+  const response = await api(path, {
+    method:"POST", headers:{ "content-type":"application/json" },
+    body: JSON.stringify(body) });
+  if (!response.ok) {
+    let payload = null; try { payload = await response.json(); } catch {}
+    throw new Error(reason(payload, response.status + " " + response.statusText));
+  }
+
+  const type = response.headers.get("content-type") || "";
+  let blob;
+  if (type.includes("event-stream")) {
+    blob = await collectSSE(response, format);
+  } else if (type.includes("json")) {
+    /* THE THIRD ANSWER. /v1/audio/speech can reply 200-audio, 200-event-stream
+       or 202-with-JSON, and the boundary is arithmetic rather than a constant,
+       so the same request is 200 now and 202 in a minute. Branching on the
+       status code AND the content type is the only way not to write JSON into
+       a .wav. This should not happen on the Kokoro path, and if it does the
+       honest thing is to say so rather than play it. */
+    const payload = await response.json();
+    if (payload.id) { adopt(payload.id); throw new Error(
+      "That came back as a queued job rather than audio — see the Jobs tab."); }
+    throw new Error(reason(payload, "unexpected JSON from a speech request"));
+  } else {
+    blob = await response.blob();
+  }
+
+  const meta = [];
+  const rtf = response.headers.get("x-realtime-factor");
+  if (rtf) meta.push(Number(rtf).toFixed(1) + "× realtime");
+  const ignored = response.headers.get("x-ignored-parameters");
+  /* A field that is accepted and ignored is the worst kind, so it is shown. */
+  if (ignored) meta.push("ignored: " + ignored);
+  if (response.headers.get("x-speed-clamped")) meta.push("speed was clamped");
+  play(blob, meta.join(" · "), "speech." + format);
+}
+
+async function collectSSE(response, format) {
+  /* Bare `data:` frames, a blank line after every one including the last, and
+     no [DONE] sentinel — so the end of the stream is the end of the stream. */
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const chunks = [];
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let cut;
+    while ((cut = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, cut).trim();
+      buffer = buffer.slice(cut + 1);
+      if (!line.startsWith("data:")) continue;
+      let frame; try { frame = JSON.parse(line.slice(5)); } catch { continue; }
+      if (frame.error) throw new Error(reason(frame, "the audio stream failed"));
+      if (frame.type === "speech.audio.delta" && frame.audio) {
+        const raw = atob(frame.audio);
+        const bytes = new Uint8Array(raw.length);
+        for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+        chunks.push(bytes);
+      }
+    }
+  }
+  return new Blob(chunks, { type: "audio/" + (format === "mp3" ? "mpeg" : format) });
+}
+
+let lastAudio = null;
+function play(blob, meta, name) {
+  if (lastAudio) URL.revokeObjectURL(lastAudio.url);
+  const url = URL.createObjectURL(blob);
+  lastAudio = { url, name };
+  $("player").src = url; $("player").hidden = false;
+  $("playrow").hidden = false;
+  $("speak-meta").textContent = meta;
+}
+$("dl-audio").addEventListener("click", () => {
+  if (!lastAudio) return;
+  const a = document.createElement("a");
+  a.href = lastAudio.url; a.download = lastAudio.name; a.click();
+});
+
+/* ========================================================== jobs tab === */
+/*
+  0.138× realtime means a five-minute voice note is about thirty-six minutes of
+  compute, so the whole answer here is that THE USER CLOSES THE TAB. The list
+  is rebuilt from GET /jobs, so it recovers after a reload, after a browser
+  restart, and from a different device — and it is reconciled with the ids this
+  browser has seen, which costs nothing and covers the window where a 202
+  landed but the server's list has not caught up.
+*/
+const TTL = 86400;
+const jobs = new Map();
+let jobTimer = null, poller = 0;
+
+function remembered() { return store.get("jobs", []); }
+function adopt(id, params) {
+  const seen = remembered();
+  if (!seen.some(j => j.id === id)) {
+    seen.unshift({ id, at: Date.now() / 1000, params: params || null });
+    store.set("jobs", seen.slice(0, 50));
+  }
+}
+
+async function queueJob(voice, text) {
+  /* /jobs, never /v1/audio/speech. It answers 202 EVERY time — no
+     200-vs-202-vs-SSE to branch on — it hands back `chunks` and its own
+     `estimated_seconds`, which is better than our arithmetic, and it survives
+     a closed laptop. What that costs is the format field: /jobs is called
+     without `fmt` so it always produces WAV. For a job measured in tens of
+     minutes that is the right trade. SSE is expert-only precisely because a
+     36-minute stream dies when a lid closes, and closing the stream CANCELS
+     the job. */
+  const body = { voice, language: $("x-clang").value || "en",
+                 exaggeration: Number($("x-exag").value),
+                 cfg_weight: Number($("x-cfg").value),
+                 temperature: Number($("x-temp").value) };
+  const parts = segments();
+  if (parts) body.segments = parts.map(s => ({ text: s.text, pause_after: s.pause_after || 0 }));
+  else body.text = text;
+
+  /* Asked HERE, tied to an action the user just took — never on page load. */
+  if ("Notification" in window && Notification.permission === "default") {
+    try { await Notification.requestPermission(); } catch {}
+  }
+
+  let payload;
+  try {
+    payload = await json("/jobs", { method:"POST",
+      headers:{ "content-type":"application/json" }, body: JSON.stringify(body) });
+  } catch (err) {
+    if (err.status === 429) {
+      throw new Error(`The queue is full. ${err.retryAfter
+        ? "It suggests trying again in " + err.retryAfter + " s."
+        : ""} Nothing was queued — press Generate again when it drains.`);
+    }
+    if (err.status === 504) {
+      throw new Error(`The gateway gave up waiting. tts-long's own read timeout
+        sits above its 180 s synchronous window, so this means it is not
+        answering at all rather than merely slow — but any job it did accept is
+        still queued, so check the Jobs tab before resending.`);
+    }
+    if (err.status === 503) {
+      throw new Error("Chatterbox is restarting. Try again in half a minute.");
+    }
+    throw err;
+  }
+
+  adopt(payload.id, body);
+  jobs.set(payload.id, Object.assign({ started: Date.now() / 1000 }, payload));
+  document.querySelector('[data-tab=jobs]').click();
+  renderJobs();
+  schedule(0);
+  return payload;
+}
+
+function statusClass(status) {
+  return status === "done" ? "done"
+       : status === "failed" ? "failed"
+       : status === "running" ? "running" : "";
+}
+
+function renderJobs() {
+  const list = [...jobs.values()].sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+  $("jobcount").textContent = list.filter(j => j.status === "queued" || j.status === "running").length
+    ? "(" + list.filter(j => j.status === "queued" || j.status === "running").length + ")" : "";
+
+  if (!list.length) {
+    $("joblist").innerHTML = `<div class="hint">No jobs. Cloned voices are queued
+      here; instant voices play straight back on the Speak tab.</div>`;
+    document.title = "ai-voice";
+    return;
+  }
+
+  const now = Date.now() / 1000;
+  let soonest = null;
+  $("joblist").innerHTML = list.map(job => {
+    const expired = job.finished_at && now - job.finished_at > TTL;
+    const elapsed = job.started_at ? now - job.started_at
+                  : job.created_at ? now - job.created_at : 0;
+    const budget = job.estimated_seconds || 0;
+    const live = job.status === "queued" || job.status === "running";
+    /* HONEST ABOUT THE BAR. GET /jobs/{id} carries `chunks` but no per-chunk
+       counter, so the only bar available is time against estimated_seconds. It
+       is capped at 95% until the job actually says done, and it relabels
+       itself when it overruns: a bar that reaches the end and sits there
+       teaches people to distrust every bar you ever show them. The real fix is
+       a completed-chunk counter in tts-long's worker, which is a handful of
+       lines and would turn this estimate into a fact. */
+    const percent = budget ? Math.min(95, elapsed / budget * 100) : 0;
+    const over = budget && elapsed > budget;
+    if (live && budget) {
+      const left = budget - elapsed;
+      if (soonest === null || left < soonest) soonest = left;
+    }
+    return `<div class="job ${expired ? "expired" : ""}">
+      <div class="top">
+        <span class="status ${statusClass(job.status)}">${job.status}</span>
+        <strong>${job.voice || "default"}</strong>
+        <span class="id">${job.id}</span>
+        <span class="spacer"></span>
+        <span class="hint">${job.chunks ? job.chunks + " chunks" : ""}${
+          job.queued_ahead ? " · " + job.queued_ahead + " ahead" : ""}</span>
+      </div>
+      ${live ? `<div class="bar-track"><div class="bar-fill" style="width:${percent}%"></div></div>
+        <div class="hint">${over
+          ? `still going — ${clock(elapsed)} in, past the ${clock(budget)} estimate`
+          : `${clock(elapsed)} in, ${roughly(budget - elapsed)} left`} · estimate</div>` : ""}
+      ${job.status === "failed" ? `<div class="note bad">${job.error || "no reason given"}</div>` : ""}
+      ${expired ? `<div class="hint">expired — the audio was deleted after ${TTL / 3600} hours</div>` : ""}
+      ${job.realtime_factor ? `<div class="hint">${job.audio_seconds.toFixed(0)} s of audio in
+        ${job.compute_seconds.toFixed(0)} s · ${job.realtime_factor.toFixed(3)}× realtime</div>` : ""}
+      <div class="acts">
+        ${(job.status === "done" || job.status === "cancelled") && !expired
+          ? `<button class="small" data-get="${job.id}" type="button">Download the audio</button>` : ""}
+        ${live ? `<button class="small" data-stop="${job.id}" type="button">Stop and keep what's done</button>` : ""}
+        ${job.status === "failed" ? `<button class="small" data-retry="${job.id}" type="button">Retry</button>` : ""}
+        <button class="small" data-forget="${job.id}" type="button">Forget</button>
+      </div>
+      ${live ? `<div class="hint">You can close this page. The job runs on the
+        server; come back to Jobs.</div>` : ""}
+    </div>`;
+  }).join("");
+
+  /* The answer on a background tab, without needing the tab. */
+  document.title = soonest !== null && soonest > 0
+    ? `${Math.max(1, Math.round(soonest / 60))}m left — ai-voice` : "ai-voice";
+
+  $("joblist").querySelectorAll("[data-get]").forEach(b =>
+    b.addEventListener("click", () => downloadJob(b.dataset.get)));
+  $("joblist").querySelectorAll("[data-stop]").forEach(b =>
+    b.addEventListener("click", () => stopJob(b.dataset.stop)));
+  $("joblist").querySelectorAll("[data-retry]").forEach(b =>
+    b.addEventListener("click", () => retryJob(b.dataset.retry)));
+  $("joblist").querySelectorAll("[data-forget]").forEach(b =>
+    b.addEventListener("click", () => { jobs.delete(b.dataset.forget);
+      store.set("jobs", remembered().filter(j => j.id !== b.dataset.forget));
+      renderJobs(); }));
+}
+
+async function downloadJob(id) {
+  const response = await api(`/jobs/${encodeURIComponent(id)}/audio`);
+  if (!response.ok) { alert("Not ready: " + response.status); return; }
+  const url = URL.createObjectURL(await response.blob());
+  const a = document.createElement("a");
+  a.href = url; a.download = id + ".wav"; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+async function stopJob(id) {
+  /* "Stop and keep what's done", not "Cancel": /jobs/{id}/audio serves a
+     `cancelled` job as happily as a `done` one and 409s only while running,
+     so the partial audio is genuinely kept. tts-long has had DELETE /jobs/{id}
+     all along; the gateway simply never routed it. */
+  try { await json(`/jobs/${encodeURIComponent(id)}`, { method: "DELETE" }); }
+  catch (err) { alert("Could not stop it: " + err.message); }
+  refreshJobs();
+}
+
+async function retryJob(id) {
+  const seen = remembered().find(j => j.id === id);
+  if (!seen || !seen.params) { alert("The parameters for that job were not kept."); return; }
+  /* The identical parameters, resubmitted. No paraphrasing of the backend's
+     error into something friendlier and less true, and no quiet edits. */
+  try {
+    const payload = await json("/jobs", { method:"POST",
+      headers:{ "content-type":"application/json" }, body: JSON.stringify(seen.params) });
+    adopt(payload.id, seen.params);
+    jobs.set(payload.id, payload);
+    renderJobs(); schedule(0);
+  } catch (err) { alert("Retry failed: " + err.message); }
+}
+
+async function refreshJobs() {
+  let listed = [];
+  try { listed = (await json("/jobs")).jobs || []; }
+  catch (err) {
+    /* A 503 while tts-long restarts must not empty the list — the jobs are
+       still queued on the other side of it. */
+    renderJobs(); return;
+  }
+  const before = new Map(jobs);
+  jobs.clear();
+  for (const job of listed) jobs.set(job.id, job);
+  /* Reconciled with what this browser remembers, so a 202 that has not yet
+     appeared in the server's fifty-most-recent is still on screen. Anything
+     this browser remembers that the server has NOT listed and that is older
+     than the job TTL has been swept on the other side, so it is dropped rather
+     than left showing "queued" for ever. */
+  const now = Date.now() / 1000;
+  const keep = [];
+  for (const seen of remembered()) {
+    if (jobs.has(seen.id)) { keep.push(seen); continue; }
+    if (now - seen.at > TTL) continue;
+    keep.push(seen);
+    if (before.has(seen.id)) jobs.set(seen.id, before.get(seen.id));
+  }
+  store.set("jobs", keep);
+  for (const [id, job] of jobs) {
+    const was = before.get(id);
+    if (was && was.status !== job.status && (job.status === "done" || job.status === "failed")) {
+      ping(job);
+    }
+  }
+  renderJobs();
+}
+
+function ping(job) {
+  if ("Notification" in window && Notification.permission === "granted") {
+    new Notification(job.status === "done" ? "Speech is ready" : "A job failed",
+                     { body: `${job.voice || "default"} · ${job.id.slice(0, 8)}` });
+  }
+  try {
+    /* A short chime, synthesised rather than shipped: an audio file would be
+       the only binary asset on this page and the only thing that had to be
+       cached. */
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator(), gain = ctx.createGain();
+    osc.frequency.value = job.status === "done" ? 880 : 300;
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.12, ctx.currentTime + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.45);
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.start(); osc.stop(ctx.currentTime + 0.5);
+    setTimeout(() => ctx.close(), 900);
+  } catch {}
+}
+
+/* Two rules layered: a backoff ladder, so a long job is not polled every two
+   seconds for half an hour, and document.visibilityState, so a background tab
+   is not hammering a NAS that is simultaneously running CPU-only Parakeet. */
+function interval() {
+  const live = [...jobs.values()].filter(j => j.status === "queued" || j.status === "running");
+  if (!live.length) return 30000;
+  if (document.visibilityState === "hidden") return 30000;
+  const youngest = Math.min(...live.map(j =>
+    (Date.now() / 1000) - (j.started_at || j.created_at || 0)));
+  return youngest < 30 ? 2000 : youngest < 300 ? 10000 : 30000;
+}
+function schedule(delay) {
+  clearTimeout(jobTimer);
+  jobTimer = setTimeout(async () => {
+    if (!$("tab-jobs").hidden || [...jobs.values()].some(j =>
+        j.status === "queued" || j.status === "running")) {
+      await refreshJobs();
+    }
+    schedule(interval());
+  }, delay === undefined ? interval() : delay);
+}
+document.addEventListener("visibilitychange", () => schedule(0));
+$("refresh").addEventListener("click", () => { refreshJobs(); });
+
+/* ================================================= the clone sheet ===== */
+/*
+  RECORD IS PRIMARY, upload is the fallback. The user asked for their own
+  voice; sending them off to find a file is the expert path. Whatever arrives
+  goes through the same transcoder as everything else, so the server receives a
+  24 kHz mono WAV it is certain to read — which is what makes MediaRecorder's
+  webm-on-Chrome / mp4-on-Safari split a non-problem rather than a bug report.
+*/
+let clip = null, recorder = null, recTimer = null;
+
+$("cliporfile").addEventListener("click", () => $("clipfile").click());
+$("clipfile").addEventListener("change", () => {
+  const file = $("clipfile").files[0];
+  if (file) prepareClip(file, file.name.replace(/\.[^.]+$/, ""));
+});
+
+async function prepareClip(file, suggestedName) {
+  note($("clipnote"), "flat", "Converting…");
+  try {
+    const out = await toWav(file, 24000, CONFIG.max_clip_seconds);
+    clip = out.blob;
+    $("clippreview").src = URL.createObjectURL(clip);
+    $("clippreview").hidden = false;
+    $("saveclip").disabled = false;
+    /* Pre-filled, so a reusable named voice is a side effect of cloning once
+       rather than a second feature nobody finds. */
+    if (!$("clipname").value && suggestedName) {
+      $("clipname").value = suggestedName.toLowerCase().replace(/[^a-z0-9_-]+/g, "-")
+                                          .replace(/^-|-$/g, "").slice(0, 48);
+    }
+    note($("clipnote"), out.seconds < 8 ? "warn" : "ok",
+      `${out.seconds.toFixed(1)} s ready.` +
+      (out.seconds >= CONFIG.max_clip_seconds
+        ? ` Trimmed to the ${CONFIG.max_clip_seconds} s ceiling here, so nothing was uploaded twice.`
+        : out.seconds < 8 ? " Under ten seconds is thin — Chatterbox wants 10–30." : ""));
+  } catch (err) {
+    clip = null; $("saveclip").disabled = true;
+    note($("clipnote"), "bad", "Could not read that: " + (err.message || err));
+  }
+}
+
+$("rec").addEventListener("click", async () => {
+  if (recorder && recorder.state === "recording") { recorder.stop(); return; }
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch (err) {
+    note($("clipnote"), "bad", "No microphone: " + (err.message || err) +
+      ". Upload a clip instead."); return;
+  }
+  const chunks = [];
+  recorder = new MediaRecorder(stream);
+  recorder.ondataavailable = e => chunks.push(e.data);
+  recorder.onstop = async () => {
+    stream.getTracks().forEach(t => t.stop());
+    clearInterval(recTimer);
+    $("rec").textContent = "● Record 15 s";
+    $("level").style.width = "0";
+    await prepareClip(new File(chunks, "recording", { type: recorder.mimeType }), "my-voice");
+  };
+
+  /* A live meter, so someone can see the microphone is actually picking them
+     up before they find out thirty-six minutes later that it was not. */
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 512;
+  ctx.createMediaStreamSource(stream).connect(analyser);
+  const data = new Uint8Array(analyser.frequencyBinCount);
+
+  recorder.start();
+  $("rec").textContent = "■ Stop";
+  let left = 15;
+  $("ring").textContent = left;
+  recTimer = setInterval(() => {
+    analyser.getByteTimeDomainData(data);
+    let peak = 0;
+    for (const v of data) peak = Math.max(peak, Math.abs(v - 128) / 128);
+    $("level").style.width = Math.min(100, peak * 160).toFixed(0) + "%";
+    if ((left -= 0.1) <= 0) { $("ring").textContent = "0"; recorder.stop(); ctx.close(); }
+    else $("ring").textContent = Math.ceil(left);
+  }, 100);
+});
+
+$("cancelclip").addEventListener("click", () => {
+  clip = null; $("clippreview").hidden = true; $("saveclip").disabled = true;
+  note($("clipnote"), "", "");
+  $("voice").value = VOICES.kokoro && VOICES.kokoro.voices
+    && VOICES.kokoro.voices.includes("bm_george") ? "k:bm_george" : $("voice").options[0].value;
+  onVoiceChange();
+});
+
+$("saveclip").addEventListener("click", async () => {
+  if (!clip) return;
+  const name = ($("clipname").value || "").trim();
+  if (!name) { note($("clipnote"), "warn", "Give the voice a name first."); return; }
+  $("saveclip").disabled = true;
+  const form = new FormData();
+  form.append("name", name);
+  form.append("file", new File([clip], name + ".wav", { type: "audio/wav" }));
+  try {
+    const payload = await json("/ui/clips", { method: "POST", body: form });
+    clip = null; $("clippreview").hidden = true; note($("clipnote"), "", "");
+    await loadVoices();
+    $("voice").value = "c:" + payload.voice.name;
+    onVoiceChange();
+    note($("speak-note"), "ok", `<strong>${payload.voice.name}</strong> is ready.
+      Cloned voices use Chatterbox: about ${(1 / rate.clone()).toFixed(0)}× the
+      length of the audio in compute, queued as a job you can walk away from.`);
+  } catch (err) {
+    note($("clipnote"), "bad", err.message);
+    $("saveclip").disabled = false;
+  }
+});
+
+/* ============================================================== boot === */
+(async function boot() {
+  try { CONFIG = Object.assign(CONFIG, await (await fetch("/ui/config")).json()); } catch {}
+
+  /* Ingestion is hidden entirely when it is not configured, and disabled with
+     a reason when it is configured but down. Neither is ever a broken button,
+     and neither takes upload or TTS down with it. */
+  $("linkrow").hidden = !CONFIG.ingestion;
+  if (!CONFIG.ingestion) {
+    $("linkhint").textContent = "";
+  } else if (!CONFIG.probe) {
+    $("linkhint").innerHTML = `<span class="hint">Links work, but the metadata
+      probe is off in this image, so the confirm card will show a title and no
+      length or size.</span>`;
+  }
+
+  await poll();
+  setInterval(poll, 30000);
+  await loadVoices();
+  if (!CONFIG.cloning) {
+    /* Said once, plainly, rather than letting a saved voice vanish on the next
+       restart — which would be the worst possible version of this feature. */
+    const option = [...$("voice").options].find(o => o.value === "new");
+    if (option) { option.disabled = true;
+      option.textContent = "+ Use my own voice… (no voices volume mounted)"; }
+  }
+  estimate();
+  for (const seen of remembered()) if (!jobs.has(seen.id)) jobs.set(seen.id,
+    { id: seen.id, status: "queued", created_at: seen.at });
+  await refreshJobs();
+  schedule();
+})();
+</script>
+</body>
+</html>

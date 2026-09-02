@@ -3,6 +3,8 @@
 #   host:30080  ->  voice-gateway  ->  stt-stack:8000
 #                                     tts-stack:8001
 #                                     tts-long:8002
+#   host:30081  ->  voice-ui       ->  voice-gateway:8080  (and MeTube, by host
+#                                                           address, for links)
 #
 # WHAT CHANGED WHEN THE FIVE REPOSITORIES BECAME ONE. The image names, and
 # nothing else:
@@ -11,6 +13,9 @@
 #   ghcr.io/gabrielbelli/tts-stack      ->  ghcr.io/gabrielbelli/ai-voice-tts
 #   ghcr.io/gabrielbelli/tts-long       ->  ghcr.io/gabrielbelli/ai-voice-tts-long
 #   ghcr.io/gabrielbelli/voice-gateway  ->  ghcr.io/gabrielbelli/ai-voice-gateway
+#
+# services/ui joined later and was never a separate repository, so it has no
+# old name: ghcr.io/gabrielbelli/ai-voice-ui.
 #
 # The SERVICE names below are deliberately NOT renamed to match the directory
 # layout. They are DNS names on the app-internal network: `stt-stack` is what
@@ -38,7 +43,7 @@
 # unchanged, deliberately and to the character: this file is about the network
 # boundary and must not be able to alter anything else.
 #
-# THE HEALTHCHECKS HERE ARE THE ONLY ONES THERE ARE. None of the four
+# THE HEALTHCHECKS HERE ARE THE ONLY ONES THERE ARE. None of the five
 # Containerfiles carries a HEALTHCHECK instruction, and that is not an
 # oversight: HEALTHCHECK is not a field in the OCI image spec, and CI builds
 # with buildah, whose default format is oci — so an instruction in a
@@ -193,11 +198,25 @@ services:
       TTS_IDLE_TIMEOUT: "600"
       TTS_TEMPERATURE: "0.6"
       TTS_THREADS: "8"
+      # Where a voice is a file. The registry resolves `voice: "gabriel"` to
+      # /voices/gabriel.wav and hands it to Chatterbox as audio_prompt_path;
+      # there is no per-request reference field on the wire at any layer.
+      TTS_VOICE_DIR: /voices
     cpus: 10
     mem_limit: 10g
     volumes:
       - tts-long-models:/models
       - tts-long-out:/output
+      # READ-ONLY, and shared with voice-ui, which is the only writer. One
+      # writer means there is no case where two processes race on the same
+      # clip, and it means a compromise of the heaviest container in the estate
+      # cannot plant a file the lighter one will serve.
+      #
+      # The registry rescans when this directory's mtime changes rather than
+      # once at startup, so a clip written by voice-ui — or copied in over SMB —
+      # is resolvable on the next request instead of after a restart that costs
+      # a ~60 s model load.
+      - voices:/voices:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8002/health')"]
       interval: 60s
@@ -207,10 +226,107 @@ services:
       # is downloaded on the very first job this container ever runs.
       start_period: 900s
 
+  # ---------------------------------------------------------- the page --
+  #
+  # THE SECOND `ports` ENTRY IN THIS FILE, and the comment at the top of the
+  # gateway block says one appearing means this file has stopped doing its job.
+  # That sentence was written about 8000, 8001 and 8002 — three backends that
+  # could be reached DIRECTLY, skipping the only process in the stack that
+  # checks a token. Those three are still closed and still have no `ports`.
+  #
+  # This is a browser origin, not a bypass. voice-ui reaches voice-gateway and
+  # nothing else; it holds no key list and compares no token; it forwards the
+  # caller's Authorization header untouched and asks the gateway itself whether
+  # the key is good; and it can answer nothing the gateway would not have
+  # answered. The boundary is exactly where it was. If a future edit gives this
+  # container a URL for stt-stack, tts-stack or tts-long, that is the moment
+  # this paragraph stops being true.
+  voice-ui:
+    container_name: voice-ui
+    image: ghcr.io/gabrielbelli/ai-voice-ui:pre
+    pull_policy: always
+    restart: unless-stopped
+    ports:
+      # 30081, next to the gateway's 30080, and in the same 300xx band every
+      # other app on orko uses — rackula 30323, metube 30097, gitea 30008,
+      # unifi 30072-75, convertx 30154. The CONTAINER port is 8090 rather than
+      # 8080 so that a file mapping both can never be ambiguous about which it
+      # meant.
+      - "30081:8090"
+    environment:
+      # A service name, on the app-internal network. The three backends are NOT
+      # named here and must not be: this container talks to the gateway.
+      UI_GATEWAY_URL: http://voice-gateway:8080
+
+      # MeTube, by HOST ADDRESS. It is a separate TrueNAS app
+      # (ix-metube-metube-1) with host_network:false and its web port published
+      # on 30097, so it shares no DNS with this app — there is no `metube` name
+      # to resolve, and `host.docker.internal` is absent without an explicit
+      # extra_hosts entry. Put the NAS's LAN IP here.
+      #
+      # DELIBERATELY LEFT UNSET, like GATEWAY_API_KEYS above and for the same
+      # reason: an address invented in a file that gets deployed is how a
+      # placeholder becomes production configuration. Unset means the link box
+      # is not rendered at all and the page says "link ingestion not
+      # configured". File upload and both TTS paths never depend on it.
+      #
+      # BEFORE SETTING THIS, READ services/ui/README.md's security section.
+      # MeTube has NO authentication of any kind — no auth, user, password or
+      # token key exists in its configuration, and an unauthenticated GET
+      # /history from off-NAS answers 200. Our path sits behind
+      # GATEWAY_API_KEYS so this does not widen that hole, but it does make it
+      # load-bearing, and the fix is a deployment one: unpublish 30097 or
+      # firewall it to the NAS and reach it by LAN IP.
+      # UI_METUBE_URL: http://192.0.2.10:30097
+
+      # Ingest files land here rather than in the middle of the user's music
+      # library. MeTube's AUDIO_DOWNLOAD_DIR defaults to %%DOWNLOAD_DIR and is
+      # unset on this deployment, so /download/ and /audio_download/ are the
+      # SAME directory; CUSTOM_DIRS and CREATE_CUSTOM_DIRS both default true,
+      # so MeTube creates it for us.
+      UI_METUBE_FOLDER: stt-ingest
+      UI_VOICE_DIR: /voices
+    # 1 CPU and 384 MB. This process serves one HTML file, streams bytes
+    # between two sockets and occasionally spawns a yt-dlp probe that reads a
+    # page of JSON. Nothing is buffered: the ingest path streams MeTube's file
+    # straight into a multipart POST rather than holding 131 MB of podcast, and
+    # audio decoding happens in the browser. The image has no torch, no numpy
+    # and no ffmpeg.
+    cpus: 1
+    mem_limit: 384m
+    volumes:
+      # The reference-clip store, and it is NOT optional. Without a named
+      # volume every cloned voice survives until the next restart and no
+      # further, which is worse than not shipping the feature. voice-ui is the
+      # only writer; tts-long mounts the same volume read-only below.
+      - voices:/voices
+    healthcheck:
+      # Its OWN localhost, like every service here. This endpoint answers 200
+      # even when the gateway is down — it reports that in the body instead. A
+      # UI killed by the orchestrator because tts-long was restarting would be
+      # gone at exactly the moment someone wanted to open the page and find out
+      # why.
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8090/health')"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      # Seconds, not minutes: there is no model to load here either.
+      start_period: 30s
+    # No depends_on, for the gateway's reason: the page must be reachable
+    # during a cold start, because that is exactly when someone wants to look
+    # at the health pills and find out what is still loading.
+
+
 # Unchanged, and named here so the deploy does not create new empty ones and
 # silently orphan the models already on disk.
+#
+# `voices` is the one addition. The deployed compose mounted no voice volume at
+# all, so tts-long's registry was ["default"] only and all thirteen OpenAI
+# names aliased to the built-in speaker. Every cloned voice would have died on
+# the next restart without it.
 volumes:
   stt-models:
   tts-models:
   tts-long-models:
   tts-long-out:
+  voices:
