@@ -54,6 +54,18 @@ rather than reporting on itself.
 This package is the union of every fix. The argument for it is measured, not
 predicted.
 
+One consequence worth stating, because it is a wire change and it was measured
+rather than predicted. The 401 this package builds carries all four envelope
+fields on *every* path, native routes included. It did not before: `stt` and
+`tts` each completed the envelope with an ASGI middleware that opened with
+`if not v1_path(scope["path"]): await self.app(...); return`, so their native
+401 shipped three keys and their `/v1` 401 shipped four. Both middlewares are
+deleted, so `POST /transcribe` and `POST /speak` with a bad key now answer with
+`"param": null` present. Status, `message`, `type` and `code` are byte-identical;
+only the key is new. `tts-long` shows no difference at all, because it rebound
+`voice_common.auth.error_response` at import time and was therefore already
+path-agnostic — which is the behaviour the shared code was built from.
+
 ## What belongs here
 
 **The wire contract.** What a client sees, what an operator configures, what a
