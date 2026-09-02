@@ -1,0 +1,10 @@
+# Three dependencies, and no torch. This process moves bytes between sockets;
+# nothing in it loads a model, decodes audio, or imports numpy.
+#
+# httpx is the only real choice here: it is the async client the backends'
+# own clients use, it streams both directions without buffering, and its
+# ASGI transport is what lets the tests exercise the real proxy code against
+# mock backends with no socket involved.
+fastapi==0.121.2
+uvicorn[standard]==0.38.0
+httpx==0.28.1
