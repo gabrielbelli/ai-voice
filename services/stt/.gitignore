@@ -1,0 +1,8 @@
+models/
+*.wav
+*.flac
+__pycache__/
+.venv/
+bench/.venv/
+bench/cache/
+bench/runs/

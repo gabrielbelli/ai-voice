@@ -1,0 +1,36 @@
+# CPU only. No torch, no CUDA, no NeMo.
+#
+# Two inference runtimes on purpose: CTranslate2 carries Whisper because it is
+# the only one of the two that accepts a vocabulary at decode time, and ONNX
+# Runtime carries Parakeet and Silero. Together they are still a fraction of
+# what a single torch wheel would cost.
+faster-whisper==1.2.1
+onnx-asr[cpu,hub]==0.12.0
+huggingface-hub==0.36.0
+fastapi==0.121.2
+uvicorn[standard]==0.38.0
+python-multipart==0.0.20
+
+# libav, for decoding. The specification lists nine input formats and
+# libsndfile read four of them: m4a, mp4 and webm — what an iOS client and a
+# browser MediaRecorder actually produce — were all rejected 400. PyAV bundles
+# ffmpeg in its wheel, so this replaces both soundfile and the libsndfile1 apt
+# package, and it resamples and downmixes on the way through.
+#
+# It is already here either way: faster-whisper requires av>=11 for its own
+# decoding. Pinned rather than inherited, because this service now imports it.
+av==18.1.0
+
+# The wire contract shared with tts-stack and tts-long: API keys and the 401,
+# OpenAI's error envelope, the /health route, the log level switch, and the
+# entrypoint that installs to /usr/local/bin. No `[audio]` extra here — that
+# one pulls numpy for the two TTS services, and nothing in this image imports
+# voice_common.audio.
+#
+# A tarball URL rather than git+https://, because python:3.13-slim-trixie has
+# no git binary and a git dependency would cost an extra apt layer. Pinned by
+# SHA rather than tag, because a tag can be moved and this URL cannot; the tag
+# is the readable half, in the comment.
+#
+# voice-common v1.0.0 — https://github.com/gabrielbelli/voice-common
+voice-common @ https://github.com/gabrielbelli/voice-common/archive/4429e64a97926d17e00e8a5982208e7ffecfab2e.tar.gz
