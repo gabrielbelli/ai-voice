@@ -73,12 +73,22 @@ jobs:
             -f Containerfile .
 
       # The image is useless if the model runtime cannot import, and that only
-      # shows up at run time — onnxruntime ships per-architecture wheels and a
-      # missing arm64 wheel would build fine and fail on first request.
+      # shows up at run time — onnxruntime and ctranslate2 ship per-architecture
+      # wheels, and a missing arm64 wheel would build fine and fail on first
+      # request.
+      #
+      # `av` carries the same risk with none of the warning. It is the entire
+      # decode path now that soundfile and the libsndfile1 apt package have
+      # gone, so the only ffmpeg in the image is the one bundled inside PyAV's
+      # per-architecture wheel, and app/audio.py imports it lazily inside
+      # decode() to keep the codec tables off module load. A broken wheel would
+      # survive start-up and fail the first request instead. Leaving soundfile
+      # on this line after the dependency left is what failed both builds with
+      # ModuleNotFoundError while the app itself was correct.
       - name: Check the runtime imports on this architecture
         run: |
           buildah run --user root "$(buildah from localhost/build:${{ matrix.arch }})" -- \
-            python -c "import onnx_asr, onnxruntime, soundfile, faster_whisper, ctranslate2; print('ok', onnxruntime.__version__, ctranslate2.__version__)"
+            python -c "import onnx_asr, onnxruntime, av, faster_whisper, ctranslate2; print('ok', onnxruntime.__version__, ctranslate2.__version__, av.__version__)"
 
       - name: Log in to the registry
         if: github.event_name != 'pull_request'
