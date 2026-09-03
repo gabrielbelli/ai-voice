@@ -592,9 +592,10 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
       <div><label for="c-end">Stop at (seconds)</label>
         <input type="number" id="c-end" min="0" step="1" placeholder="whole thing"></div>
     </div>
-    <div class="hint">Trimming happens on the source, before anything is
-      downloaded — so a three-hour stream can be transcribed as a ten-minute
-      excerpt without fetching the rest.</div>
+    <!-- Was three lines explaining that yt-dlp trims before downloading. The
+         reader is on a confirmation card deciding whether to fetch something;
+         what they need is that trimming costs nothing, not how. -->
+    <div class="hint">Trimmed at the source — the rest is never downloaded.</div>
     <div id="c-subs"></div>
   </div>
   <div class="foot">
@@ -1170,8 +1171,7 @@ function showConfirm(facts) {
     /* A live stream has no end. Fetching it is not "big", it is unbounded, so
        it gets its own wording and its own escape rather than the generic one. */
     live = `<div class="note bad"><strong>This is a live stream. It has no end.</strong>
-      Downloading it runs until something stops it, and the transcription
-      estimate below is meaningless because there is no length to compute from.
+      It will download until something stops it.
       <div class="acts"><button class="small" id="c-ten" type="button">Take the first 10 minutes</button></div></div>`;
   } else if (compute && compute > CONFIG.stt_budget_seconds) {
     live = `<div class="note warn"><strong>This will not finish in one request.</strong>
@@ -1191,9 +1191,7 @@ function showConfirm(facts) {
   });
 
   $("c-subs").innerHTML = facts.has_subtitles
-    ? `<div class="note ok"><strong>This has real subtitles already</strong> —
-       written by a person, not machine captions. Taking those costs about two
-       seconds and no transcription at all.
+    ? `<div class="note ok"><strong>This has real subtitles already</strong> — written by a person. Near-instant, and no transcription.
        <div class="acts"><button class="small" id="c-caps" type="button">Use the existing subtitles</button></div></div>`
     : "";
   if (facts.has_subtitles) $("c-caps").addEventListener("click", () => {
@@ -2760,9 +2758,7 @@ $("saveclip").addEventListener("click", async () => {
   if (!CONFIG.ingestion) {
     $("linkhint").textContent = "";
   } else if (!CONFIG.probe) {
-    $("linkhint").innerHTML = `<span class="hint">Links work, but the metadata
-      probe is off in this image, so the confirm card will show a title and no
-      length or size.</span>`;
+    $("linkhint").innerHTML = `<span class="hint">Links work, but there will be no length or size.</span>`;
   }
 
   await poll();
