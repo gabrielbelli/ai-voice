@@ -41,4 +41,19 @@ script-files = ["voice-entrypoint.sh"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # NOT OUR WARNING, and not one we can act on. anyio deprecated
+    # `anyio.abc.BlockingPortal` in favour of `anyio.from_thread.BlockingPortal`,
+    # and starlette.testclient still imports the old name at module scope
+    # (testclient.py:51). With warnings as errors that is a COLLECTION failure:
+    # every test file importing TestClient errors before a single assertion
+    # runs, and the suite reports four errors rather than a warning.
+    #
+    # Ignored narrowly -- this exact message, this exact category -- rather than
+    # by pinning anyio back, which would hold a transitive dependency of both
+    # starlette and httpx below where fastapi wants it, to silence a line in
+    # somebody else's file. Delete this entry once starlette moves to the new
+    # import; the suite failing again is how we will know it did.
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",
+]
