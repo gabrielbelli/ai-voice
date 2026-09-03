@@ -783,12 +783,51 @@ $("drop").addEventListener("drop", ev => {
   if (f) pick(f);
   else { const text = ev.dataTransfer.getData("text"); if (text) { $("url").value = text; resolveLink(); } }
 });
+/* PASTE A LINK ANYWHERE ON THIS TAB AND IT RESOLVES. The convenience is the
+   point: the common action is copy a link, switch to this page, paste.
+
+   TWO THINGS THIS HANDLER MUST NOT DO, both of which it did.
+
+   (1) DOUBLE THE TEXT. It assigned `$("url").value = text` and returned without
+   preventDefault(), so the browser went on to run its own default paste as
+   well and inserted the same string a second time at the caret. Pasting into
+   the url box produced ".../reel/DCH9NdDpXis/https://www.instagram.com/reel/
+   DCH9NdDpXis/", which was then sent to MeTube and came back "MeTube accepted
+   the link and then had no record of it" -- a confusing error about a URL the
+   user never typed.
+
+   When the paste is already landing in the url box, the right move is to do
+   NOTHING to the value and let the browser insert it: that keeps the caret,
+   the undo stack and any partial selection working. Read the value afterwards,
+   on the next tick, once the default action has run.
+
+   (2) HIJACK A PASTE MEANT FOR ANOTHER FIELD. This is a document-level
+   listener, so a link pasted into the glossary box or an expert field on this
+   same tab was being swallowed and resolved instead. Only a paste into the url
+   box, or one with no text field focused at all, means "resolve this". */
 document.addEventListener("paste", ev => {
-  if ($("tab-transcribe").hidden) return;
-  const text = (ev.clipboardData || {}).getData ? ev.clipboardData.getData("text") : "";
-  if (/^https?:\/\//i.test((text || "").trim()) && CONFIG.ingestion) {
-    $("url").value = text.trim(); resolveLink();
+  if ($("tab-transcribe").hidden || !CONFIG.ingestion) return;
+  const text = (ev.clipboardData || {}).getData
+    ? (ev.clipboardData.getData("text") || "").trim() : "";
+  if (!/^https?:\/\//i.test(text)) return;
+
+  const target = ev.target;
+  const intoUrlBox = target === $("url");
+  const intoSomeOtherField = !intoUrlBox && target && (
+    target.tagName === "INPUT" || target.tagName === "TEXTAREA" ||
+    target.isContentEditable);
+  if (intoSomeOtherField) return;
+
+  if (intoUrlBox) {
+    // Let the browser paste it. setTimeout, not the value we read here,
+    // because the user may have selected part of the existing text.
+    setTimeout(() => { if ($("url").value.trim()) resolveLink(); }, 0);
+    return;
   }
+  // Pasted with nothing focused: there is no default action worth keeping.
+  ev.preventDefault();
+  $("url").value = text;
+  resolveLink();
 });
 
 document.querySelectorAll("#fmt button").forEach(b => b.addEventListener("click", () => {

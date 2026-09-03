@@ -99,3 +99,55 @@ def test_attribute_context_is_escaped_too():
     hostile = '" onmouseover="alert(1)'
     sniff = parse(f'<input type="text" value="{esc(hostile)}">')
     assert sniff.handlers == [], "a value broke out of its attribute"
+
+
+# --------------------------------------------------------- paste handling --
+#
+# Not escaping, but the same kind of check: a property of ui.html that is
+# decidable from the source and was got wrong once already.
+
+
+def _paste_handler() -> str:
+    """The body of the document-level paste listener."""
+    start = HTML.index('document.addEventListener("paste"')
+    return HTML[start:start + 1800]
+
+
+def test_a_paste_into_the_url_box_does_not_also_assign_the_value():
+    """It used to do both, and the browser pasted the text twice.
+
+    The handler assigned `$("url").value = text` and returned without
+    preventDefault(), so the default paste then inserted the same string again
+    at the caret. A pasted Instagram link became
+    ".../reel/DCH9NdDpXis/https://www.instagram.com/reel/DCH9NdDpXis/", which
+    MeTube accepted and then had no record of -- an error message about a URL
+    the user never typed.
+    """
+    body = _paste_handler()
+    assign = body.index('$("url").value = text')
+    prevent = body.index("ev.preventDefault()")
+    assert prevent < assign, (
+        "the value is assigned without the default paste being cancelled first")
+
+
+def test_the_url_box_path_lets_the_browser_do_the_paste():
+    body = _paste_handler()
+    assert "intoUrlBox" in body, "no branch for a paste landing in the url box"
+    branch = body[body.index("if (intoUrlBox)"):]
+    head = branch[:branch.index("return;")]
+    assert '$("url").value =' not in head, (
+        "the url-box branch must not set the value; the browser is doing it")
+    assert "setTimeout" in head, (
+        "the value must be read after the default action, not before it")
+
+
+def test_a_paste_into_another_field_is_left_alone():
+    """This is a document-level listener, so it sees every paste on the tab.
+
+    A link pasted into the glossary box or an expert field was being swallowed
+    and resolved as if it had been meant for the url box.
+    """
+    body = _paste_handler()
+    assert "intoSomeOtherField" in body
+    assert 'target.tagName === "TEXTAREA"' in body
+    assert "isContentEditable" in body
