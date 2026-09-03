@@ -6,17 +6,29 @@ itself.
 ```
   http://orko.gabrielbelli.com:30081/ui
         |
-        |  every XHR, same origin, Authorization: Bearer <key>
+        |  every XHR, same origin, no credential in the browser
         v
-  voice-ui:8090  ──────────────► voice-gateway:8080 ──► stt-stack / tts-stack / tts-long
+  voice-ui:8090  ──── + Authorization: Bearer <UI_GATEWAY_API_KEY> ────►
+                                       voice-gateway:8080 ──► stt-stack / tts-stack / tts-long
         │
         ├─ /ui/resolve /commit /abandon /progress /fetch ──► MeTube (by host address)
         └─ /ui/clips                                     ──► the shared `voices` volume
 ```
 
 Three tabs — **Transcribe**, **Speak**, **Jobs** — an easy mode that needs no
-manual, and an expert toggle that reveals the real knobs beneath the controls
-already on screen without swapping pages or losing what you typed.
+manual, and an *Expert* `<details>` panel at the foot of each tab holding the
+real knobs beneath the controls already on screen. Opening one does not swap
+pages or lose what you typed.
+
+> There used to be an **Expert** checkbox in the header as well, gating those
+> same panels. It was a second, global control over one thing, so a setting
+> could be out of sight for two unrelated reasons at once. The panels are
+> collapsed `<details>` titled *Expert — …*; a disclosure triangle already
+> means "hidden until you want it".
+
+> There used to be an **API key box** in the header too. The key now lives on
+> the container as `UI_GATEWAY_API_KEY` and this service adds the header
+> itself. **That moves the trust boundary from :30080 to :30081** — see below.
 
 ---
 
@@ -26,7 +38,7 @@ already on screen without swapping pages or losing what you typed.
 |---|---|
 | **Reached at** | `http://<host>:30081/ui` — 30081, next to the gateway's 30080 |
 | **Talks to** | the gateway, and MeTube. Never `:8000`, `:8001` or `:8002` |
-| **Auth** | the gateway's. This service holds no key list and compares no token |
+| **Auth** | the gateway's; this service holds no key list and compares no token, but it now *presents* `UI_GATEWAY_API_KEY`. **That makes :30081 the trust boundary** |
 | **Image** | 320 MB, measured. The gateway is 286 MB on the same machine and `python:3.13-slim-trixie` is 215 MB |
 | **Build step** | none. One HTML file, inline CSS and JS, no framework, no `node_modules`, no CDN |
 | **Degrades** | MeTube down or unset → link box hidden or disabled, uploads and TTS unaffected. Gateway down → the page still loads and says so |
@@ -58,14 +70,18 @@ skipping the only process in the stack that checks a token. Those three are
 still closed. This one is a browser origin, not a bypass:
 
 - it reaches the gateway and nothing else;
-- it forwards the caller's `Authorization` header untouched;
-- it holds no key list — it asks the gateway whether a presented key is good,
-  using `GET /v1/models`, the cheapest authenticated call in the stack (a
-  static table, no backend contacted), cached for 60 s;
+- it holds no key *list* — it asks the gateway whether the credential in play
+  is good, using `GET /v1/models`, the cheapest authenticated call in the stack
+  (a static table, no backend contacted), cached for 60 s;
 - it can answer nothing the gateway would not have answered.
 
 If a future edit gives this container a URL for `stt-stack`, `tts-stack` or
-`tts-long`, that is the moment the paragraph above stops being true.
+`tts-long`, that is the moment the three points above stop being true.
+
+One line of that list **is** no longer true and was removed: "it forwards the
+caller's `Authorization` header untouched". With `UI_GATEWAY_API_KEY` set it
+presents its own instead — see the next section. Unset, it is the passthrough
+it always was.
 
 ### Why the page's XHRs come back here rather than going straight to :30080
 
@@ -77,6 +93,42 @@ services that deliberately do not publish them.
 
 ---
 
+## Authentication, and the boundary that moved
+
+The page has no API key box. It used to: the browser kept a key in
+`localStorage`, put it on every XHR, and this service forwarded it untouched.
+The user's decision is that this is not a bring-your-own-key tool, so the
+credential moved into the container as **`UI_GATEWAY_API_KEY`**, and
+`app/main.py` adds `Authorization: Bearer …` on the way past — on proxied
+routes, on the `GET /v1/models` key probe, and on the ingest hand-off, all
+through one function (`config.gateway_authorization`) so the three cannot
+drift apart. An inbound header is *replaced*, not joined: HTTP lets a field
+name repeat, and two `Authorization` headers on the wire would let a caller
+choose which key the gateway read.
+
+**The consequence, stated rather than discovered: the trust boundary is now
+:30081.** Anyone who can reach that port is authenticated by this service,
+because it signs their requests for them. On a LAN behind a firewall, for a
+tool one person uses, that is a reasonable trade. It is not one anywhere else,
+and **publishing 30081 somewhere 30080 is not already reachable from now grants
+more access, not less.** `voice-ui` logs a `WARNING` at startup whenever
+`UI_GATEWAY_API_KEY` is set, saying exactly this.
+
+What did *not* change: this service still compares no token and holds no key
+list. The gateway is the only thing that decides whether a credential is good.
+
+`UI_GATEWAY_API_KEY` is **unset by default**, like `GATEWAY_API_KEYS`, and for
+the same reason — a key invented in a deployed file is how a placeholder
+becomes production credentials. Unset means no header is added and an inbound
+one is forwarded as before, so a stack with `GATEWAY_API_KEYS` also unset
+behaves precisely as it did. If `GATEWAY_API_KEYS` **is** set and this is not,
+every route in the page is a 401 and there is no box to fix it in; the key
+probe turns that into a `503 misconfigured_api_key` naming the variable rather
+than passing the gateway's "Incorrect API key provided" through to a page with
+nowhere to type one.
+
+---
+
 ## Security: read this before setting `UI_METUBE_URL`
 
 **MeTube has no authentication of any kind.** Its configuration has no `auth`,
@@ -84,11 +136,14 @@ services that deliberately do not publish them.
 `/history` are all open, and an unauthenticated `GET /history` from off-NAS
 answers 200. That is true today, with or without this service.
 
-This service does not widen it — our ingestion routes sit behind
-`GATEWAY_API_KEYS`, so we are a strictly narrower client of something already
-open to the LAN. But **shipping a UI that makes MeTube load-bearing is the
-moment to close it**: after this deploys, an outage or an abuse of port 30097
-becomes an ai-voice outage. The fix is not in this code. Unpublish 30097, or
+This service does not widen it — our ingestion routes are key-checked, so we
+are a strictly narrower client of something already open to the LAN. Note that
+with `UI_GATEWAY_API_KEY` set, "key-checked" means *this container's* key: the
+gate on ingestion is reaching :30081, not knowing a secret.
+
+But **shipping a UI that makes MeTube load-bearing is the moment to close it**:
+after this deploys, an outage or an abuse of port 30097 becomes an ai-voice
+outage. The fix is not in this code. Unpublish 30097, or
 firewall it to the NAS, and point `UI_METUBE_URL` at the LAN IP.
 
 ### The SSRF story, in three layers
@@ -287,6 +342,131 @@ spinner is the correct UI.
 
 ---
 
+## Playback speed, and following along
+
+Both are entirely client-side. No route changed, nothing was added to the
+`PROXIED` allowlist, and no request carries a new field except one that the
+expert panel could already send by hand.
+
+### Two things called speed, and how they stopped colliding
+
+The Speak tab already had a **Speed** slider. It is Kokoro's *synthesis* rate:
+a request field, sent to the server, baked into the samples, changing the file
+the Download button writes, and a 400 on Chatterbox. The new control is
+`HTMLMediaElement.playbackRate`: browser-side, applied to any audio, and
+invisible to every service in the stack.
+
+They are told apart by **name and by shape**. The slider is now labelled
+*Synthesis speed*; the new one is *Playback speed* and is a `<select>` of
+discrete rates rather than a second range. Two sliders both saying "speed", one
+of which is sent to the server, is how somebody concludes that the download
+will come back faster.
+
+`preservesPitch` is left **true**, and set explicitly so the decision is
+written where the rate is. Resampling rather than time-stretching moves the
+formants, and formants are what intelligibility rides on — so the one thing the
+control exists for, getting through a recording faster while still following
+it, is exactly what dropping it would destroy. `webkitPreservesPitch` is set
+alongside for Safari before 17.
+
+One rate is shared by all three players and remembered in `localStorage`.
+Chatterbox's *Synthesis speed* hint now names playback speed as the way out,
+because "fixed at 1.0" on its own reads as a dead end when there is a working
+answer directly below it.
+
+**The Jobs tab had no player at all** — a finished job could only be
+downloaded — so adding a speed control there meant adding the player. It sits
+*outside* `#joblist`, which matters: `renderJobs()` assigns `innerHTML` on a
+two-second tick while a job is running, and an `<audio>` inside that markup is
+destroyed and recreated every tick, restarting from zero. The audio is fetched
+with `api()` and turned into a blob URL rather than pointed at directly,
+because `GET /jobs/{id}/audio` needs the `Authorization` header and an
+`<audio src>` carries none.
+
+### Where the karaoke timings come from, per path
+
+Every timing on screen is the recogniser's own. There is no estimate anywhere
+on this path.
+
+| Path | Audio in the browser? | Timings | Highlight |
+|---|---|---|---|
+| Transcribe — **file upload** | Yes: the `File`, or the 16 kHz WAV the page decoded from it | `verbose_json` `words[]`, falling back to `segments[]` | **Word by word** |
+| Transcribe — upload, **SRT/VTT** output | Yes | The cue times in the file itself | **Cue by cue** |
+| Transcribe — **link** | No | *(available, unused)* | None, and the page says why |
+| Transcribe — **captions** | No | — | None |
+| Speak — Kokoro | Yes | **None exist** | None |
+| Jobs — Chatterbox | Yes | **None exist** | None |
+
+The link path is the interesting refusal. `/ui/fetch` streams MeTube's file
+straight into the gateway server-side and the browser never receives a byte —
+that is the design, and it is what makes a two-hour podcast cost the laptop a
+transcript rather than 131 MB. A player would mean a new route serving the
+media down to the browser, which is the one thing that architecture exists to
+avoid. The result card says so in a line rather than showing a dead control.
+
+On the upload path, a transcript asked for as **Text** is requested as
+`verbose_json` instead. Nothing is lost: `openai_api.py`'s `_body()` returns
+`result.text` for `response_format=text` and puts that identical string in
+`verbose_json`'s `text`, so the pane and the downloaded `.txt` are
+byte-identical either way. Both granularities are requested — `word` is what
+the highlight follows, `segment` is the fallback when a word cannot be placed
+in the transcript exactly, which happens for real when a glossary rule spans
+two words and so fires in the segment text and in neither word. The swap does
+not happen when there is no audio to follow along with, because timestamps are
+a second decoder pass per segment on Whisper and about 5 % on Parakeet
+(`asr.py`: 5.34 s against 5.07 s on a 14.2 s clip); and an explicit
+`response_format` in the expert panel is never overridden.
+
+Timings line up with the file because `pipeline.py` maps every start and end
+back through `speech.original()`, so the silence the VAD removed is added back
+in. Playback rate needs no compensation at all — the highlight reads
+`currentTime`, so 2× stays in sync for free.
+
+### Nothing is highlighted in the speech direction, and that is the finding
+
+`/speak` answers audio and a usage count. `/v1/audio/speech` the same.
+`tts-long`'s `_public()` strips `segments` from every job it reports, leaving
+`chunks`, `audio_seconds` and `compute_seconds` — a count, not boundaries. The
+only construct available is `duration × (chars so far / chars total)`, and it
+is wrong from the first sentence: Chatterbox inserts per-segment pauses,
+`chunk_text()` splits where the server decides rather than where the characters
+fall, and speech rate moves with punctuation. A highlight that drifts is worse
+than none — it is read as a fact about the audio, and it teaches people to stop
+trusting the ones that are right. The Speak tab says this in one line, under
+the player, where somebody would go looking for the feature.
+
+### The two properties this must not lose
+
+**Escaping.** A transcript is remote data, it is the largest piece of remote
+data this page renders, and per-word spans are the only place it is rendered as
+hundreds of elements — precisely the change that would reintroduce the hole
+fixed two commits ago. It is built with `createElement` and `textContent` and
+touches `innerHTML` nowhere, so there is no string for an injection to live in
+at all. That is a stronger property than "`esc()` was remembered on every one
+of them", and `tests/test_playback.py` asserts it stays true.
+
+Cues are **ranges of the displayed string** — an offset and a length — never
+copies of the text. The pane is painted from the response's own bytes, so the
+highlighted transcript cannot disagree with the one the Download button writes,
+and a timing that cannot be placed exactly is dropped rather than
+approximately placed.
+
+**Accessibility.** The highlight carries three redundant channels — background,
+weight and an underline — because colour alone is gone for a red-green
+deficiency, gone on a badly set projector, and gone in forced-colours mode
+where the system palette overrides `background` and only the underline
+survives. `--mark-bg` and `--mark-ink` are defined in both the light and the
+dark token blocks. Under `prefers-reduced-motion` the transition and the
+follow-scroll are removed and the highlight is not: it is information, not
+decoration, so switching it off would remove the feature rather than calm it.
+The query is read at call time, so changing the setting mid-session takes
+effect. Clicking a word seeks to it; words are deliberately not focusable,
+because several thousand tab stops between the player and the Download button
+is a worse keyboard experience than not having the shortcut, and the audio
+element's own controls already reach any point in the file.
+
+---
+
 ## The estimate, and the number this repository contradicts itself about
 
 The confirm dialog quotes a transcription time, and the rate behind it is
@@ -347,7 +527,7 @@ downloading.
   omitted the field would mispronounce every Portuguese request while looking
   entirely correct.
 
-### What expert mode shows
+### What the expert panels show
 
 STT `response_format`, `timestamp_granularities[]` (auto-switching to
 `verbose_json`), `include[]=logprobs` (auto-switching to `json`), the three
@@ -368,7 +548,7 @@ values is exactly the state people get lost in. Resemble's demo offers
 exaggeration 0.25–2.0; our backend validates `ge=0.0, le=1.0`, so those ranges
 are reconciled rather than copied.
 
-**What expert mode still does not show**, because expert mode is not every
+**What they still do not show**, because an expert panel is not every
 environment variable: `STT_VAD`, `STT_HOTWORDS`, `STT_THREADS`,
 `STT_MAX_CONCURRENT`, `STT_QUANTISATION`, `TTS_THREADS`, `TTS_MAX_QUEUE`,
 `TTS_JOB_TTL`, every `GATEWAY_*` timeout, and every `/v1` field that is an
@@ -385,6 +565,7 @@ Every variable is optional and every default degrades rather than fails.
 | Variable | Default | What it does |
 |---|---|---|
 | `UI_GATEWAY_URL` | `http://voice-gateway:8080` | The only speech address this service knows |
+| `UI_GATEWAY_API_KEY` | *(unset)* | The key this container presents. **Setting it moves the trust boundary to :30081** — read the section above |
 | `UI_METUBE_URL` | *(unset)* | MeTube, **by host address**. Unset hides the link box entirely |
 | `UI_METUBE_FOLDER` | `stt-ingest` | Mandatory in effect — see the table above |
 | `UI_METUBE_FORMAT` | `opus` | ~1 MB a minute. MeTube 400s on any `quality` but `best` for it |
@@ -446,6 +627,14 @@ cd services/ui && pytest -q
 both the gateway and MeTube, so the whole resolve → confirm → fetch flow, the
 forwarding table, the upload ceiling and the clip store run in-process with no
 socket anywhere. `yt-dlp` is never spawned — `app.probe.run` is replaced.
+
+`tests/test_escaping.py` and `tests/test_playback.py` are static and
+parser-based: what they assert about `ui.html` — which value reaches
+`innerHTML`, which element gets a rate control, which response format is asked
+for, whether a highlight is carried by colour alone — is a property of the
+bytes in that file, and a headless browser would add a dependency to the one
+service whose whole claim is that it has none. The inline script's syntax is
+checked separately with `node --check` over the extracted `<script>` block.
 
 ---
 
