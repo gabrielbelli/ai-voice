@@ -453,14 +453,13 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
         <span class="hint tight" id="speak-meta"></span><span class="spacer"></span>
         <button class="small tight" id="dl-audio" type="button">Download</button>
       </div>
-      <div class="hint" id="playhint" hidden style="margin-top:6px">
-        This one is your browser's, not the model's: it changes nothing about
-        the file <strong>Download</strong> writes, and it works on any audio,
-        including a cloned voice where <em>Synthesis speed</em> is a 400.
-        There is no word-by-word highlight here — neither speech engine returns
-        timings, and the only alternative would be an estimate that drifts. See
-        the Transcribe tab, where the timings are real.
-      </div>
+      <!-- The label says "Playback speed" and the other one says "Synthesis
+           speed"; that is the whole distinction and it does not need a
+           paragraph under it. Why there is no karaoke highlight on this tab
+           (neither engine returns timings, and an estimate drifts) is a fact
+           about the backends, not something a person mid-task needs told. It
+           lives in the commit that added the feature and in loadVoices'
+           comments, which is where someone looking for it will be. -->
 
       <details id="tts-expert-fast">
         <summary>Expert — instant voices (Kokoro)</summary>
@@ -519,9 +518,9 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
             <div><label>temperature <span class="hint">0.1–1.5, here 0.6, stock 0.8</span></label>
               <div class="slider"><input type="range" id="x-temp" min="0.1" max="1.5" step="0.05" value="0.6"><output>0.60</output></div></div>
             <div><label>cross-language transfer</label>
-              <div class="hint">Resemble's note, where the only person who can act
-                on it will see it: when the clip's language and the Language
-                picker disagree, take cfg_weight to 0.</div>
+              <!-- Resemble's own guidance for cross-language cloning. -->
+              <div class="hint">Set cfg_weight to 0 when the clip's language
+                differs from the one selected.</div>
             </div>
           </div>
           <div class="row" style="margin-top:12px">
@@ -1627,16 +1626,14 @@ function sttPlayback(display, cues) {
   $("sttwhy").hidden = true;
 
   if (!cues) {
-    $("sttplayhint").textContent = "Playback only — this response carried no timings.";
+    $("sttplayhint").textContent = "No timings in this response.";
     return;
   }
   karaoke.cues = cues;
   karaoke.player = $("sttplayer");
   karaoke.spans = paint($("transcript"), display, cues);
   $("transcript").className = "out karaoke";
-  $("sttplayhint").textContent =
-    `Highlights as it plays — ${cues.length} timings from the recogniser. `
-    + "Click any word to jump there.";
+  $("sttplayhint").textContent = "Click a word to jump there.";
 }
 
 /* A file the browser cannot decode for playback is not a failure worth a red
@@ -1716,9 +1713,8 @@ async function render(response, format, wanted) {
   } else if (format !== "native") {
     $("repaired").hidden = false;
     $("repaired").className = "note flat";
-    $("repaired").innerHTML = `This route cannot report glossary substitutions —
-      only the native <code>/transcribe</code> returns <code>repaired</code>.
-      Terms may have been rewritten without this line saying so.`;
+    $("repaired").innerHTML = `Glossary changes are not reported on this route —
+      only <code>/transcribe</code> returns them.`;
   } else {
     $("repaired").hidden = true;
   }
@@ -2167,13 +2163,10 @@ function codeSwitchNote(text) {
   const pt = /\b(que|não|você|para|com|uma|mais|muito|então|porque|obrigado|coisa|fazer|agora)\b|ção\b|ções\b|[ãõçáéíóúâêô]/i.test(text);
   const en = /\b(the|and|with|that|this|about|would|there|because|something|really|actually)\b/i.test(text);
   if (pt && en && !store.get("dismissed.codeswitch", false)) {
-    $("codeswitch").innerHTML = `<div class="note flat">This text mixes English
-      and Portuguese. A request carries one language, so whichever you send will
-      be applied to all of it. The only real answer here is the
-      <strong>segments editor</strong> in the expert panel, where each segment
-      gets its own voice — and it exists on <code>/speak</code> only, never on
-      cloned voices. <div class="acts">
-      <button class="small" id="dismisscs" type="button">Don't tell me again</button></div></div>`;
+    $("codeswitch").innerHTML = `<div class="note flat">Mixed English and
+      Portuguese — one language is sent for all of it. Use the
+      <strong>segments editor</strong> to switch voice mid-text.
+      <button class="small link" id="dismisscs" type="button">Got it</button></div>`;
     $("dismisscs").addEventListener("click", () => {
       store.set("dismissed.codeswitch", true); $("codeswitch").innerHTML = "";
     });
@@ -2328,7 +2321,6 @@ function play(blob, meta, name) {
   lastAudio = { url, name };
   $("player").src = url; $("player").hidden = false;
   $("playrow").hidden = false;
-  $("playhint").hidden = false;
   $("speak-meta").textContent = meta;
 }
 $("dl-audio").addEventListener("click", () => {

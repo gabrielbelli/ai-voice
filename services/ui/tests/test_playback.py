@@ -332,11 +332,18 @@ def test_the_speech_direction_offers_no_highlight_and_says_why():
     total), and it is wrong from the first sentence: Chatterbox inserts
     per-segment pauses, chunk_text() splits where the server decides, and
     speech rate moves with punctuation.
+
+    THIS IS ABOUT THE CODE, NOT THE COPY. The explanation used to be three
+    sentences under the player and was cut as interface clutter: why a backend
+    cannot return timings is a fact for a commit message, not for someone
+    mid-task. What must stay true is that nothing FAKES a highlight here.
     """
-    hint = HTML[HTML.index('id="playhint"'):]
-    hint = hint[:hint.index("</div>")]
-    assert "no word-by-word highlight here" in hint
-    assert "neither speech engine returns" in hint
+    speak = HTML[HTML.index("function play(blob"):]
+    speak = speak[:speak.index("\n}\n")]
+    for faked in ("karaoke", "cues", "paint("):
+        assert faked not in speak, (
+            f"play() references {faked!r}: the speech direction has no timings "
+            f"to highlight with, and an estimate drifts from the first sentence")
 
 
 def test_the_link_path_says_why_there_is_nothing_to_play():
