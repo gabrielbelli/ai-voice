@@ -151,3 +151,61 @@ def test_a_paste_into_another_field_is_left_alone():
     assert "intoSomeOtherField" in body
     assert 'target.tagName === "TEXTAREA"' in body
     assert "isContentEditable" in body
+
+
+# ------------------------------------------------------- the voice picker --
+
+
+def _load_voices() -> str:
+    start = HTML.index("async function loadVoices()")
+    return HTML[start:HTML.index("function currentVoice()")]
+
+
+def test_chatterbox_appears_even_with_nothing_cloned():
+    """It used to be built only `if (clones.length)`.
+
+    On a fresh deployment the second engine was absent from the picker
+    entirely, and the only sign it existed was "+ Use my own voice…", which
+    reads like an upload button rather than a model. tts-long has shipped its
+    own speaker all along -- voices.py BUILTIN = "default", no clip needed --
+    and POST /jobs with voice:"default" has always worked.
+    """
+    body = _load_voices()
+    group = body[body.index("Chatterbox, slow"):]
+    head = group[:group.index("</optgroup>")]
+    assert 'value="c:default"' in head, "the built-in voice is not offered"
+    # Comments are stripped first: this file's own comment explains the old
+    # `if (clones.length)` behaviour, and matching prose would make the test
+    # assert against its own documentation rather than against the code.
+    code = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+    assert "if (clones.length)" not in code, (
+        "the Chatterbox group is still conditional on having a clone")
+
+
+def test_both_engines_are_named_in_the_picker():
+    """Labels said "Instant" and "Cloned", naming the experience not the model.
+
+    The two expert panels below ARE named after the engines, so they appeared
+    to swap for no visible reason.
+    """
+    body = _load_voices()
+    assert "Kokoro, instant" in body
+    assert "Chatterbox, slow" in body
+
+
+def test_the_builtin_voice_offers_no_delete_button():
+    """There is no file behind it; the delete would 404 on the one voice the
+    user cannot break."""
+    start = HTML.index("function onVoiceChange()")
+    body = HTML[start:HTML.index('$("voice").addEventListener')]
+    assert 'voice.name === "default"' in body
+    assert '$("delvoice").hidden = !clone || builtin;' in body
+
+
+def test_the_engine_is_named_on_both_paths():
+    start = HTML.index("function onVoiceChange()")
+    body = HTML[start:HTML.index('$("voice").addEventListener')]
+    hint = body[body.index('$("voicehint")'):body.index('$("tts-expert-fast")')]
+    assert "<strong>Chatterbox</strong>" in hint
+    assert "<strong>Kokoro</strong>" in hint, (
+        "the fast path never said Kokoro while its expert panel was titled so")

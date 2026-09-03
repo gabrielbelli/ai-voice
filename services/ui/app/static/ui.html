@@ -1258,21 +1258,34 @@ async function loadVoices() {
   const known = new Set([...(kokoro && kokoro.en_us || []),
                          ...(kokoro && kokoro.en_gb || []),
                          ...(kokoro && kokoro.pt_br || [])]);
+  /* EVERY GROUP NAMES ITS ENGINE. The labels used to say "Instant" and
+     "Cloned", which describe the experience and never say which of the two
+     models is about to run -- so the two expert panels below, which ARE named
+     after the engines, appeared to swap for no visible reason. Speed is what
+     you choose on; the engine is what you then need to recognise. */
   let html = "";
-  html += group("Instant — English (US)", kokoro && kokoro.en_us);
-  html += group("Instant — English (UK)", kokoro && kokoro.en_gb);
-  html += group("Instant — Portuguese (Brazil)", kokoro && kokoro.pt_br);
-  html += group("Instant — other languages", all.filter(v => !known.has(v)));
-  /* THE COST GOES IN THE GROUP HEADER, not in a line that appears after the
-     click. Someone choosing a cloned voice should see what it costs before
-     they choose it, not after. */
+  html += group("Kokoro, instant — English (US)", kokoro && kokoro.en_us);
+  html += group("Kokoro, instant — English (UK)", kokoro && kokoro.en_gb);
+  html += group("Kokoro, instant — Portuguese (Brazil)", kokoro && kokoro.pt_br);
+  html += group("Kokoro, instant — other languages", all.filter(v => !known.has(v)));
+
+  /* CHATTERBOX IS ALWAYS HERE, and it used not to be. This group was built
+     only `if (clones.length)`, so on a fresh deployment with nothing cloned
+     the second engine did not appear in the picker at all -- the only hint it
+     existed was "+ Use my own voice…", which reads like an upload button
+     rather than a model. tts-long has shipped its own speaker all along
+     (voices.py BUILTIN = "default"), it needs no clip, and POST /jobs with
+     voice:"default" has always worked. It was simply unreachable from here.
+
+     THE COST GOES IN THE GROUP HEADER, not in a line that appears after the
+     click: someone choosing one of these should see what it costs before they
+     choose it, not after. */
   const factor = (1 / rate.clone()).toFixed(0);
-  if (clones.length) {
-    html += `<optgroup label="Cloned voices — slow, about ${factor}× the length of the audio">` +
-      clones.map(c => `<option value="c:${esc(c.name)}">${esc(c.name)}</option>`).join("") +
-      "</optgroup>";
-  }
-  html += `<option value="new">+ Use my own voice…</option>`;
+  html += `<optgroup label="Chatterbox, slow — about ${factor}× the length of the audio, queued as a job">` +
+    `<option value="c:default">default — Chatterbox's own voice, no clip needed</option>` +
+    clones.map(c => `<option value="c:${esc(c.name)}">${esc(c.name)} — your clone</option>`).join("") +
+    "</optgroup>";
+  html += `<option value="new">+ Clone a new voice (Chatterbox)…</option>`;
   const previous = select.value;
   select.innerHTML = html;
   /* bm_george is TTS_VOICE on this deployment, so it is what the service would
@@ -1303,16 +1316,25 @@ function onVoiceChange() {
     ? "Fixed at 1.0 — Chatterbox has no rate control, and anything else is a 400."
     : "0.5 – 2.0";
   if (clone) { $("speed").value = 1; $("speedout").textContent = "1.00"; }
+  /* THE HINT NAMES THE ENGINE IN BOTH BRANCHES. It used to name Chatterbox
+     only on the slow path, so on the fast path nothing on screen said Kokoro
+     while the expert panel below was titled after it. */
+  const builtin = clone && voice.name === "default";
   $("voicehint").innerHTML = clone
-    ? `Cloned voices use Chatterbox: about ${(1 / rate.clone()).toFixed(0)}×
-       the length of the audio in compute, queued as a job you can leave.`
-    : `Instant. Language <code>${PREFIX[voice.name[0]] || "en-us"}</code>,
-       inferred from the voice's prefix.`;
+    ? `<strong>Chatterbox</strong> — about ${(1 / rate.clone()).toFixed(0)}×
+       the length of the audio in compute, queued as a job you can leave.
+       ${builtin ? "This is the model's own speaker; it needs no clip."
+                 : "Rendered from your clip."}`
+    : `<strong>Kokoro</strong> — instant. Language
+       <code>${PREFIX[voice.name[0]] || "en-us"}</code>, inferred from the
+       voice's prefix.`;
   $("tts-expert-fast").hidden = clone;
   $("tts-expert-clone").hidden = !clone;
   /* Without this a bad clip is stuck in the picker for ever, and the only way
-     out is shelling into a container to delete a file. */
-  $("delvoice").hidden = !clone;
+     out is shelling into a container to delete a file. Never offered for
+     "default": it is the model's own speaker, there is no file behind it, and
+     the delete would 404 on a voice the user cannot break. */
+  $("delvoice").hidden = !clone || builtin;
   estimate();
 }
 $("voice").addEventListener("change", onVoiceChange);
