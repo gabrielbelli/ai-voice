@@ -235,12 +235,17 @@ services:
   # checks a token. Those three are still closed and still have no `ports`.
   #
   # This is a browser origin, not a bypass. voice-ui reaches voice-gateway and
-  # nothing else; it holds no key list and compares no token; it forwards the
-  # caller's Authorization header untouched and asks the gateway itself whether
-  # the key is good; and it can answer nothing the gateway would not have
-  # answered. The boundary is exactly where it was. If a future edit gives this
+  # nothing else; it holds no key LIST and compares no token; it asks the
+  # gateway itself whether the credential in play is good; and it can answer
+  # nothing the gateway would not have answered. If a future edit gives this
   # container a URL for stt-stack, tts-stack or tts-long, that is the moment
   # this paragraph stops being true.
+  #
+  # WHAT IS NO LONGER TRUE: "the boundary is exactly where it was". The page
+  # used to carry the user's own key and this service forwarded it. With
+  # UI_GATEWAY_API_KEY set below, this container holds the key and signs
+  # requests with it, so THIS PORT is the trust boundary. Unset, it is the
+  # passthrough it always was.
   voice-ui:
     container_name: voice-ui
     image: ghcr.io/gabrielbelli/ai-voice-ui:pre
@@ -257,6 +262,30 @@ services:
       # A service name, on the app-internal network. The three backends are NOT
       # named here and must not be: this container talks to the gateway.
       UI_GATEWAY_URL: http://voice-gateway:8080
+
+      # THE KEY THIS CONTAINER PRESENTS TO THE GATEWAY. Set it to one of the
+      # values in GATEWAY_API_KEYS above.
+      #
+      # The page used to have an API key box: the browser held the key and this
+      # service forwarded it. It does not any more — this is not a
+      # bring-your-own-key tool — so if GATEWAY_API_KEYS is set and this is
+      # not, the UI is 401 on every route and there is nowhere to type a key to
+      # fix it.
+      #
+      # READ THIS BEFORE SETTING IT. It moves the trust boundary from 30080 to
+      # 30081. Anyone who can open the page is authenticated BY the page,
+      # because this process signs their requests for them, so publishing
+      # 30081 somewhere 30080 is not already reachable from grants MORE access
+      # rather than less. That is a fine trade for a tool on a LAN behind a
+      # firewall and it is not one anywhere else. voice-ui logs a WARNING at
+      # startup whenever this is set, saying exactly that.
+      #
+      # DELIBERATELY LEFT UNSET, like GATEWAY_API_KEYS above and for the same
+      # reason: a key invented in a file that gets deployed is how a
+      # placeholder becomes production credentials. Unset means no header is
+      # added and an inbound one is forwarded as before, so with
+      # GATEWAY_API_KEYS also unset this stack behaves exactly as it does now.
+      # UI_GATEWAY_API_KEY: sk-workstation
 
       # MeTube, by HOST ADDRESS. It is a separate TrueNAS app
       # (ix-metube-metube-1) with host_network:false and its web port published

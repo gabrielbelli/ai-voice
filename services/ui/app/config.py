@@ -18,7 +18,8 @@ from __future__ import annotations
 import os
 
 __all__ = [
-    "GATEWAY_URL", "METUBE_URL", "METUBE_FOLDER", "METUBE_FORMAT",
+    "GATEWAY_URL", "GATEWAY_API_KEY", "gateway_authorization",
+    "METUBE_URL", "METUBE_FOLDER", "METUBE_FORMAT",
     "PROBE", "PROBE_TIMEOUT", "MAX_UPLOAD_BYTES", "CONFIRM_SECONDS",
     "CONFIRM_BYTES", "STT_RTF_SEED", "STT_BUDGET_SECONDS", "VOICE_DIR",
     "MAX_CLIP_BYTES", "MAX_CLIP_SECONDS", "RESOLVE_PER_MINUTE", "flag",
@@ -38,6 +39,46 @@ def flag(name: str, default: bool) -> bool:
 # laptop with all five containers and fail on the NAS, which is the exact bug
 # the port deletion was made to prevent.
 GATEWAY_URL = os.getenv("UI_GATEWAY_URL", "http://voice-gateway:8080").rstrip("/")
+
+# THE KEY THIS SERVICE PRESENTS TO THE GATEWAY, and the reason the page no
+# longer has a box for one.
+#
+# It used to be the browser's: the page kept a key in localStorage, put it on
+# every XHR, and this service forwarded it untouched. That made :30080 the
+# trust boundary and this container a pipe. The user's decision is that this is
+# not a bring-your-own-key tool, so the credential moved here.
+#
+# WHAT THAT COSTS, AND IT IS NOT SMALL: the trust boundary moves from :30080 to
+# :30081. Anyone who can open the page is authenticated by it, because this
+# process signs their requests for them. That is a defensible trade for a tool
+# on a LAN behind a firewall and it is not defensible for anything reachable
+# from outside one. Publishing 30081 more widely than 30080 now means MORE
+# access, not less.
+#
+# UNSET BY DEFAULT, deliberately, exactly like GATEWAY_API_KEYS in
+# compose.yaml: a key invented in a file that gets deployed is how a
+# placeholder becomes production credentials. Unset means no header is added
+# and any inbound one is forwarded as before, so a deployment with
+# GATEWAY_API_KEYS also unset behaves precisely as it did.
+GATEWAY_API_KEY = (os.getenv("UI_GATEWAY_API_KEY") or "").strip()
+
+
+def gateway_authorization(inbound: str | None) -> str | None:
+    """The Authorization to put on a request to the gateway, or None.
+
+    One function rather than the same conditional at each of the four call
+    sites -- the proxy, the key probe, the ingest hand-off and the page's own
+    calls -- because "which credential goes on this hop" is exactly the kind of
+    question that gets answered three ways and then disagrees in production.
+
+    Ours WINS over an inbound header when it is configured. A caller who sends
+    their own must not be able to make this service present a different key
+    than the one it was given, and there is no case where a browser on this
+    page sends one at all.
+    """
+    if GATEWAY_API_KEY:
+        return f"Bearer {GATEWAY_API_KEY}"
+    return inbound
 
 # MeTube. Unset means the URL box is not rendered at all and the page says
 # "link ingestion not configured" -- not a broken button, not a spinner.

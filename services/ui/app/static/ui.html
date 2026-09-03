@@ -27,6 +27,11 @@
   --bg:#f6f7f9; --panel:#fff; --line:#dfe3e8; --ink:#14181d; --dim:#5b6672;
   --accent:#2f6fed; --accent-ink:#fff; --warn:#8a5300; --warn-bg:#fff5e0;
   --bad:#a3231d; --bad-bg:#fdeceb; --good:#1c6b3f; --good-bg:#e8f5ed;
+  /* The karaoke highlight, which is deliberately NOT --accent: --accent is
+     "this is a control you can press" everywhere else on the page, and a word
+     of a transcript is not. A highlighter yellow is the one colour nobody
+     mistakes for a button. */
+  --mark-bg:#ffe9a8; --mark-ink:#14181d;
   --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   --radius:10px;
 }
@@ -35,6 +40,7 @@
     --bg:#14171c; --panel:#1b1f26; --line:#2c323b; --ink:#e6eaef; --dim:#98a3b0;
     --accent:#5a8dff; --accent-ink:#0b1220; --warn:#ffce7a; --warn-bg:#3a2f16;
     --bad:#ff9d97; --bad-bg:#3a1f1d; --good:#8ee0ae; --good-bg:#16301f;
+    --mark-bg:#54450f; --mark-ink:#ffeeb8;
   }
 }
 *{box-sizing:border-box}
@@ -61,8 +67,6 @@ header{position:sticky;top:0;z-index:5;background:var(--panel);
 .pill.ok{background:var(--good-bg);color:var(--good);border-color:transparent}
 .pill.bad{background:var(--bad-bg);color:var(--bad);border-color:transparent}
 .pill.warn{background:var(--warn-bg);color:var(--warn);border-color:transparent}
-.keybox{display:flex;gap:4px;align-items:center}
-.keybox input{width:150px}
 
 /* -------------------------------------------------------------- forms -- */
 input,select,textarea,button{font:inherit;color:inherit}
@@ -110,7 +114,6 @@ details>summary::-webkit-details-marker{display:none}
 details>summary::before{content:"▸ ";color:var(--dim)}
 details[open]>summary::before{content:"▾ "}
 details .body{padding:0 12px 12px;border-top:1px solid var(--line);padding-top:12px}
-body:not(.expert) .expert-only{display:none}
 .slider{display:grid;grid-template-columns:1fr auto;gap:6px;align-items:center}
 .slider input[type=range]{width:100%}
 .slider output{font-family:var(--mono);font-size:12px;color:var(--dim)}
@@ -162,6 +165,34 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
   margin-top:8px}
 .meter div{height:100%;background:var(--good);width:0}
 .ring{font-family:var(--mono);font-size:26px;font-weight:700}
+
+/* ------------------------------------------------------ playback ------ */
+/* The playback-speed picker is a SELECT and not a range, unlike the synthesis
+   slider it sits near. Two reasons, and the first is the important one: two
+   sliders labelled with a speed, one of which is sent to the server and baked
+   into the file while the other is not, is the collision this feature would
+   otherwise create -- so they are given different shapes as well as different
+   names. The second is that listening rates are chosen from a short list;
+   nobody wants 1.07x, and a range invites it. */
+.rate{width:auto;min-width:96px;padding-right:6px}
+
+/* -------------------------------------------------------- karaoke ----- */
+/* THREE REDUNDANT CHANNELS, NOT ONE: background, weight, and an underline.
+   Colour alone is not a cue -- it is gone for a red-green deficiency, gone on
+   a projector with the contrast wrong, and gone in forced-colours mode, where
+   `background` is overridden by the system palette and the underline is what
+   survives. This is the one place on the page where missing the cue means
+   losing your place in a five-thousand-word transcript. */
+.out.karaoke{position:relative}
+.cue{border-radius:3px;cursor:pointer}
+.cue.on{background:var(--mark-bg);color:var(--mark-ink);font-weight:700;
+  text-decoration:underline;text-decoration-thickness:2px;
+  text-underline-offset:2px;transition:background-color .08s linear}
+/* The transition is the only motion here and it is the only thing removed:
+   the highlight itself is information, not decoration, so switching it off
+   under reduced-motion would remove the feature rather than calm it. The
+   scroll that follows the highlight is separately made instant, in follow(). */
+@media (prefers-reduced-motion:reduce){ .cue.on{transition:none} }
 </style>
 </head>
 <body>
@@ -171,14 +202,18 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
     <span class="brand">ai-voice<small>speech in, speech out</small></span>
     <span class="spacer"></span>
     <div class="pills" id="pills"></div>
-    <div class="keybox">
-      <input id="key" type="password" placeholder="API key" autocomplete="off"
-             spellcheck="false" aria-label="API key">
-      <button class="small" id="keyshow" type="button" title="Show or hide the key">show</button>
-    </div>
-    <label style="margin:0;display:flex;gap:5px;align-items:center;cursor:pointer">
-      <input type="checkbox" id="expert" style="width:auto"> Expert
-    </label>
+    <!-- THERE WAS AN "EXPERT" CHECKBOX HERE: a global gate over the
+         .expert-only class, which is to say over the three <details> panels at
+         the foot of each tab. They are collapsed, they are titled "Expert —
+         …", and a disclosure triangle already means "this is hidden until you
+         want it". The checkbox was a second control over the same thing, so a
+         setting could be out of sight for two different reasons at once and
+         finding it meant reasoning about both. -->
+    <!-- AND AN API KEY BOX: the browser held the key, put it on every XHR, and
+         this service forwarded it. It is now UI_GATEWAY_API_KEY on the
+         container and the header is added server-side, so there is nothing
+         here to type. Read app/main.py's module docstring before assuming
+         where the trust boundary is — it moved. -->
   </div>
 </header>
 
@@ -222,7 +257,7 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
       </div>
       <div id="stt-note"></div>
 
-      <details class="expert-only" id="stt-expert">
+      <details id="stt-expert">
         <summary>Expert — transcription</summary>
         <div class="body">
           <div class="grid2">
@@ -316,6 +351,21 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
         <button class="small tight" id="download" type="button">Download</button>
       </div>
       <div class="note ok" id="repaired" hidden></div>
+      <!-- PLAY-ALONG, and it is here rather than on the drop zone because it
+           only ever exists once there is a transcript to follow. Hidden
+           entirely when the audio never reached this browser, which is every
+           link and every set of captions -- see #sttwhy. -->
+      <div id="sttplay" hidden style="margin-top:10px">
+        <audio id="sttplayer" controls style="width:100%"></audio>
+        <div class="row" style="margin-top:6px;align-items:center">
+          <div class="tight">
+            <label for="sttrate">Playback speed</label>
+            <select id="sttrate" class="rate"></select>
+          </div>
+          <span class="hint tight" id="sttplayhint"></span>
+        </div>
+      </div>
+      <div class="hint" id="sttwhy" hidden style="margin-top:10px"></div>
       <div class="out" id="transcript" style="margin-top:10px"></div>
     </div>
   </section>
@@ -335,8 +385,30 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
           <div class="hint" id="voicehint"></div>
           <button class="small link" id="delvoice" type="button" hidden>Remove this cloned voice</button>
         </div>
+        <!-- LANGUAGE IS ITS OWN CONTROL, and used not to be. It was carried by
+             the voice's first letter (a→en-us, p→pt-br, z→cmn …) and was
+             overridable only from the Expert panel, which put two unrelated
+             decisions into one select: who speaks, and what language they
+             speak. Reading English in a Brazilian voice, or Portuguese in an
+             English one, was unreachable without opening Expert — and the
+             prefix map silently decided for you either way.
+
+             It defaults to auto-detect because the text is already on screen.
+             The page can read it, and asking someone to name a language it can
+             see is a question whose answer is already in the room. -->
         <div>
-          <label for="speed">Speed <output id="speedout" class="num">1.00</output></label>
+          <label for="lang">Language</label>
+          <select id="lang"></select>
+          <div class="hint" id="langhint"></div>
+        </div>
+        <div>
+          <!-- SYNTHESIS speed, not playback speed. Renamed the day a playback
+               control arrived below: this one is a request field, it is sent
+               to Kokoro, it is baked into the samples, it changes the file you
+               download, and it is a 400 on Chatterbox. The one under the
+               player is none of those things. Two controls both called "Speed"
+               on one tab is a collision, and naming is the whole fix. -->
+          <label for="speed">Synthesis speed <output id="speedout" class="num">1.00</output></label>
           <input type="range" id="speed" min="0.5" max="2" step="0.05" value="1">
           <div class="hint" id="speedhint">0.5 – 2.0</div>
         </div>
@@ -373,27 +445,27 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
         <button class="primary tight" id="go-tts" type="button">Speak</button>
       </div>
       <audio id="player" controls style="width:100%;margin-top:12px" hidden></audio>
-      <div class="row" id="playrow" hidden style="margin-top:8px">
+      <div class="row" id="playrow" hidden style="margin-top:8px;align-items:center">
+        <div class="tight">
+          <label for="playrate">Playback speed</label>
+          <select id="playrate" class="rate"></select>
+        </div>
         <span class="hint tight" id="speak-meta"></span><span class="spacer"></span>
         <button class="small tight" id="dl-audio" type="button">Download</button>
       </div>
+      <div class="hint" id="playhint" hidden style="margin-top:6px">
+        This one is your browser's, not the model's: it changes nothing about
+        the file <strong>Download</strong> writes, and it works on any audio,
+        including a cloned voice where <em>Synthesis speed</em> is a 400.
+        There is no word-by-word highlight here — neither speech engine returns
+        timings, and the only alternative would be an estimate that drifts. See
+        the Transcribe tab, where the timings are real.
+      </div>
 
-      <details class="expert-only" id="tts-expert-fast">
+      <details id="tts-expert-fast">
         <summary>Expert — instant voices (Kokoro)</summary>
         <div class="body">
           <div class="grid2">
-            <div><label for="x-lang">language override</label>
-              <select id="x-lang">
-                <option value="">inferred from the voice prefix</option>
-                <option>en-us</option><option>en-gb</option><option>pt-br</option>
-                <option>es</option><option>fr-fr</option><option>hi</option>
-                <option>it</option><option>ja</option><option>cmn</option>
-              </select>
-              <div class="hint">The prefix map is published:
-                a→en-us, b→en-gb, e→es, f→fr-fr, h→hi, i→it, j→ja, p→pt-br, z→cmn.
-                <code>/speak</code> defaults to en-us, so a UI that omitted this
-                would mispronounce every Portuguese request while looking right.</div>
-            </div>
             <div><label for="x-tfmt">format</label>
               <select id="x-tfmt">
                 <option>mp3</option><option>opus</option><option>aac</option>
@@ -430,7 +502,7 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
         </div>
       </details>
 
-      <details class="expert-only" id="tts-expert-clone">
+      <details id="tts-expert-clone">
         <summary>Expert — cloned voices (Chatterbox)</summary>
         <div class="body">
           <div class="note flat">This deployment is <strong>calmer than stock</strong>:
@@ -446,10 +518,10 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
               <div class="slider"><input type="range" id="x-cfg" min="0" max="1" step="0.05" value="0.3"><output>0.30</output></div></div>
             <div><label>temperature <span class="hint">0.1–1.5, here 0.6, stock 0.8</span></label>
               <div class="slider"><input type="range" id="x-temp" min="0.1" max="1.5" step="0.05" value="0.6"><output>0.60</output></div></div>
-            <div><label for="x-clang">language</label>
-              <select id="x-clang"></select>
+            <div><label>cross-language transfer</label>
               <div class="hint">Resemble's note, where the only person who can act
-                on it will see it: for cross-language transfer, take cfg_weight to 0.</div>
+                on it will see it: when the clip's language and the Language
+                picker disagree, take cfg_weight to 0.</div>
             </div>
           </div>
           <div class="row" style="margin-top:12px">
@@ -478,6 +550,31 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
         <span class="spacer"></span>
         <button class="small tight" id="refresh" type="button">Refresh</button>
       </div>
+
+      <!-- OUTSIDE #joblist, AND THAT IS THE WHOLE REASON IT LOOKS ODD HERE.
+           renderJobs() rebuilds #joblist by assigning innerHTML, and it is
+           called on a two-second timer while anything is running. An <audio>
+           inside that markup is destroyed and recreated on every tick, so it
+           restarts from zero every two seconds -- which is not a styling
+           detail, it is the feature not working. One persistent player, named
+           by the card above it, is the fix.
+
+           Until now a finished job could only be downloaded. There was no
+           player on this tab at all, so "add a speed control to the Jobs
+           player" meant adding the player. -->
+      <div id="jobplay" hidden style="margin-top:12px">
+        <div class="hint" id="jobplaying"></div>
+        <audio id="jobplayer" controls style="width:100%;margin-top:6px"></audio>
+        <div class="row" style="margin-top:6px;align-items:center">
+          <div class="tight">
+            <label for="jobrate">Playback speed</label>
+            <select id="jobrate" class="rate"></select>
+          </div>
+          <span class="spacer"></span>
+          <button class="small tight" id="jobclose" type="button">Close the player</button>
+        </div>
+      </div>
+
       <div id="joblist" style="margin-top:12px"></div>
     </div>
   </section>
@@ -581,13 +678,15 @@ function reason(payload, fallback) {
   return fallback;
 }
 
+/* NO Authorization HEADER IS SET HERE, and that is the change rather than an
+   omission. The browser used to hold the key and sign every request with it;
+   the key now lives on the voice-ui container as UI_GATEWAY_API_KEY and
+   app/main.py adds the header on the way past. Kept as a wrapper rather than
+   collapsed into fetch() because every call site already goes through it, and
+   a single seam is what made removing the header a three-line change instead
+   of thirty. */
 async function api(path, options) {
-  options = options || {};
-  const headers = new Headers(options.headers || {});
-  const key = ($("key").value || "").trim();
-  if (key) headers.set("Authorization", "Bearer " + key);
-  const response = await fetch(path, Object.assign({}, options, { headers }));
-  return response;
+  return fetch(path, options || {});
 }
 
 async function json(path, options) {
@@ -639,23 +738,22 @@ const rate = {
    be before either of them agrees about how long it takes to make. */
 const speechSeconds = (text) => (text || "").length / 15;
 
-/* ================================================= key box and header === */
-$("key").value = store.get("key", "");
-$("key").addEventListener("change", () => { store.set("key", $("key").value.trim()); poll(); });
-$("keyshow").addEventListener("click", () => {
-  const box = $("key");
-  box.type = box.type === "password" ? "text" : "password";
-  $("keyshow").textContent = box.type === "password" ? "show" : "hide";
-});
+/* ========================================================== the tabs === */
 
-$("expert").checked = store.get("expert", false);
-document.body.classList.toggle("expert", $("expert").checked);
-$("expert").addEventListener("change", () => {
-  /* Reveals panels beneath the controls that are already there. It does not
-     swap pages, relayout or lose typed text, so flipping it mid-task is free. */
-  store.set("expert", $("expert").checked);
-  document.body.classList.toggle("expert", $("expert").checked);
-});
+/* NO EXPERT TOGGLE. It was a global switch over the .expert-only class. Every
+   panel it hid is a <details> already titled "Expert — ...", collapsed, with a
+   disclosure triangle on it; the checkbox meant a control could be invisible
+   for two unrelated reasons at once. The per-ENGINE swap of the two TTS panels
+   is a different thing and survives untouched -- see onVoiceChange(), which
+   sets .hidden on whichever of Kokoro's and Chatterbox's panels does not
+   belong to the chosen voice. That is about which model runs, not about how
+   much the reader wants to see. */
+
+/* NO KEY BOX EITHER. The key is the CONTAINER'S now: app/config.py reads
+   UI_GATEWAY_API_KEY and app/main.py signs requests with it, so this file has
+   no credential to hold, no localStorage entry to leak into a screenshot or a
+   heap dump, and no header to attach. api() above is a plain fetch for exactly
+   that reason. */
 
 document.querySelectorAll('[role=tab]').forEach(button => {
   button.addEventListener("click", () => {
@@ -702,6 +800,71 @@ async function poll() {
   }
   $("pills").innerHTML = out;
 }
+
+/* ============================================== playback speed ======== */
+/*
+  ENTIRELY CLIENT-SIDE. HTMLMediaElement.playbackRate is the whole mechanism;
+  nothing is sent anywhere, no route changed, and it applies to any audio the
+  page can play -- a Kokoro clip, a Chatterbox job, or the file you uploaded to
+  transcribe. This is what makes it a different thing from the `speed` slider
+  on the Speak tab, which is a Kokoro request field, baked into the samples,
+  and a 400 on Chatterbox. The two are given different names AND different
+  shapes (select against range) because "two controls called Speed" is exactly
+  how someone ends up believing the download will come back faster.
+
+  preservesPitch STAYS TRUE, which is its default, and is set here anyway so
+  that the decision is written down where the rate is. Speech at 1.5x with the
+  pitch resampled up is the chipmunk everybody knows, and it is not merely
+  unpleasant: it moves formants, which is what intelligibility is carried on,
+  so the one thing the control is for -- getting through a recording faster
+  while still following it -- is the thing it would destroy. The prefixed
+  spelling is for Safari before 17, where the unprefixed property does nothing.
+
+  ONE PREFERENCE ACROSS ALL THREE PLAYERS, remembered in localStorage. Somebody
+  who listens at 1.5x listens at 1.5x, and setting it once per tab per session
+  is the kind of friction that gets a feature called useless.
+*/
+const RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3];
+/* Browsers accept far more than 3x. Speech does not: past about 3x a
+   time-stretcher smears consonants and the transcript is easier to read than
+   the audio is to hear, so the extra range would only be a way to make the
+   control look broken. */
+const players = [];
+
+function playbackRate() {
+  const stored = Number(store.get("rate.playback", 1));
+  return RATES.includes(stored) ? stored : 1;
+}
+
+function setPlaybackRate(value) {
+  store.set("rate.playback", value);
+  for (const entry of players) {
+    entry.select.value = String(value);
+    entry.player.playbackRate = value;
+  }
+}
+
+function wirePlayer(select, player) {
+  select.innerHTML = RATES.map(r =>
+    `<option value="${r}">${r === 1 ? "1× (normal)" : r + "×"}</option>`).join("");
+  player.preservesPitch = true;
+  player.webkitPreservesPitch = true;
+  players.push({ select, player });
+  select.value = String(playbackRate());
+  player.playbackRate = playbackRate();
+  select.addEventListener("change", () => setPlaybackRate(Number(select.value)));
+  /* Reapplied on every load. playbackRate is a property of the ELEMENT, not of
+     the media, and a new src is a new load; reapplying costs nothing, and a
+     player that quietly went back to 1x on the second clip is the sort of bug
+     that gets lived with rather than reported. */
+  player.addEventListener("loadedmetadata", () => {
+    player.playbackRate = playbackRate();
+  });
+}
+
+wirePlayer($("sttrate"), $("sttplayer"));
+wirePlayer($("playrate"), $("player"));
+wirePlayer($("jobrate"), $("jobplayer"));
 
 /* ================================================== the transcoder ===== */
 /*
@@ -1091,6 +1254,27 @@ function chosenFormat() {
   return $("x-rf").value || (stt.format === "text" ? "text" : stt.format);
 }
 
+/* WHY AN UPLOAD ASKS FOR verbose_json WHEN THE USER ASKED FOR TEXT.
+   verbose_json's `text` IS the text format's whole body -- openai_api.py's
+   _body() returns result.text for one and puts that same string in the other
+   -- so the transcript on screen and the file the Download button writes are
+   byte-identical either way, and the extra fields are the word timings the
+   highlight follows. Nothing is given up and nothing is invented.
+
+   It is asked for only when there is audio in this browser to play along with,
+   because otherwise it is pure cost. Timestamps are a second decoder pass per
+   segment on Whisper, and asr.py has the measurement for Parakeet: 5.34 s
+   against 5.07 s on a 14.2 s clip, about 5%. Paying that for numbers nothing
+   on screen can use would be the wrong trade.
+
+   An explicit expert choice is never overridden. Someone who selected srt, or
+   json, or verbose_json in the panel gets exactly that. */
+function formatForUpload(wanted) {
+  if ($("x-rf").value) return wanted;
+  if (wanted !== "text") return wanted;      /* srt and vtt carry their own */
+  return sttAudio() ? "verbose_json" : "text";
+}
+
 async function transcribeToken() {
   /* The bytes never touch this laptop: the UI container streams MeTube's file
      straight into a multipart POST at the gateway. That is also the only way
@@ -1101,7 +1285,7 @@ async function transcribeToken() {
     const response = await api("/ui/fetch?response_format=" + encodeURIComponent(format), {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ token: stt.token }) });
-    await render(response, format);
+    await render(response, format, format);
     note($("stt-note"), "", "");
   } catch (err) {
     note($("stt-note"), "bad", "Transcription failed: " + err.message);
@@ -1121,6 +1305,7 @@ $("go-stt").addEventListener("click", async () => {
   const form = new FormData();
   form.append("file", file, file.name);
   let path, format;
+  const wanted = chosenFormat();
   if (native) {
     path = "/transcribe"; format = "native";
     /* No `language` field, in either mode. It is a 400 on /v1 and silently
@@ -1128,12 +1313,24 @@ $("go-stt").addEventListener("click", async () => {
        rather than transcribe. */
   } else {
     path = "/v1/audio/transcriptions";
-    format = chosenFormat();
+    format = formatForUpload(wanted);
     /* `model` is required by /v1 validation and does NOT choose an engine —
        Parakeet runs regardless and the response says so in x-stt-engine. */
     form.append("model", "parakeet");
     form.append("response_format", format);
-    if ($("x-gran").value) form.append("timestamp_granularities[]", $("x-gran").value);
+    if ($("x-gran").value) {
+      form.append("timestamp_granularities[]", $("x-gran").value);
+    } else if (format === "verbose_json" && format !== wanted) {
+      /* BOTH, and the order matters only to a reader. `word` is what the
+         highlight follows; `segment` is what it falls back to when a word
+         cannot be placed in the transcript exactly, which is a real case
+         rather than a defensive one -- a glossary rule spanning two words
+         fires in the segment text and cannot fire in either word, so the
+         words stop reconstructing the line. The service takes the field
+         repeated (openai_api.py _values) and allows both values. */
+      form.append("timestamp_granularities[]", "word");
+      form.append("timestamp_granularities[]", "segment");
+    }
     if ($("x-logprobs").checked) form.append("include[]", "logprobs");
     const t = $("x-vad-t").value, p = $("x-vad-p").value, s = $("x-vad-s").value;
     if (t !== "0.5" || p !== "100" || s !== "300") {
@@ -1145,7 +1342,7 @@ $("go-stt").addEventListener("click", async () => {
   }
   try {
     const response = await api(path, { method: "POST", body: form });
-    await render(response, format);
+    await render(response, format, native ? "text" : wanted);
     note($("stt-note"), "", "");
   } catch (err) {
     note($("stt-note"), "bad", "Transcription failed: " + (err.message || err));
@@ -1154,9 +1351,295 @@ $("go-stt").addEventListener("click", async () => {
   }
 });
 
+/* ================================================== karaoke =========== */
+/*
+  WHERE THE TIMINGS COME FROM, WHICH IS THE ONLY INTERESTING QUESTION HERE.
+  They are real, they are the recogniser's own, and there is no estimate
+  anywhere on this path:
+
+    text (upload)   verbose_json's `words[]`, each {word, start, end}. Parakeet
+                    groups onnx-asr's token stream into words (asr.py
+                    _parakeet_words); Whisper gets word_timestamps=True. Falls
+                    back to `segments[]`, whose bounds are the VAD's own
+                    utterance edges.
+    srt / vtt       the cue timings in the file itself. Nothing is requested
+                    that was not already being downloaded.
+
+  Both are on the ORIGINAL timeline: pipeline.py maps every start and end back
+  through speech.original(), so the silence the VAD removed is added back and
+  the numbers line up with the file the browser is playing.
+
+  WHAT IS NOT DONE, DELIBERATELY. Nothing in the speech direction is
+  highlighted, because nothing in the speech direction returns a timing:
+  /speak answers audio and a usage count, /v1/audio/speech the same, and
+  tts-long's _public() strips `segments` from every job it reports, leaving
+  chunks/audio_seconds/compute_seconds and no chunk boundaries at all. The only
+  thing that could be built from that is duration x (chars so far / chars
+  total), and it would be wrong from the first sentence: Chatterbox inserts
+  per-segment pauses, chunk_text() splits where the server decides and not
+  where the characters fall, and speech rate moves with punctuation. A
+  highlight that drifts is worse than no highlight -- it is read as a fact
+  about the audio, and it teaches people to stop trusting the ones that are
+  right.
+*/
+const karaoke = { cues: null, spans: [], player: null, index: -1, frame: 0 };
+
+/* Every cue is a RANGE OF THE DISPLAYED STRING -- an offset and a length --
+   and never a copy of the text. That is what makes it impossible for the
+   highlighted transcript to disagree with the one the Download button writes:
+   the pane is painted from the response's own bytes, and a timing either finds
+   its place in them exactly or is dropped. locate() returning null is the
+   guard, and it is meant to fire: a glossary rule spanning two words fires in
+   the segment text and cannot fire in either word, so on that transcript the
+   words stop reconstructing the line and the segments are used instead. */
+function locate(display, pieces) {
+  const cues = [];
+  let cursor = 0;
+  for (const piece of pieces) {
+    /* Trimmed because faster-whisper's segment text carries a leading space
+       that pipeline.py strips before joining, so the untrimmed string is not
+       in the transcript at all. */
+    const text = (piece.text || "").trim();
+    if (!text) continue;
+    const at = display.indexOf(text, cursor);
+    if (at < 0) return null;
+    cues.push({ start: piece.start, end: piece.end, at, length: text.length });
+    cursor = at + text.length;
+  }
+  return cues.length ? cues : null;
+}
+
+function timedFromJson(body, display) {
+  const words = (body.words || []).map(w =>
+    ({ text: w.word, start: w.start, end: w.end }));
+  return (words.length ? locate(display, words) : null)
+      || (body.segments ? locate(display, body.segments) : null);
+}
+
+/* Only the shape services/stt writes, and only enough of it to find the cues:
+   HH:MM:SS,mmm for SubRip and HH:MM:SS.mmm for WebVTT, one arrow line, then
+   the text until a blank line. No cue settings, no NOTE blocks, no styling --
+   openai_api.py's _srt/_vtt emit none of those, and a parser that guessed at
+   the rest would be guessing about a file this page did not write. */
+const CUE_LINE = /^(\d{2}):(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[.,](\d{3})/;
+
+function timedFromSubtitles(display) {
+  const lines = display.split("\n");
+  const pieces = [];
+  for (let i = 0; i < lines.length; i++) {
+    const found = CUE_LINE.exec(lines[i]);
+    if (!found) continue;
+    const at = (h, m, s, ms) => Number(h) * 3600 + Number(m) * 60 + Number(s) + Number(ms) / 1000;
+    const body = [];
+    while (++i < lines.length && lines[i].trim() !== "") body.push(lines[i]);
+    if (body.length) {
+      pieces.push({ text: body.join("\n"),
+                    start: at(found[1], found[2], found[3], found[4]),
+                    end: at(found[5], found[6], found[7], found[8]) });
+    }
+  }
+  return pieces.length ? locate(display, pieces) : null;
+}
+
+/* No innerHTML on this path, and no template literal either: the transcript is
+   remote data, it is the largest piece of remote data this page renders, and
+   it is the only one rendered as hundreds of elements. Built from
+   createElement and textContent there is no string for an injection to live
+   in at all, which is a stronger property than "we remembered esc() on every
+   one of them". The escaping test asserts this stays true. */
+function paint(host, display, cues) {
+  /* Assembled off-document and attached once. A two-hour recording is tens of
+     thousands of words, and appending each one to a live element is that many
+     chances for the browser to lay the box out again. */
+  const fragment = document.createDocumentFragment();
+  const spans = [];
+  let cursor = 0;
+  for (const cue of cues) {
+    if (cue.at > cursor) {
+      fragment.appendChild(document.createTextNode(display.slice(cursor, cue.at)));
+    }
+    const span = document.createElement("span");
+    span.className = "cue";
+    span.textContent = display.slice(cue.at, cue.at + cue.length);
+    span.dataset.cue = String(spans.length);
+    fragment.appendChild(span);
+    spans.push(span);
+    cursor = cue.at + cue.length;
+  }
+  if (cursor < display.length) {
+    fragment.appendChild(document.createTextNode(display.slice(cursor)));
+  }
+  host.textContent = "";
+  host.appendChild(fragment);
+  return spans;
+}
+
+/* The cue whose start is the latest one at or before `t`. Binary search rather
+   than a cursor walked forward: playback is monotonic but seeking is not, and
+   a scrub backwards through a five-thousand-word transcript is exactly when
+   somebody is looking at the highlight. */
+function cueAt(seconds) {
+  const cues = karaoke.cues;
+  let low = 0, high = cues.length - 1, found = -1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (cues[mid].start <= seconds) { found = mid; low = mid + 1; }
+    else high = mid - 1;
+  }
+  /* Held through the gap to the next cue rather than cleared at this one's
+     end, because between two words the gap is milliseconds and clearing there
+     is a flicker. Two seconds past the end is no longer a gap between words,
+     it is silence the VAD cut out or a pause between subtitle cues, and
+     leaving a word lit through it is the page asserting something false about
+     what is being spoken. */
+  if (found >= 0 && seconds > cues[found].end + 2) return -1;
+  return found;
+}
+
+function follow() {
+  if (!karaoke.cues) return;
+  const index = cueAt(karaoke.player.currentTime);
+  if (index === karaoke.index) return;
+  if (karaoke.spans[karaoke.index]) karaoke.spans[karaoke.index].classList.remove("on");
+  karaoke.index = index;
+  const span = karaoke.spans[index];
+  if (!span) return;
+  span.classList.add("on");
+
+  /* Kept in view by scrolling the transcript BOX, never the page: the pane is
+     the overflow:auto element and scrollIntoView would drag the whole document
+     to it, taking the audio controls off screen at the moment they are wanted.
+     Only when the word has actually left the box, so a highlight moving along
+     one visible line does not scroll anything. */
+  const host = $("transcript");
+  const top = span.offsetTop, bottom = top + span.offsetHeight;
+  if (top < host.scrollTop + 8 || bottom > host.scrollTop + host.clientHeight - 8) {
+    host.scrollTo({ top: Math.max(0, top - host.clientHeight / 3),
+                    /* Read at call time, not at load: this is a live query, so
+                       turning the setting on mid-session takes effect. */
+                    behavior: matchMedia("(prefers-reduced-motion: reduce)").matches
+                              ? "auto" : "smooth" });
+  }
+}
+
+/* requestAnimationFrame, not `timeupdate`. The spec leaves the timeupdate rate
+   to the browser and every engine fires it about four times a second, so a
+   word lasting 300 ms would be lit up to 250 ms late -- close enough to look
+   like the drift this feature exists to avoid. A binary search per frame over
+   a few thousand cues is nothing, and the loop stops dead on pause. */
+function tickKaraoke() {
+  karaoke.frame = 0;
+  if (!karaoke.player || karaoke.player.paused || karaoke.player.ended) { follow(); return; }
+  follow();
+  karaoke.frame = requestAnimationFrame(tickKaraoke);
+}
+
+function stopKaraoke() {
+  if (karaoke.frame) cancelAnimationFrame(karaoke.frame);
+  karaoke.frame = 0;
+  if (karaoke.spans[karaoke.index]) karaoke.spans[karaoke.index].classList.remove("on");
+  karaoke.cues = null; karaoke.spans = []; karaoke.index = -1;
+}
+
+$("sttplayer").addEventListener("play", () => {
+  if (!karaoke.frame) karaoke.frame = requestAnimationFrame(tickKaraoke);
+});
+/* Paused and seeked both move currentTime with no frame loop running. */
+["pause", "seeked", "ended", "timeupdate"].forEach(name =>
+  $("sttplayer").addEventListener(name, follow));
+
+/* CLICK A WORD TO JUMP TO IT. Delegated, and bound once rather than per span:
+   a transcript is thousands of spans and thousands of listeners is a real
+   cost. Deliberately not focusable -- making every word a tab stop would put
+   several thousand of them between the player and the Download button, which
+   is a worse keyboard experience than not having the shortcut. The audio
+   element's own controls are the keyboard path to any point in the file. */
+$("transcript").addEventListener("click", ev => {
+  const span = ev.target.closest && ev.target.closest(".cue");
+  if (!span || !karaoke.cues) return;
+  const cue = karaoke.cues[Number(span.dataset.cue)];
+  if (!cue) return;
+  karaoke.player.currentTime = cue.start;
+  if (karaoke.player.paused) karaoke.player.play().catch(() => {});
+});
+
+/* The audio the SERVER was given, whenever there is one. `prepared` is the
+   16 kHz mono WAV this page decoded and uploaded, so it is the exact timeline
+   the timings are on; `file` is the fallback for something the browser could
+   not decode, where the server did its own decoding and the durations still
+   agree. Null for every link and every set of captions, which is not an
+   oversight -- see sttPlayback(). */
+function sttAudio() { return stt.prepared || stt.file; }
+
+let sttUrl = null;
+
+/* Sets up the player and the highlight for what render() just drew, and says
+   plainly why there is nothing to play when there is not. */
+function sttPlayback(display, cues) {
+  stopKaraoke();
+  $("transcript").className = "out";
+  if (sttUrl) {
+    /* The src goes before the revoke, not after. A media element told to
+       reload a revoked blob raises its own error event, and the one thing this
+       path must not do is put a red box under a transcript that is fine. */
+    $("sttplayer").removeAttribute("src");
+    $("sttplayer").load();
+    URL.revokeObjectURL(sttUrl);
+    sttUrl = null;
+  }
+
+  const source = sttAudio();
+  if (!source) {
+    $("sttplay").hidden = true;
+    /* THE HONEST ANSWER, NOT A DISABLED BUTTON. /ui/fetch streams MeTube's
+       file straight into the gateway server-side and the browser never
+       receives a byte -- that is the design, and it is what makes a two-hour
+       podcast cost this laptop a transcript rather than 131 MB. Playing along
+       would mean a new route serving the media down here, which is the one
+       thing that architecture exists to avoid. */
+    $("sttwhy").textContent = stt.token
+      ? "No player: a link is downloaded and transcribed on the server and the "
+        + "audio never reaches this browser, which is what keeps a two-hour "
+        + "podcast off your connection. Drop the file in to follow along."
+      : "";
+    $("sttwhy").hidden = !$("sttwhy").textContent;
+    return;
+  }
+
+  sttUrl = URL.createObjectURL(source);
+  $("sttplayer").src = sttUrl;
+  $("sttplay").hidden = false;
+  $("sttwhy").hidden = true;
+
+  if (!cues) {
+    $("sttplayhint").textContent = "Playback only — this response carried no timings.";
+    return;
+  }
+  karaoke.cues = cues;
+  karaoke.player = $("sttplayer");
+  karaoke.spans = paint($("transcript"), display, cues);
+  $("transcript").className = "out karaoke";
+  $("sttplayhint").textContent =
+    `Highlights as it plays — ${cues.length} timings from the recogniser. `
+    + "Click any word to jump there.";
+}
+
+/* A file the browser cannot decode for playback is not a failure worth a red
+   box: the server decoded it perfectly well, the transcript above is real, and
+   the only thing missing is the follow-along. */
+$("sttplayer").addEventListener("error", () => {
+  stopKaraoke();
+  $("transcript").className = "out";
+  $("sttplay").hidden = true;
+  $("sttwhy").hidden = false;
+  $("sttwhy").textContent = "Your browser cannot play that file back, so there "
+    + "is nothing to follow along with. The transcript above is unaffected — "
+    + "the server decodes with libav and handles far more than a browser does.";
+});
+
 let lastTranscript = { text: "", name: "transcript.txt" };
 
-async function render(response, format) {
+async function render(response, format, wanted) {
   const type = response.headers.get("content-type") || "";
   if (!response.ok) {
     let payload = null;
@@ -1164,7 +1647,7 @@ async function render(response, format) {
     throw new Error(reason(payload, response.status + " " + response.statusText));
   }
   const engine = response.headers.get("x-stt-engine");
-  let text = "", meta = [], repaired = null;
+  let text = "", meta = [], repaired = null, timed = null;
 
   if (type.includes("json")) {
     const body = await response.json();
@@ -1181,17 +1664,27 @@ async function render(response, format) {
       text = body.text !== undefined ? body.text : JSON.stringify(body, null, 2);
       if (body.duration) meta.push(clock(body.duration) + " of audio");
       if (body.usage && body.usage.seconds) meta.push(body.usage.seconds + " s billed");
+      timed = timedFromJson(body, text);
     }
   } else {
     text = await response.text();
+    if (format === "srt" || format === "vtt") timed = timedFromSubtitles(text);
   }
   if (engine) meta.push("engine: " + engine);
 
-  lastTranscript = { text, name: "transcript." + (format === "srt" ? "srt"
-                     : format === "vtt" ? "vtt" : "txt") };
+  /* `wanted` and not `format`. The upload path can send verbose_json for a
+     transcript the user asked for as text -- see formatForUpload() -- and the
+     file that comes off the Download button must still be the .txt they chose.
+     The bytes are the same either way: openai_api.py's _body returns
+     result.text for response_format=text and puts that identical string in
+     verbose_json's `text`. */
+  const kind = wanted || format;
+  lastTranscript = { text, name: "transcript." + (kind === "srt" ? "srt"
+                     : kind === "vtt" ? "vtt" : "txt") };
   $("result").hidden = false;
   $("transcript").textContent = text;
   $("result-meta").textContent = meta.join(" · ");
+  sttPlayback(text, timed);
 
   /* THE GLOSSARY SUBSTITUTIONS, SURFACED. A silent rewrite is worse than no
      rewrite, and this field is the only thing in the stack that says one
@@ -1235,11 +1728,156 @@ $("download").addEventListener("click", () => {
    entirely correct. Choosing pf_dora sends language:"pt-br" without asking. */
 const PREFIX = { a:"en-us", b:"en-gb", e:"es", f:"fr-fr", h:"hi", i:"it",
                  j:"ja", p:"pt-br", z:"cmn" };
-const CHATTERBOX_LANGS = "ar da de el en es fi fr he hi it ja ko ms nl no pl pt ru sv sw tr zh".split(" ");
 const CLONE_DEFAULTS = { exag:0.3, cfg:0.3, temp:0.6 };
 
-$("x-clang").innerHTML = CHATTERBOX_LANGS
-  .map(c => `<option${c === "en" ? " selected" : ""}>${c}</option>`).join("");
+/* ------------------------------------------------------------- language --
+   THE TWO ENGINES DO NOT SPEAK THE SAME SET, and neither one accepts the
+   other's spelling. Kokoro wants the region ("pt-br", "fr-fr", "cmn"),
+   Chatterbox wants the bare ISO code ("pt", "fr", "zh"). So the picker is
+   rebuilt when the engine changes rather than filtered: a code from the wrong
+   engine is a 400 on one and a mispronunciation on the other. */
+const KOKORO_LANGS = [["en-us","English (US)"], ["en-gb","English (UK)"],
+  ["pt-br","Portuguese (Brazil)"], ["es","Spanish"], ["fr-fr","French"],
+  ["hi","Hindi"], ["it","Italian"], ["ja","Japanese"], ["cmn","Mandarin"]];
+const CHATTERBOX_LANGS = [["ar","Arabic"], ["da","Danish"], ["de","German"],
+  ["el","Greek"], ["en","English"], ["es","Spanish"], ["fi","Finnish"],
+  ["fr","French"], ["he","Hebrew"], ["hi","Hindi"], ["it","Italian"],
+  ["ja","Japanese"], ["ko","Korean"], ["ms","Malay"], ["nl","Dutch"],
+  ["no","Norwegian"], ["pl","Polish"], ["pt","Portuguese"], ["ru","Russian"],
+  ["sv","Swedish"], ["sw","Swahili"], ["tr","Turkish"], ["zh","Chinese"]];
+
+/* Script first, because it is decisive and cheap. A single character in one of
+   these blocks settles the question no stopword list can argue with. Latin
+   script tells you nothing on its own, which is why it is absent here. */
+const SCRIPTS = [[/[぀-ヿ]/, "ja"], [/[가-힯]/, "ko"],
+  [/[ऀ-ॿ]/, "hi"], [/[؀-ۿ]/, "ar"],
+  [/[֐-׿]/, "he"], [/[Ͱ-Ͽ]/, "el"],
+  [/[Ѐ-ӿ]/, "ru"], [/[一-鿿]/, "zh"]];
+
+/* Function words, which are the part of a language that a short paragraph is
+   guaranteed to contain. Content words are the ones that travel between
+   languages; "ligature" and "typography" identify nothing.
+
+   HONEST LIMITATION: da/no/sv share most of this list, and this scores them by
+   the few words that differ. On a short Scandinavian sample the pick between
+   them is close to a coin toss. That is why an unconfident result falls back
+   rather than asserting, and why the picker is always there to overrule it. */
+const STOPWORDS = {
+  en:"the and of to in is that it for as with was on are this be at from",
+  pt:"que de não uma com para são está você isso mais como por ele foi",
+  es:"que de no una con para los las está más pero como por ese fue",
+  fr:"que de ne une avec pour les des est plus mais comme par elle été",
+  it:"che di non una con per gli sono più ma anche come quando essere",
+  de:"der die das und nicht ein mit für ist auch aber wenn sich noch",
+  nl:"de het een van niet met voor zijn maar ook als dat door nog",
+  pl:"nie jest się na do że tego przez oraz jako które być tylko",
+  tr:"bir ve bu için ile değil daha çok olarak gibi ama sonra",
+  sv:"och att det som för inte den med han men också eller från",
+  da:"og at det som for ikke den med han men også eller fra",
+  no:"og at det som for ikke den med han men også eller fra",
+  fi:"ja on ei että se kuin mutta myös vain kun niin ollut",
+  ms:"yang dan untuk dengan tidak ini itu adalah akan pada dari",
+  sw:"na ya kwa ni wa katika hii kwamba yake wake ambao",
+};
+const STOPSET = Object.fromEntries(
+  Object.entries(STOPWORDS).map(([k, v]) => [k, new Set(v.split(" "))]));
+
+/* Returns an ISO code, or null when it will not commit. Null is a real answer
+   here: a caller that gets one falls back to the voice's prefix and says so,
+   which is strictly better than a confident guess at the wrong language. */
+function detectLanguage(text) {
+  const sample = (text || "").trim();
+  if (sample.length < 12) return null;
+  for (const [re, code] of SCRIPTS) if (re.test(sample)) return code;
+
+  const words = sample.toLowerCase().match(/[\p{L}']+/gu) || [];
+  if (words.length < 4) return null;
+  const score = {};
+  for (const w of words)
+    for (const [code, set] of Object.entries(STOPSET))
+      if (set.has(w)) score[code] = (score[code] || 0) + 1;
+
+  const ranked = Object.entries(score).sort((a, b) => b[1] - a[1]);
+  if (!ranked.length || ranked[0][1] < 2) return null;
+  /* A near-tie is not a detection. Two languages within one hit of each other
+     over a short sample is exactly the da/no/sv case above. */
+  if (ranked[1] && ranked[0][1] - ranked[1][1] < 1) return null;
+  return ranked[0][0];
+}
+
+/* The detector speaks ISO; the engines do not. English is the one code that
+   cannot be mapped from the text alone — en-us and en-gb are the same language
+   — so the voice's own prefix breaks that tie, which is the one thing the
+   prefix map is genuinely good for. */
+function toEngineLang(iso, kind, voiceName) {
+  if (!iso) return null;
+  if (kind === "clone")
+    return CHATTERBOX_LANGS.some(([c]) => c === iso) ? iso : null;
+  if (iso === "en") return PREFIX[(voiceName || "a")[0]] === "en-gb" ? "en-gb" : "en-us";
+  const map = { pt:"pt-br", fr:"fr-fr", zh:"cmn" };
+  const code = map[iso] || iso;
+  return KOKORO_LANGS.some(([c]) => c === code) ? code : null;
+}
+
+/* Rebuilt on every engine change, with the selection carried across when the
+   new engine also speaks it. Switching from a Kokoro voice to a clone should
+   not silently drop a deliberate choice of Portuguese back to auto. */
+function populateLanguages() {
+  const voice = currentVoice();
+  if (voice.kind === "new") return;
+  const list = voice.kind === "clone" ? CHATTERBOX_LANGS : KOKORO_LANGS;
+  const select = $("lang");
+  const previous = select.value;
+  select.innerHTML = `<option value="auto">Auto-detect</option>` +
+    list.map(([c, name]) => `<option value="${c}">${name} — ${c}</option>`).join("");
+  /* Kokoro's "pt-br" and Chatterbox's "pt" are the same intent spelled two
+     ways, so a straight value carry-over would fall back to auto every time
+     the engine changed. Translate through ISO instead. */
+  const carried = previous && previous !== "auto"
+    ? toEngineLang(previous.split("-")[0], voice.kind, voice.name) : null;
+  select.value = carried && [...select.options].some(o => o.value === carried)
+    ? carried : "auto";
+  refreshLanguage();
+}
+
+/* The code actually sent, and the reason for it. Returns both so the hint and
+   the request can never disagree about what is happening. */
+function resolvedLanguage() {
+  const voice = currentVoice();
+  const chosen = $("lang").value;
+  const fallback = voice.kind === "clone"
+    ? "en" : (PREFIX[(voice.name || "a")[0]] || "en-us");
+
+  if (chosen && chosen !== "auto")
+    return { code: chosen, why: "chosen" };
+
+  const iso = detectLanguage($("text").value);
+  const code = toEngineLang(iso, voice.kind, voice.name);
+  if (code) return { code, why: "detected", iso };
+  /* Not detected is not an error. Too short to judge, an unsupported language,
+     or a genuine near-tie all land here, and all of them are better served by
+     the voice's own language than by a guess. */
+  return { code: fallback, why: iso ? "unsupported" : "undetected", iso };
+}
+
+const LANG_NAME = Object.fromEntries([...KOKORO_LANGS, ...CHATTERBOX_LANGS]);
+
+function refreshLanguage() {
+  const voice = currentVoice();
+  if (voice.kind === "new") return;
+  const { code, why, iso } = resolvedLanguage();
+  const name = LANG_NAME[code] || code;
+  const hint = {
+    chosen:      `Sending <code>${code}</code>.`,
+    detected:    `Detected <strong>${name}</strong> from the text, sending <code>${code}</code>.`,
+    unsupported: `The text looks like <strong>${iso}</strong>, which this engine
+                  does not speak. Falling back to <code>${code}</code>, from the voice.`,
+    undetected:  `Not enough text to tell yet — falling back to <code>${code}</code>,
+                  from the voice. Pick one above to be certain.`,
+  }[why];
+  $("langhint").innerHTML = hint;
+}
+
 
 async function loadVoices() {
   const select = $("voice");
@@ -1258,21 +1896,34 @@ async function loadVoices() {
   const known = new Set([...(kokoro && kokoro.en_us || []),
                          ...(kokoro && kokoro.en_gb || []),
                          ...(kokoro && kokoro.pt_br || [])]);
+  /* EVERY GROUP NAMES ITS ENGINE. The labels used to say "Instant" and
+     "Cloned", which describe the experience and never say which of the two
+     models is about to run -- so the two expert panels below, which ARE named
+     after the engines, appeared to swap for no visible reason. Speed is what
+     you choose on; the engine is what you then need to recognise. */
   let html = "";
-  html += group("Instant — English (US)", kokoro && kokoro.en_us);
-  html += group("Instant — English (UK)", kokoro && kokoro.en_gb);
-  html += group("Instant — Portuguese (Brazil)", kokoro && kokoro.pt_br);
-  html += group("Instant — other languages", all.filter(v => !known.has(v)));
-  /* THE COST GOES IN THE GROUP HEADER, not in a line that appears after the
-     click. Someone choosing a cloned voice should see what it costs before
-     they choose it, not after. */
+  html += group("Kokoro, instant — English (US)", kokoro && kokoro.en_us);
+  html += group("Kokoro, instant — English (UK)", kokoro && kokoro.en_gb);
+  html += group("Kokoro, instant — Portuguese (Brazil)", kokoro && kokoro.pt_br);
+  html += group("Kokoro, instant — other languages", all.filter(v => !known.has(v)));
+
+  /* CHATTERBOX IS ALWAYS HERE, and it used not to be. This group was built
+     only `if (clones.length)`, so on a fresh deployment with nothing cloned
+     the second engine did not appear in the picker at all -- the only hint it
+     existed was "+ Use my own voice…", which reads like an upload button
+     rather than a model. tts-long has shipped its own speaker all along
+     (voices.py BUILTIN = "default"), it needs no clip, and POST /jobs with
+     voice:"default" has always worked. It was simply unreachable from here.
+
+     THE COST GOES IN THE GROUP HEADER, not in a line that appears after the
+     click: someone choosing one of these should see what it costs before they
+     choose it, not after. */
   const factor = (1 / rate.clone()).toFixed(0);
-  if (clones.length) {
-    html += `<optgroup label="Cloned voices — slow, about ${factor}× the length of the audio">` +
-      clones.map(c => `<option value="c:${esc(c.name)}">${esc(c.name)}</option>`).join("") +
-      "</optgroup>";
-  }
-  html += `<option value="new">+ Use my own voice…</option>`;
+  html += `<optgroup label="Chatterbox, slow — about ${factor}× the length of the audio, queued as a job">` +
+    `<option value="c:default">default — Chatterbox's own voice, no clip needed</option>` +
+    clones.map(c => `<option value="c:${esc(c.name)}">${esc(c.name)} — your clone</option>`).join("") +
+    "</optgroup>";
+  html += `<option value="new">+ Clone a new voice (Chatterbox)…</option>`;
   const previous = select.value;
   select.innerHTML = html;
   /* bm_george is TTS_VOICE on this deployment, so it is what the service would
@@ -1299,20 +1950,34 @@ function onVoiceChange() {
      or /jobs accordingly. Cloning stops being an advanced feature the moment
      it stops requiring a mode decision. */
   $("speed").disabled = clone;
+  /* The way out is named where the wall is. "Fixed at 1.0" on its own reads as
+     a dead end, and there has been a working answer under the player since
+     playback speed arrived: it is not the same thing — nothing is baked into
+     the file — but for "I want to hear this faster" it is the thing people
+     actually wanted. */
   $("speedhint").innerHTML = clone
-    ? "Fixed at 1.0 — Chatterbox has no rate control, and anything else is a 400."
-    : "0.5 – 2.0";
+    ? `Fixed at 1.0 — Chatterbox has no rate control, and anything else is a
+       400. <strong>Playback speed</strong>, under the player, works on it.`
+    : "0.5 – 2.0, sent to Kokoro and baked into the audio.";
   if (clone) { $("speed").value = 1; $("speedout").textContent = "1.00"; }
+  /* THE HINT NAMES THE ENGINE IN BOTH BRANCHES. It used to name Chatterbox
+     only on the slow path, so on the fast path nothing on screen said Kokoro
+     while the expert panel below was titled after it. */
+  const builtin = clone && voice.name === "default";
   $("voicehint").innerHTML = clone
-    ? `Cloned voices use Chatterbox: about ${(1 / rate.clone()).toFixed(0)}×
-       the length of the audio in compute, queued as a job you can leave.`
-    : `Instant. Language <code>${PREFIX[voice.name[0]] || "en-us"}</code>,
-       inferred from the voice's prefix.`;
+    ? `<strong>Chatterbox</strong> — about ${(1 / rate.clone()).toFixed(0)}×
+       the length of the audio in compute, queued as a job you can leave.
+       ${builtin ? "This is the model's own speaker; it needs no clip."
+                 : "Rendered from your clip."}`
+    : `<strong>Kokoro</strong> — instant.`;
   $("tts-expert-fast").hidden = clone;
   $("tts-expert-clone").hidden = !clone;
   /* Without this a bad clip is stuck in the picker for ever, and the only way
-     out is shelling into a container to delete a file. */
-  $("delvoice").hidden = !clone;
+     out is shelling into a container to delete a file. Never offered for
+     "default": it is the model's own speaker, there is no file behind it, and
+     the delete would 404 on a voice the user cannot break. */
+  $("delvoice").hidden = !clone || builtin;
+  populateLanguages();
   estimate();
 }
 $("voice").addEventListener("change", onVoiceChange);
@@ -1342,6 +2007,9 @@ $("resetclone").addEventListener("click", () => {
 
 /* ------------------------------------------------- the ETA, and the way out */
 $("text").addEventListener("input", estimate);
+/* Auto-detect is only auto if it keeps up with the text. */
+$("text").addEventListener("input", refreshLanguage);
+$("lang").addEventListener("change", refreshLanguage);
 
 function estimate() {
   const text = $("text").value;
@@ -1387,7 +2055,7 @@ function estimate() {
 /* The nearest instant voice by language, so "use a quick voice instead" picks
    something that will pronounce the text rather than the first name in a list. */
 function nearestKokoro() {
-  const wanted = $("x-clang").value || "en";
+  const wanted = (resolvedLanguage().code || "en").split("-")[0];
   const all = (VOICES.kokoro && VOICES.kokoro.voices) || [];
   const want = wanted === "pt" ? "p" : wanted === "en" ? "b" : wanted[0];
   return all.find(v => v[0] === want) || all.find(v => v[0] === "b") || all[0] || null;
@@ -1469,7 +2137,7 @@ $("go-tts").addEventListener("click", async () => {
 async function speakNow(voice, text) {
   const useV1 = $("x-troute").value === "v1";
   const format = $("x-tfmt").value || (useV1 ? "mp3" : "wav");
-  const language = $("x-lang").value || PREFIX[voice[0]] || "en-us";
+  const language = resolvedLanguage().code;
   const speed = Number($("speed").value);
   const parts = segments();
 
@@ -1563,6 +2231,7 @@ function play(blob, meta, name) {
   lastAudio = { url, name };
   $("player").src = url; $("player").hidden = false;
   $("playrow").hidden = false;
+  $("playhint").hidden = false;
   $("speak-meta").textContent = meta;
 }
 $("dl-audio").addEventListener("click", () => {
@@ -1602,7 +2271,7 @@ async function queueJob(voice, text) {
      minutes that is the right trade. SSE is expert-only precisely because a
      36-minute stream dies when a lid closes, and closing the stream CANCELS
      the job. */
-  const body = { voice, language: $("x-clang").value || "en",
+  const body = { voice, language: resolvedLanguage().code,
                  exaggeration: Number($("x-exag").value),
                  cfg_weight: Number($("x-cfg").value),
                  temperature: Number($("x-temp").value) };
@@ -1703,7 +2372,8 @@ function renderJobs() {
         ${job.compute_seconds.toFixed(0)} s · ${job.realtime_factor.toFixed(3)}× realtime</div>` : ""}
       <div class="acts">
         ${(job.status === "done" || job.status === "cancelled") && !expired
-          ? `<button class="small" data-get="${esc(job.id)}" type="button">Download the audio</button>` : ""}
+          ? `<button class="small" data-play="${esc(job.id)}" type="button">Play</button>
+             <button class="small" data-get="${esc(job.id)}" type="button">Download the audio</button>` : ""}
         ${live ? `<button class="small" data-stop="${esc(job.id)}" type="button">Stop and keep what's done</button>` : ""}
         ${job.status === "failed" ? `<button class="small" data-retry="${esc(job.id)}" type="button">Retry</button>` : ""}
         <button class="small" data-forget="${esc(job.id)}" type="button">Forget</button>
@@ -1717,6 +2387,8 @@ function renderJobs() {
   document.title = soonest !== null && soonest > 0
     ? `${Math.max(1, Math.round(soonest / 60))}m left — ai-voice` : "ai-voice";
 
+  $("joblist").querySelectorAll("[data-play]").forEach(b =>
+    b.addEventListener("click", () => playJob(b.dataset.play)));
   $("joblist").querySelectorAll("[data-get]").forEach(b =>
     b.addEventListener("click", () => downloadJob(b.dataset.get)));
   $("joblist").querySelectorAll("[data-stop]").forEach(b =>
@@ -1728,6 +2400,40 @@ function renderJobs() {
       store.set("jobs", remembered().filter(j => j.id !== b.dataset.forget));
       renderJobs(); }));
 }
+
+let jobUrl = null;
+
+/* FETCHED WITH api(), NOT PUT IN THE src ATTRIBUTE. /jobs/{id}/audio needs the
+   Authorization header and an <audio src> carries none, so pointing the
+   element at the route directly answers 401 on any deployment with
+   GATEWAY_API_KEYS set -- which is the deployment this is for. The blob is the
+   whole file; there is no range support to give up, because the route serves
+   the file from disk in one piece anyway. */
+async function playJob(id) {
+  $("jobplay").hidden = false;
+  $("jobplaying").textContent = "Loading " + id.slice(0, 8) + "…";
+  let response;
+  try { response = await api(`/jobs/${encodeURIComponent(id)}/audio`); }
+  catch (err) { $("jobplaying").textContent = "Could not load it: " + (err.message || err); return; }
+  if (!response.ok) {
+    /* 409 while it is still running, 404 once the sweeper has been through. */
+    $("jobplaying").textContent = `That audio is not available (${response.status}).`;
+    return;
+  }
+  if (jobUrl) URL.revokeObjectURL(jobUrl);
+  jobUrl = URL.createObjectURL(await response.blob());
+  $("jobplayer").src = jobUrl;
+  $("jobplaying").textContent = "Playing " + id.slice(0, 8);
+  $("jobplayer").play().catch(() => {});
+}
+
+$("jobclose").addEventListener("click", () => {
+  $("jobplayer").pause();
+  $("jobplayer").removeAttribute("src");
+  $("jobplayer").load();
+  if (jobUrl) { URL.revokeObjectURL(jobUrl); jobUrl = null; }
+  $("jobplay").hidden = true;
+});
 
 async function downloadJob(id) {
   const response = await api(`/jobs/${encodeURIComponent(id)}/audio`);

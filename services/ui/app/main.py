@@ -25,8 +25,10 @@ says "if a second `ports` entry ever appears here, this file has stopped doing
 its job", and it is right about backend ports -- 8000, 8001 and 8002 are what
 that sentence was written about, and they stay closed. This one is a browser
 origin, not a bypass: it reaches the gateway and nothing else, it forwards the
-caller's Authorization untouched, and it can answer nothing the gateway would
-not have answered. The boundary is where it was.
+caller's Authorization or adds its own, and it can answer nothing the gateway
+would not have answered. It is still not a bypass -- but with
+UI_GATEWAY_API_KEY set it IS the authenticator, which is the paragraph further
+down.
 
 WHY THE PAGE'S XHRs COME BACK HERE RATHER THAN GOING STRAIGHT TO :30080. One
 origin means no CORS on the gateway, no preflight on every upload, and no
@@ -35,14 +37,30 @@ FIXED allowlist -- there is no wildcard and no catch-all, for the same reason
 the gateway has none: a wildcard would proxy /docs and /openapi.json to
 services that deliberately do not publish them.
 
-AUTHENTICATION IS THE GATEWAY'S, AND ONLY THE GATEWAY'S. This service holds no
-key list and compares no token. Proxied routes carry the caller's header
-through and the gateway answers 401 itself. The routes that are ours --
-ingestion, clips -- ask the gateway whether the presented key is good by making
-the cheapest authenticated call it has, `GET /v1/models`, which it answers from
-a static table without touching a backend. So there is exactly one place a key
-is configured, and when GATEWAY_API_KEYS is unset this service is exactly as
-open as the stack already is: no more, and not accidentally less.
+AUTHENTICATION, AND THE BOUNDARY THAT MOVED. This service still compares no
+token and holds no key LIST -- the gateway is the only thing that decides
+whether a credential is good. What changed is who presents one.
+
+It used to be the browser. The page kept a key in localStorage, put it on every
+XHR, and this service forwarded it untouched; :30080 was the trust boundary and
+this container was a pipe. It is now UI_GATEWAY_API_KEY on this container, and
+this process adds the header on the way past, because the user's decision is
+that this is not a bring-your-own-key tool. There is no key box on the page any
+more and nothing for a screenshot or a shared laptop to give away.
+
+STATE THE CONSEQUENCE RATHER THAN LET IT BE DISCOVERED: the trust boundary is
+now :30081. Anyone who can reach this port is authenticated by this service,
+because it signs their requests for them. On a LAN behind a firewall that is a
+reasonable trade for a tool one person uses. It is not one anywhere else, and
+publishing 30081 more widely than 30080 now grants MORE access rather than
+less. See services/ui/README.md's security section.
+
+UI_GATEWAY_API_KEY is unset by default, like GATEWAY_API_KEYS, and unset means
+no header is added and an inbound one is forwarded exactly as before -- so the
+current keyless deployment is byte-for-byte unchanged. The routes that are ours
+-- ingestion, clips -- still ask the gateway whether the credential in play is
+good, by making the cheapest authenticated call it has, `GET /v1/models`, which
+it answers from a static table without touching a backend.
 """
 
 from __future__ import annotations
@@ -110,9 +128,11 @@ HOP_BY_HOP = frozenset({
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailer", "trailers", "transfer-encoding", "upgrade",
 })
-# `host` because httpx sets the gateway's own. `authorization` is NOT dropped,
-# unlike in the gateway: there the next hop is a backend running with its keys
-# unset, and here the next hop is the process that checks the key.
+# `host` because httpx sets the gateway's own. `authorization` is NOT dropped
+# here, unlike in the gateway: there the next hop is a backend running with its
+# keys unset, and here the next hop is the process that checks the key. It is
+# REPLACED rather than dropped when UI_GATEWAY_API_KEY is set -- see
+# _request_headers, and config.gateway_authorization for why ours wins.
 DROP_FROM_REQUEST = HOP_BY_HOP | {"host"}
 
 
@@ -135,9 +155,19 @@ def new_client() -> httpx.AsyncClient:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.client = new_client()
     app.state.authorised = {}
-    log.info("ready: gateway=%s metube=%s probe=%s voices=%s",
-             config.GATEWAY_URL, config.METUBE_URL or "(unset)",
+    log.info("ready: gateway=%s key=%s metube=%s probe=%s voices=%s",
+             config.GATEWAY_URL,
+             # Whether, never which. A key in a log line is a key in a log
+             # aggregator, a screenshot and a support paste.
+             "set" if config.GATEWAY_API_KEY else "unset",
+             config.METUBE_URL or "(unset)",
              "on" if probe.available() else "off", config.VOICE_DIR)
+    if config.GATEWAY_API_KEY:
+        log.warning("UI_GATEWAY_API_KEY is set, so THIS PORT is the trust "
+                    "boundary: every request reaching it is signed with that "
+                    "key and forwarded. The page has no key box. Do not "
+                    "publish 30081 anywhere 30080 is not already reachable "
+                    "from.")
     if not metube.configured():
         log.warning("UI_METUBE_URL is unset: the link box is hidden and only "
                     "file upload is offered. Set it to the MeTube on this "
@@ -190,8 +220,15 @@ async def authorised(request: Request) -> Response | None:
     contacted -- so the check costs one loopback request a minute per key and
     the answer is always the CURRENT key list rather than a copy of it that
     drifts.
+
+    WHAT IT CHECKS NOW. With UI_GATEWAY_API_KEY set, the credential in play is
+    this container's own, so a 401 here is a MISCONFIGURED SERVICE and not a
+    caller who typed a key wrong -- the caller has no key to type. It is still
+    worth making: these routes spawn yt-dlp and write files, and running them
+    when the credential they will use is known-bad would only move the failure
+    to the far end of a download. The message says which case it is.
     """
-    header = request.headers.get("authorization")
+    header = config.gateway_authorization(request.headers.get("authorization"))
     cache: dict[str, float] = request.app.state.authorised
     key = _cache_key(header)
     now = time.monotonic()
@@ -216,6 +253,21 @@ async def authorised(request: Request) -> Response | None:
             headers={"Retry-After": "30"})
 
     if response.status_code == 401:
+        if config.GATEWAY_API_KEY:
+            # OURS was refused. Passing the gateway's "incorrect API key
+            # provided" through to a page with no key box would send someone
+            # looking for a field that does not exist.
+            log.error("the gateway refused UI_GATEWAY_API_KEY; ingestion and "
+                      "the clip store are unavailable until it matches an "
+                      "entry in GATEWAY_API_KEYS")
+            return error_response(
+                503, "this UI's own gateway credential was refused, so it "
+                     "cannot act on your behalf. UI_GATEWAY_API_KEY does not "
+                     "match any entry in the gateway's GATEWAY_API_KEYS. "
+                     "There is nothing to type here -- it is a deployment "
+                     "setting.",
+                type_="server_error", code="misconfigured_api_key",
+                headers={"Retry-After": "30"})
         return Response(content=response.content, status_code=401,
                         media_type=response.headers.get("content-type",
                                                         "application/json"),
@@ -238,8 +290,20 @@ async def authorised(request: Request) -> Response | None:
 
 
 def _request_headers(request: Request) -> list[tuple[str, str]]:
-    return [(k, v) for k, v in request.headers.items()
-            if k.lower() not in DROP_FROM_REQUEST]
+    """The caller's headers, minus the hop-by-hop ones, plus our credential.
+
+    The Authorization is REPLACED rather than appended when we have one: HTTP
+    allows a field name to repeat, httpx would put both on the wire, and a
+    gateway reading the first would be authenticating whichever one the caller
+    happened to send. When UI_GATEWAY_API_KEY is unset this is exactly the
+    passthrough it always was.
+    """
+    headers = [(k, v) for k, v in request.headers.items()
+               if k.lower() not in DROP_FROM_REQUEST]
+    if config.GATEWAY_API_KEY:
+        headers = [(k, v) for k, v in headers if k.lower() != "authorization"]
+        headers.append(("authorization", f"Bearer {config.GATEWAY_API_KEY}"))
+    return headers
 
 
 def _response_headers(upstream: httpx.Response) -> MutableHeaders:

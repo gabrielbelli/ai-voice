@@ -133,6 +133,10 @@ async def resolve(request: Request, body: ResolveRequest) -> Response:
             "MeTube instance on this host. File upload still works.",
             code="ingestion_not_configured")
 
+    # The bucket the rate limit counts in. Since the key box was removed no
+    # browser sends an Authorization header, so this is the client address in
+    # practice -- which is the better bucket anyway: one key shared by the
+    # whole household used to be one allowance for all of it.
     who = request.headers.get("authorization") or (
         request.client.host if request.client else "-")
     if _rate_limited(who):
@@ -403,12 +407,15 @@ async def fetch(request: Request, body: TokenRequest) -> Response:
                 "POST", f"{config.GATEWAY_URL}/v1/audio/transcriptions",
                 headers={
                     "content-type": f"multipart/form-data; boundary={boundary}",
-                    # The caller's key, forwarded. The gateway is the auth
-                    # boundary for this stack and this request is made on the
-                    # caller's behalf, so it carries the caller's credential
-                    # and nothing of ours.
-                    **({"authorization": request.headers["authorization"]}
-                       if "authorization" in request.headers else {}),
+                    # THIS SERVICE'S KEY when UI_GATEWAY_API_KEY is set, and
+                    # the caller's forwarded when it is not -- one decision,
+                    # made in config.gateway_authorization, so this hop cannot
+                    # drift from the proxy's. The page has no key box any more,
+                    # so on the deployment this is written for the inbound
+                    # header is always absent and the outbound one is ours.
+                    **({"authorization": _auth}
+                       if (_auth := config.gateway_authorization(
+                           request.headers.get("authorization"))) else {}),
                 },
                 content=_multipart(boundary, fields, filename=str(filename),
                                    chunks=upstream()),

@@ -1,4 +1,11 @@
-"""The page, the forwarding table, the key check and the upload ceiling."""
+"""The page, the forwarding table, the key check and the upload ceiling.
+
+On the key: this service used to forward a credential the BROWSER held and add
+none of its own. It now adds UI_GATEWAY_API_KEY when that is set, and the tests
+below are split accordingly — the ones with no `UI_GATEWAY_API_KEY` in their
+environment are there to prove the old behaviour is untouched when it is unset,
+which is the deployment this repository ships.
+"""
 
 from __future__ import annotations
 
@@ -13,8 +20,9 @@ def test_the_page_is_served_and_needs_no_key(client):
     response = api.get("/ui")
     assert response.status_code == 200
     assert "<title>ai-voice</title>" in response.text
-    # The page is static markup with no data in it, so it is public. Every XHR
-    # it makes carries the key from the box on it.
+    # The page is static markup with no data and no credential in it, so it is
+    # public. Every XHR it makes goes back to this origin, and this process is
+    # what puts a key on the ones that leave it.
     assert "connect-src 'self'" in response.headers["content-security-policy"]
 
 
@@ -122,3 +130,151 @@ def test_health_is_unauthenticated_and_200_even_when_the_gateway_is_down(client)
     # why. Read `status`, not the code.
     assert body["status"] == "degraded"
     assert body["ui"] == "ok"
+
+
+# ------------------------------------------ the key this container holds --
+#
+# The page has no key box any more. These cover the header this service adds in
+# its place, and the property that matters most: with UI_GATEWAY_API_KEY unset,
+# nothing above this line changes.
+
+
+def test_the_container_key_is_added_to_a_proxied_request(client):
+    """The browser sends no Authorization at all now, so this is the only one.
+
+    Without it every proxied route would be an anonymous request and the whole
+    page would be 401 on any deployment with GATEWAY_API_KEYS set.
+    """
+    api, gateway, _ = client(UI_GATEWAY_API_KEY="sk-container")
+    gateway.keys = ("sk-container",)
+    assert api.get("/voices").status_code == 200
+    assert gateway.seen[-1].headers["authorization"] == "Bearer sk-container"
+
+
+def test_a_caller_cannot_substitute_their_own_key(client):
+    """Ours replaces theirs; it does not join it.
+
+    HTTP allows a field name to repeat, so appending would put two
+    Authorization headers on the wire and leave the gateway authenticating
+    whichever one it read first — which is the caller's.
+    """
+    api, gateway, _ = client(UI_GATEWAY_API_KEY="sk-container")
+    gateway.keys = ("sk-container",)
+    response = api.get("/voices", headers={"Authorization": "Bearer sk-theirs"})
+    assert response.status_code == 200
+    sent = gateway.seen[-1].headers.get_list("authorization")
+    assert sent == ["Bearer sk-container"], sent
+
+
+def test_nothing_is_added_when_the_variable_is_unset(client):
+    """The shipped deployment, and it must behave exactly as it always has."""
+    api, gateway, _ = client()
+    assert api.get("/voices").status_code == 200
+    assert "authorization" not in gateway.seen[-1].headers
+
+
+def test_our_own_routes_are_checked_with_the_container_key(client):
+    """/ui/* spawns yt-dlp and writes files, and the caller presents nothing.
+
+    The check is still the gateway's answer to GET /v1/models; what changed is
+    whose credential is on it.
+    """
+    api, gateway, _ = client(UI_GATEWAY_API_KEY="sk-container")
+    gateway.keys = ("sk-container",)
+    response = api.post("/ui/abandon", json={"token": "https://example.com/x"})
+    assert response.status_code == 200
+    probe = [r for r in gateway.seen if r.url.path == "/v1/models"][-1]
+    assert probe.headers["authorization"] == "Bearer sk-container"
+
+
+def test_a_refused_container_key_is_a_503_and_never_a_401(client):
+    """A 401 tells the user to fix a key box that no longer exists.
+
+    UI_GATEWAY_API_KEY not matching GATEWAY_API_KEYS is a deployment fault, and
+    passing the gateway's "Incorrect API key provided" through would send
+    somebody looking for a field to correct it in.
+    """
+    api, gateway, _ = client(UI_GATEWAY_API_KEY="sk-wrong")
+    gateway.keys = ("sk-real",)
+    response = api.post("/ui/abandon", json={"token": "https://example.com/x"})
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "misconfigured_api_key"
+    assert "www-authenticate" not in response.headers
+    assert_four_field_envelope(response)
+
+
+def test_an_ingested_file_is_handed_over_with_the_container_key(client):
+    """The hand-off to the gateway is a request this service builds by hand.
+
+    It copied the caller's header verbatim, so with the key box gone it would
+    have carried nothing at all — and the failure would land as a 401 AFTER the
+    download had already been paid for, which is the worst place in the flow to
+    discover an auth problem.
+    """
+    url = "https://media.example/watch?v=abcdef"
+    api, gateway, tube = client(UI_GATEWAY_API_KEY="sk-container")
+    gateway.keys = ("sk-container",)
+    api.post("/ui/resolve", json={"url": url})
+    api.post("/ui/commit", json={"token": url})
+    tube.finish(url, "A Title #1.opus")
+
+    assert api.post("/ui/fetch", json={"token": url}).status_code == 200
+    sent = [r for r in gateway.seen
+            if r.url.path == "/v1/audio/transcriptions"][-1]
+    assert sent.headers["authorization"] == "Bearer sk-container"
+
+
+# ------------------------------------------- what was taken off the page --
+
+
+def test_the_page_has_no_key_box(client):
+    """It is not a bring-your-own-key tool; the container holds the key."""
+    page = client()[0].get("/ui").text
+    assert 'id="key"' not in page
+    assert 'id="keyshow"' not in page
+    assert 'store.get("key"' not in page, "a key is still kept in localStorage"
+
+
+def test_the_page_never_attaches_an_authorization_header(client):
+    """Every XHR goes through api(), which is now a bare fetch.
+
+    A header set here would be a credential typed into a browser, which is the
+    thing that was removed.
+    """
+    page = client()[0].get("/ui").text
+    assert "Bearer" not in page.replace("WWW-Authenticate", ""), (
+        "the page is building an Authorization header again")
+
+
+def test_the_page_has_no_global_expert_gate(client):
+    """One control per thing hidden. The <details> panels are the control.
+
+    The checkbox was a second, global way to hide the same three panels, so a
+    setting could be out of sight for two unrelated reasons and finding it
+    meant reasoning about both.
+    """
+    page = client()[0].get("/ui").text
+    assert 'id="expert"' not in page
+    assert 'class="expert-only"' not in page
+    assert "body:not(.expert)" not in page
+    assert 'store.get("expert"' not in page
+
+
+def test_the_three_expert_panels_are_still_on_the_page_and_openable(client):
+    """Removing the gate must not remove the panels behind it."""
+    page = client()[0].get("/ui").text
+    for panel in ("stt-expert", "tts-expert-fast", "tts-expert-clone"):
+        assert f'<details id="{panel}">' in page, f"{panel} is gone"
+
+
+def test_the_two_engine_panels_still_swap_with_the_chosen_voice(client):
+    """This is per-ENGINE, not per-expertise, and it is not what was removed.
+
+    onVoiceChange() shows Kokoro's panel for a Kokoro voice and Chatterbox's
+    for a clone. Deleting the global gate must leave that alone, or both panels
+    appear at once and half the controls on screen belong to a model that is
+    not going to run.
+    """
+    page = client()[0].get("/ui").text
+    assert '$("tts-expert-fast").hidden = clone;' in page
+    assert '$("tts-expert-clone").hidden = !clone;' in page
