@@ -379,12 +379,6 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
       <div id="codeswitch"></div>
 
       <div class="row" style="margin-top:12px">
-        <div>
-          <label for="voice">Voice</label>
-          <select id="voice"></select>
-          <div class="hint" id="voicehint"></div>
-          <button class="small link" id="delvoice" type="button" hidden>Remove this cloned voice</button>
-        </div>
         <!-- LANGUAGE IS ITS OWN CONTROL, and used not to be. It was carried by
              the voice's first letter (a→en-us, p→pt-br, z→cmn …) and was
              overridable only from the Expert panel, which put two unrelated
@@ -400,6 +394,12 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
           <label for="lang">Language</label>
           <select id="lang"></select>
           <div class="hint" id="langhint"></div>
+<div>
+          <label for="voice">Voice</label>
+          <select id="voice"></select>
+          <div class="hint" id="voicehint"></div>
+          <button class="small link" id="delvoice" type="button" hidden>Remove this cloned voice</button>
+        </div>
         </div>
         <div>
           <!-- SYNTHESIS speed, not playback speed. Renamed the day a playback
@@ -1837,22 +1837,57 @@ function toEngineLang(iso, kind, voiceName) {
 /* Rebuilt on every engine change, with the selection carried across when the
    new engine also speaks it. Switching from a Kokoro voice to a clone should
    not silently drop a deliberate choice of Portuguese back to auto. */
+/* LANGUAGE IS THE FIRST QUESTION, and it narrows the second one.
+   It used to be built FROM the chosen voice -- pick a voice, and the language
+   list became whatever that voice's engine speaks. That is backwards for the
+   way the decision is actually made: you know what language you want to hear
+   before you know which of 54 voices should read it, and scrolling past every
+   Portuguese voice to reach an English one is the cost of asking in the wrong
+   order.
+
+   So the list is now the UNION of what the two engines speak, built once and
+   independent of the voice, and choosing an entry filters the voice picker
+   below it. Because it no longer depends on the voice, it is also no longer
+   rebuilt on every voice change, which is what used to reset a deliberate
+   choice back to auto whenever the engine changed. */
 function populateLanguages() {
-  const voice = currentVoice();
-  if (voice.kind === "new") return;
-  const list = voice.kind === "clone" ? CHATTERBOX_LANGS : KOKORO_LANGS;
   const select = $("lang");
   const previous = select.value;
+  const seen = new Set();
+  const merged = [];
+  for (const [code, name] of [...KOKORO_LANGS, ...CHATTERBOX_LANGS]) {
+    /* Kokoro's "pt-br" and Chatterbox's "pt" are the same intent spelled two
+       ways. Keyed on the ISO stem so the union carries one Portuguese entry,
+       not two that look like a mistake; toEngineLang turns it back into
+       whichever spelling the chosen engine wants at send time. */
+    const stem = code.split("-")[0];
+    if (seen.has(stem)) continue;
+    seen.add(stem);
+    merged.push([code, name]);
+  }
+  merged.sort((a, b) => a[1].localeCompare(b[1]));
   select.innerHTML = `<option value="auto">Auto-detect</option>` +
-    list.map(([c, name]) => `<option value="${c}">${name} — ${c}</option>`).join("");
-  /* Kokoro's "pt-br" and Chatterbox's "pt" are the same intent spelled two
-     ways, so a straight value carry-over would fall back to auto every time
-     the engine changed. Translate through ISO instead. */
-  const carried = previous && previous !== "auto"
-    ? toEngineLang(previous.split("-")[0], voice.kind, voice.name) : null;
-  select.value = carried && [...select.options].some(o => o.value === carried)
-    ? carried : "auto";
-  refreshLanguage();
+    merged.map(([c, name]) => `<option value="${c}">${esc(name)}</option>`).join("");
+  select.value = previous && [...select.options].some(o => o.value === previous)
+    ? previous : "auto";
+}
+
+/* Which Kokoro voices belong to the chosen language. Auto-detect shows every
+   one of them: with no language chosen there is nothing to filter by, and
+   hiding voices behind a guess about half-typed text would be worse than
+   showing them all. */
+function voicesForLanguage(kokoro, code) {
+  const all = (kokoro && kokoro.voices) || [];
+  if (!code || code === "auto") return all;
+  const stem = code.split("-")[0];
+  /* The service groups the three it knows about; everything else is matched on
+     the name prefix, which is where Kokoro encodes language (a→en-us, b→en-gb,
+     p→pt-br, and the rest). PREFIX is the same map resolvedLanguage uses, so
+     the filter and the code actually sent cannot disagree. */
+  const grouped = { "en-us": kokoro.en_us, "en-gb": kokoro.en_gb,
+                    "pt-br": kokoro.pt_br }[code];
+  if (grouped && grouped.length) return grouped;
+  return all.filter(v => (PREFIX[v[0]] || "").split("-")[0] === stem);
 }
 
 /* The code actually sent, and the reason for it. Returns both so the hint and
@@ -1907,19 +1942,24 @@ async function loadVoices() {
       names.map(n => `<option value="k:${n}">${n}</option>`).join("") + "</optgroup>"
     : "";
 
-  const all = (kokoro && kokoro.voices) || [];
+  const chosenLang = $("lang").value;
+  /* FILTERED BY THE LANGUAGE ABOVE. On auto-detect this is every voice, so the
+     picker is unchanged from before for anyone who never touches the control;
+     choose a language and the 54 become the handful that can speak it. */
+  const all = voicesForLanguage(kokoro, chosenLang);
   const known = new Set([...(kokoro && kokoro.en_us || []),
                          ...(kokoro && kokoro.en_gb || []),
                          ...(kokoro && kokoro.pt_br || [])]);
+  const forLang = (names) => (names || []).filter(n => all.includes(n));
   /* EVERY GROUP NAMES ITS ENGINE. The labels used to say "Instant" and
      "Cloned", which describe the experience and never say which of the two
      models is about to run -- so the two expert panels below, which ARE named
      after the engines, appeared to swap for no visible reason. Speed is what
      you choose on; the engine is what you then need to recognise. */
   let html = "";
-  html += group("Kokoro, instant — English (US)", kokoro && kokoro.en_us);
-  html += group("Kokoro, instant — English (UK)", kokoro && kokoro.en_gb);
-  html += group("Kokoro, instant — Portuguese (Brazil)", kokoro && kokoro.pt_br);
+  html += group("Kokoro, instant — English (US)", forLang(kokoro && kokoro.en_us));
+  html += group("Kokoro, instant — English (UK)", forLang(kokoro && kokoro.en_gb));
+  html += group("Kokoro, instant — Portuguese (Brazil)", forLang(kokoro && kokoro.pt_br));
   html += group("Kokoro, instant — other languages", all.filter(v => !known.has(v)));
 
   /* CHATTERBOX IS ALWAYS HERE, and it used not to be. This group was built
@@ -1933,6 +1973,11 @@ async function loadVoices() {
      THE COST GOES IN THE GROUP HEADER, not in a line that appears after the
      click: someone choosing one of these should see what it costs before they
      choose it, not after. */
+  /* CHATTERBOX IS NOT FILTERED, and that is not an oversight. Its voices are
+     not per-language the way Kokoro's are -- the language is a parameter it
+     takes, so `default` and every clone can read any of the languages in
+     CHATTERBOX_LANGS. Hiding them when a language is chosen would be hiding
+     voices that can do the job. */
   const factor = (1 / rate.clone()).toFixed(0);
   html += `<optgroup label="Chatterbox, slow — about ${factor}× the length of the audio, queued as a job">` +
     `<option value="c:default">default — Chatterbox's own voice, no clip needed</option>` +
@@ -1943,8 +1988,14 @@ async function loadVoices() {
   select.innerHTML = html;
   /* bm_george is TTS_VOICE on this deployment, so it is what the service would
      have picked anyway. */
+  /* Keep the chosen voice if the new language still offers it, so switching
+     languages and back does not lose it. Otherwise take the first voice the
+     language does offer rather than the deployment default, which may well be
+     in the language the user has just switched away from. */
   select.value = previous && [...select.options].some(o => o.value === previous)
-    ? previous : (all.includes("bm_george") ? "k:bm_george" : select.options[0].value);
+    ? previous
+    : (all.includes("bm_george") && (!chosenLang || chosenLang === "auto")
+        ? "k:bm_george" : select.options[0].value);
   onVoiceChange();
 }
 
@@ -1992,7 +2043,14 @@ function onVoiceChange() {
      "default": it is the model's own speaker, there is no file behind it, and
      the delete would 404 on a voice the user cannot break. */
   $("delvoice").hidden = !clone || builtin;
-  populateLanguages();
+  /* populateLanguages() is NOT called here any more. The list used to be built
+     from the chosen voice's engine, so it had to be rebuilt whenever the voice
+     changed; it is now the union of both engines and independent of the voice.
+     Rebuilding a <select> the user may have open, to produce the same options
+     it already had, is work that can only lose focus or a selection.
+     refreshLanguage still runs, because the language SENT does depend on the
+     voice when the choice is auto. */
+  refreshLanguage();
   estimate();
 }
 $("voice").addEventListener("change", onVoiceChange);
@@ -2024,7 +2082,12 @@ $("resetclone").addEventListener("click", () => {
 $("text").addEventListener("input", estimate);
 /* Auto-detect is only auto if it keeps up with the text. */
 $("text").addEventListener("input", refreshLanguage);
-$("lang").addEventListener("change", refreshLanguage);
+/* Choosing a language rebuilds the voices below it. loadVoices() re-reads
+   /voices and /ui/clips, which is two cached requests against this same origin
+   and simpler than keeping a second copy of the lists to filter locally --
+   VOICES already holds them, but the grouping logic lives in loadVoices and
+   duplicating it is how the two would drift. */
+$("lang").addEventListener("change", () => { loadVoices(); refreshLanguage(); });
 
 function estimate() {
   const text = $("text").value;
@@ -2693,6 +2756,12 @@ $("saveclip").addEventListener("click", async () => {
 
   await poll();
   setInterval(poll, 30000);
+  /* BEFORE loadVoices, and once only. The voice list is filtered by whatever
+     $("lang") holds, so the language options have to exist before the first
+     filter runs -- otherwise the value read is "" and the fallback shows every
+     voice, which happens to be right for auto-detect and would be wrong the
+     moment the default changed. */
+  populateLanguages();
   await loadVoices();
   if (!CONFIG.cloning) {
     /* Said once, plainly, rather than letting a saved voice vanish on the next

@@ -209,3 +209,55 @@ def test_the_engine_is_named_on_both_paths():
     assert "<strong>Chatterbox</strong>" in hint
     assert "<strong>Kokoro</strong>" in hint, (
         "the fast path never said Kokoro while its expert panel was titled so")
+
+
+# ---------------------------------------------- language before voice --
+
+
+def test_language_comes_before_voice_in_the_markup():
+    """You know what language you want before you know which of 54 voices.
+
+    Asking in the other order means scrolling past every Portuguese voice to
+    reach an English one.
+    """
+    assert HTML.index('for="lang"') < HTML.index('for="voice"')
+
+
+def test_the_language_list_no_longer_depends_on_the_voice():
+    """It used to be built FROM the chosen voice's engine, so it was rebuilt on
+    every voice change -- which reset a deliberate choice back to auto whenever
+    the engine changed, and rebuilt a <select> the user might have open."""
+    start = HTML.index("function populateLanguages()")
+    body = HTML[start:HTML.index("function voicesForLanguage")]
+    assert "currentVoice()" not in body, "the language list still reads the voice"
+    assert "KOKORO_LANGS" in body and "CHATTERBOX_LANGS" in body, \
+        "the list should be the union of both engines"
+
+    change = HTML.index("function onVoiceChange()")
+    tail = HTML[change:HTML.index('$("voice").addEventListener')]
+    code = re.sub(r"/\*.*?\*/", "", tail, flags=re.S)
+    assert "populateLanguages()" not in code, \
+        "onVoiceChange must not rebuild a list that no longer depends on it"
+
+
+def test_choosing_a_language_rebuilds_the_voice_list():
+    handler = HTML[HTML.index('$("lang").addEventListener'):]
+    assert "loadVoices()" in handler[:200], \
+        "a language change must re-filter the voices below it"
+
+
+def test_chatterbox_voices_are_not_filtered_by_language():
+    """Its voices are not per-language the way Kokoro's are: the language is a
+    parameter it takes, so `default` and every clone can read any of them.
+    Filtering them out would hide voices that can do the job."""
+    start = HTML.index("async function loadVoices()")
+    body = HTML[start:HTML.index("function currentVoice()")]
+    chatterbox = body[body.index("Chatterbox, slow"):]
+    assert "forLang(" not in chatterbox[:400]
+
+
+def test_populate_languages_runs_before_the_first_voice_load():
+    """The voice list is filtered by $("lang"), so the options must exist
+    before the first filter runs."""
+    boot = HTML[HTML.index("  await poll();"):]
+    assert boot.index("populateLanguages()") < boot.index("await loadVoices()")
