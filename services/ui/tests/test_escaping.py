@@ -261,3 +261,58 @@ def test_populate_languages_runs_before_the_first_voice_load():
     before the first filter runs."""
     boot = HTML[HTML.index("  await poll();"):]
     assert boot.index("populateLanguages()") < boot.index("await loadVoices()")
+
+
+# --------------------------------------------------------- auto-detect --
+
+
+def _stopwords() -> dict[str, set[str]]:
+    """The lists as they exist in the page, parsed rather than duplicated."""
+    start = HTML.index("const STOPWORDS = {")
+    body = HTML[start:HTML.index("};", start)]
+    out = {}
+    for code, words in re.findall(r'(\w+):"([^"]*)"', body):
+        out[code] = set(words.split())
+    return out
+
+
+def test_an_ordinary_english_sentence_reaches_the_two_hit_threshold():
+    """It did not, and auto-detect said "not enough text to tell yet".
+
+    Each list held sixteen words, and detectLanguage needs two hits to commit.
+    "hello there, are u fine?" scored ONE -- only `are` was in the English list.
+    The gate was never the length of the text; it was the size of the list.
+    """
+    stop = _stopwords()
+    for sentence in ("hello there are u fine",
+                     "how are you doing today my friend",
+                     "can you tell me what time it is"):
+        hits = sum(1 for w in sentence.split() if w in stop["en"])
+        assert hits >= 2, f"{sentence!r} scores {hits}, needs 2"
+
+
+def test_portuguese_still_wins_on_portuguese():
+    stop = _stopwords()
+    for sentence in ("oi tudo bem com você hoje",
+                     "eu preciso que você faça isso agora"):
+        pt = sum(1 for w in sentence.split() if w in stop["pt"])
+        en = sum(1 for w in sentence.split() if w in stop["en"])
+        assert pt >= 2 and pt > en, f"{sentence!r}: pt={pt} en={en}"
+
+
+def test_no_word_appears_in_both_english_and_portuguese():
+    """A shared word adds a hit to both and moves nothing, and the near-tie
+    rule then refuses to answer at all -- so it is worse than no word. These
+    two are the pair that matters here: the user code-switches between them."""
+    stop = _stopwords()
+    shared = stop["en"] & stop["pt"]
+    assert not shared, f"shared between en and pt: {sorted(shared)}"
+
+
+def test_the_scandinavian_lists_stay_indistinguishable_on_purpose():
+    """Danish, Norwegian and Swedish share most function words. The tie rule
+    returning null for a short sample is the correct answer, not a gap."""
+    stop = _stopwords()
+    assert len(stop["da"] & stop["no"]) > 5, \
+        "these were deliberately similar; a rewrite that separated them is " \
+        "claiming a distinction a short sample cannot support"

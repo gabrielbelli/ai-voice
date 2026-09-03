@@ -1777,22 +1777,41 @@ const SCRIPTS = [[/[぀-ヿ]/, "ja"], [/[가-힯]/, "ko"],
    the few words that differ. On a short Scandinavian sample the pick between
    them is close to a coin toss. That is why an unconfident result falls back
    rather than asserting, and why the picker is always there to overrule it. */
+/* WHY THESE LISTS ARE LONGER THAN THEY WERE. Each language had sixteen words,
+   and sixteen is not enough to reach the two-hit threshold on a real sentence:
+   "hello there, are u fine?" scored ONE -- only `are` was in the English list
+   -- and "how are you doing today my friend" also scored one, so auto-detect
+   answered "not enough text to tell yet" for perfectly ordinary English. The
+   gate was never the text length; it was the vocabulary.
+
+   Chosen to be DISCRIMINATING rather than merely frequent, which is why some
+   very common words are deliberately absent. "a" is an English article and a
+   Portuguese, Spanish and French one. "no" is English and Spanish. "do" is
+   English and Portuguese ("of the"). "me" is four of these languages at once.
+   A word in two lists adds a hit to both and moves nothing, and the near-tie
+   rule below then refuses to answer at all -- so a shared word is worse than
+   no word.
+
+   The Scandinavian trio stays deliberately similar. Danish, Norwegian and
+   Swedish share most function words, so a short sample genuinely cannot tell
+   them apart, and the tie rule returning null there is the correct answer
+   rather than a gap to paper over. */
 const STOPWORDS = {
-  en:"the and of to in is that it for as with was on are this be at from",
-  pt:"que de não uma com para são está você isso mais como por ele foi",
-  es:"que de no una con para los las está más pero como por ese fue",
-  fr:"que de ne une avec pour les des est plus mais comme par elle été",
-  it:"che di non una con per gli sono più ma anche come quando essere",
-  de:"der die das und nicht ein mit für ist auch aber wenn sich noch",
-  nl:"de het een van niet met voor zijn maar ook als dat door nog",
-  pl:"nie jest się na do że tego przez oraz jako które być tylko",
-  tr:"bir ve bu için ile değil daha çok olarak gibi ama sonra",
-  sv:"och att det som för inte den med han men också eller från",
-  da:"og at det som for ikke den med han men også eller fra",
-  no:"og at det som for ikke den med han men også eller fra",
-  fi:"ja on ei että se kuin mutta myös vain kun niin ollut",
-  ms:"yang dan untuk dengan tidak ini itu adalah akan pada dari",
-  sw:"na ya kwa ni wa katika hii kwamba yake wake ambao",
+  en:"the and of to in is that it for as with was on are this be at from i you we they he she have has had what when where who why how there here these those but or so if then than will would can could should about into out up down all any my your our their him them us been being were am just like know get got very more most other only also because after before over under again still even much many going want need think going should",
+  pt:"que de não uma com para são está você isso mais como por ele foi os um uns umas ou se mas quando onde quem porque muito também já ainda sem sobre entre depois antes cada todo toda todos todas seu sua meu minha nós eles elas tem ter fazer pode vai estão ser sim bem aqui agora mesmo pelo pela dos das ao num numa este esta esse essa aquele tudo então só coisa fica ficar",
+  es:"que de no una con para los las está más pero como por ese fue un unos unas del al se pero cuando donde quien porque muy también ya todavía sin sobre entre después antes cada todo toda todos todas su tu mi nosotros ellos ellas tiene tener hacer puede va están ser sí bien aquí ahora mismo esto eso aquel",
+  fr:"que de ne une avec pour les des est plus mais comme par elle été un du au aux se quand quel qui parce très aussi déjà encore sans sur entre après avant chaque tout toute tous toutes son sa mon ma nous ils elles avoir faire peut vont sont être oui bien ici maintenant même cela je tu vous on ai as ont fait dit pas leur cette ces alors donc comment pourquoi où bonjour merci",
+  it:"che di non una con per gli sono più ma anche come quando essere il lo la le un uno del al si dove chi perché molto già ancora senza sopra tra dopo prima ogni tutto tutta tutti tutte suo mio noi loro hanno fare può vanno sì bene qui adesso stesso questo quello",
+  de:"der die das und nicht ein mit für ist auch aber wenn sich noch den dem des eine einen einem er sie es wir ihr haben sein werden kann muss soll wird sind war waren sehr schon nur oder als wie was wer wo warum hier jetzt dann dass",
+  nl:"de het een van niet met voor zijn maar ook als dat door nog ik jij wij zij hij haar hebben heeft had kan moet zal wordt worden zeer alleen of hoe wat wie waar waarom hier nu dan omdat",
+  pl:"nie jest się na do że tego przez oraz jako które być tylko jak co kto gdzie dlaczego bardzo już jeszcze bez nad pod po przed każdy wszystko jego jej nasz ich mają robić może idą tak dobrze tutaj teraz",
+  tr:"bir ve bu için ile değil daha çok olarak gibi ama sonra ben sen biz onlar var yok olan olduğu şey kadar zaman şimdi burada nasıl neden kim nerede evet iyi",
+  sv:"och att det som för inte den med han men också eller från jag du vi de hon har hade kan ska skulle blir mycket bara hur vad vem var varför här nu",
+  da:"og at det som for ikke den med han men også eller fra jeg du vi de hun har havde kan skal ville bliver meget bare hvordan hvad hvem hvor hvorfor her nu",
+  no:"og at det som for ikke den med han men også eller fra jeg du vi de hun har hadde kan skal ville blir mye bare hvordan hva hvem hvor hvorfor her nå",
+  fi:"ja on ei että se kuin mutta myös vain kun niin ollut minä sinä me he hän oli ovat voi pitää tulee hyvin miten mitä kuka missä miksi täällä nyt",
+  ms:"yang dan untuk dengan tidak ini itu adalah akan pada dari saya awak kami mereka dia ada boleh mesti sangat hanya bagaimana apa siapa mana mengapa sini sekarang",
+  sw:"na ya kwa ni wa katika hii kwamba yake wake ambao mimi wewe sisi wao yeye ana anaweza lazima sana tu vipi nini nani wapi kwanini hapa sasa",
 };
 const STOPSET = Object.fromEntries(
   Object.entries(STOPWORDS).map(([k, v]) => [k, new Set(v.split(" "))]));
