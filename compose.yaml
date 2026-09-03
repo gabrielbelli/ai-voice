@@ -91,6 +91,21 @@ services:
       GATEWAY_STT_URL: http://stt-stack:8000
       GATEWAY_TTS_URL: http://tts-stack:8001
       GATEWAY_TTS_LONG_URL: http://tts-long:8002
+      GATEWAY_UI_URL: http://voice-ui:8090
+
+      # HTTPS, with the certificate TrueNAS already manages for this host. Not
+      # self-signed: a self-signed certificate is one every client is taught to
+      # skip verification for, and a client taught to skip it keeps skipping it
+      # against the real one too. This is the wildcard already on the box, so
+      # https://orko.gabrielbelli.com:30080 validates with no flag anywhere.
+      #
+      # The key is 0400 root:root and stays that way -- loosening it would
+      # weaken a file every service on this host shares. voice-entrypoint.sh
+      # copies the pair to a private directory owned by uid 1000 while it is
+      # still root, on every start, so a RENEWED certificate is picked up by a
+      # restart rather than going stale in a copy someone made by hand.
+      GATEWAY_TLS_CERT: /certs/cert-gabrielbelli_com.crt
+      GATEWAY_TLS_KEY: /certs/cert-gabrielbelli_com.key
       # GATEWAY_API_KEYS is deliberately NOT set here, because inventing a key
       # in a file that gets deployed is how a placeholder becomes production
       # credentials. Unset means authentication is OFF and every request is
@@ -106,6 +121,10 @@ services:
     # audio responses stream through, and the single buffered body is
     # /v1/audio/speech's JSON, which is kilobytes. The image itself is 283 MB
     # with no model and no torch in it.
+    volumes:
+      # Read-only, and the whole directory rather than two file mounts so a
+      # renewal that replaces the files is seen. TrueNAS owns this path.
+      - /etc/certificates:/certs:ro
     cpus: 2
     mem_limit: 512m
     healthcheck:
@@ -114,7 +133,10 @@ services:
       # the body instead. A 503 here because tts-long is still loading would
       # have the orchestrator restart the gateway, which is the one container
       # that must stay up to report the outage.
-      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      # https now, and verification is deliberately off for THIS probe only:
+      # it dials 127.0.0.1, which no certificate for a hostname can match. The
+      # check is "is this process answering", not "is the certificate right".
+      test: ["CMD", "python", "-c", "import ssl,urllib.request;urllib.request.urlopen('https://127.0.0.1:8080/health',context=ssl._create_unverified_context())"]
       interval: 60s
       timeout: 30s
       retries: 3
@@ -265,7 +287,13 @@ services:
     environment:
       # A service name, on the app-internal network. The three backends are NOT
       # named here and must not be: this container talks to the gateway.
-      UI_GATEWAY_URL: http://voice-gateway:8080
+      # https, because the gateway serves only that now. See
+      # config.GATEWAY_VERIFY for why verification is off on THIS hop and
+      # nowhere else: the name `voice-gateway` is a compose service on this
+      # app's bridge network, and no certificate for a public hostname can
+      # match it. The published port still presents the real certificate.
+      UI_GATEWAY_URL: https://voice-gateway:8080
+      UI_GATEWAY_VERIFY: "0"
 
       # THE KEY THIS CONTAINER PRESENTS TO THE GATEWAY. Set it to one of the
       # values in GATEWAY_API_KEYS above.

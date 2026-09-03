@@ -66,6 +66,36 @@ if [ -n "$CERT" ] || [ -n "$KEY" ]; then
         exit 1
     fi
 
+    # A KEY THE CONTAINER CANNOT READ IS THE NORMAL CASE, not an error to
+    # report. TrueNAS keeps its certificates in /etc/certificates with the key
+    # 0400 root:root, which is correct: loosening it so a container can read it
+    # would weaken the file every service on the host shares.
+    #
+    # So when we are root and the target uid cannot read the key, copy the pair
+    # somewhere private and hand uvicorn that instead. Copied on every start
+    # rather than once by hand, so a renewed certificate is picked up by a
+    # restart -- a copy made manually goes stale silently, and the failure
+    # arrives as an expired certificate months later.
+    #
+    # Only when the ORIGINAL is unreadable, so a deployment that already mounts
+    # a readable key keeps using it untouched.
+    if [ "$(id -u)" = "0" ] && [ -r "$KEY" ] \
+       && ! setpriv "--reuid=$UID_TARGET" "--regid=$GID_TARGET" \
+                    --init-groups test -r "$KEY" 2>/dev/null; then
+        private="${VOICE_TLS_PRIVATE_DIR:-/run/voice-tls}"
+        mkdir -p "$private" || exit 1
+        cp "$CERT" "$private/tls.crt" || exit 1
+        cp "$KEY" "$private/tls.key" || exit 1
+        chown "$UID_TARGET:$GID_TARGET" "$private/tls.crt" "$private/tls.key" || exit 1
+        chmod 0400 "$private/tls.key" || exit 1
+        chmod 0444 "$private/tls.crt" || exit 1
+        chmod 0500 "$private" || exit 1
+        chown "$UID_TARGET:$GID_TARGET" "$private" || exit 1
+        echo "entrypoint: $KEY is root-only; using a private copy in $private"
+        CERT="$private/tls.crt"
+        KEY="$private/tls.key"
+    fi
+
     for f in "$CERT" "$KEY"; do
         if [ "$(id -u)" = "0" ]; then
             # Tested as the target uid, not as root: a key mounted 0600

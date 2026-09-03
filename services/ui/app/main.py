@@ -152,6 +152,10 @@ def new_client() -> httpx.AsyncClient:
     """
     return httpx.AsyncClient(
         timeout=httpx.Timeout(30.0, connect=5.0),
+        # See config.GATEWAY_VERIFY. False only for the container-to-container
+        # hop, where the gateway is reached by a compose service name that no
+        # public certificate can carry.
+        verify=config.GATEWAY_VERIFY,
         # A redirect from the gateway means something about the gateway's
         # routing and following it here would hide it.
         follow_redirects=False)

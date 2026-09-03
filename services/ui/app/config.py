@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 
 __all__ = [
-    "GATEWAY_URL", "GATEWAY_API_KEY", "gateway_authorization",
+    "GATEWAY_URL", "GATEWAY_VERIFY", "GATEWAY_API_KEY", "gateway_authorization",
     "METUBE_URL", "METUBE_FOLDER", "METUBE_FORMAT",
     "PROBE", "PROBE_TIMEOUT", "MAX_UPLOAD_BYTES", "CONFIRM_SECONDS",
     "CONFIRM_BYTES", "STT_RTF_SEED", "STT_BUDGET_SECONDS", "VOICE_DIR",
@@ -39,6 +39,25 @@ def flag(name: str, default: bool) -> bool:
 # laptop with all five containers and fail on the NAS, which is the exact bug
 # the port deletion was made to prevent.
 GATEWAY_URL = os.getenv("UI_GATEWAY_URL", "http://voice-gateway:8080").rstrip("/")
+
+# WHETHER TO VERIFY THE GATEWAY'S CERTIFICATE ON THE INTERNAL HOP.
+#
+# Default true, and it must stay true for anything crossing a network. It is
+# set to 0 in compose for one specific reason: once the gateway serves HTTPS it
+# serves ONLY HTTPS, including to this container, and this container reaches it
+# as `https://voice-gateway:8080` -- a compose service name, on the app's own
+# bridge network. No certificate for a public hostname can match that name, and
+# no certificate authority will issue one that does.
+#
+# The alternatives were considered and are worse: a second listener on plain
+# HTTP would be the second door this whole change removed, and a private CA
+# with `voice-gateway` in its SAN is a certificate authority to maintain,
+# renew and distribute for one hop between two processes on one host.
+#
+# What this does NOT do is weaken anything a client sees. The published port
+# still presents the real wildcard certificate and still validates. This is the
+# hop that never leaves the box.
+GATEWAY_VERIFY = flag("UI_GATEWAY_VERIFY", True)
 
 # THE KEY THIS SERVICE PRESENTS TO THE GATEWAY, and the reason the page no
 # longer has a box for one.
