@@ -214,13 +214,27 @@ class MeTube:
         except MeTubeError:
             return False
 
-    def audio_url(self, filename: str) -> str:
+    def audio_url(self, filename: str, folder: str = "") -> str:
         """The HTTP URL of a finished file.
 
-        `filename` comes from /history and is never constructed here. quote()
-        with a permissive safe set because MeTube's own static route serves the
-        path as written and a title with a slash in it has already been
-        sanitised on its side; percent-encoding the rest is what keeps a title
-        containing "#", "?" or a space from truncating the URL.
+        FOLDER IS PART OF THE PATH, and leaving it out was a 404 on every
+        download this service has ever started. compose.yaml sets a custom
+        folder so ingest files land in one place rather than in the middle of
+        the user's music library, MeTube writes them to that subdirectory and
+        records it in the entry's `folder` field -- and the URL built here
+        omitted it, so a finished file was fetched from
+        /audio_download/<name> when it was actually at
+        /audio_download/stt-ingest/<name>. Every transcription of a link failed
+        with a 500 whose cause was an httpx 404 three frames down.
+
+        Both `filename` and `folder` come from /history and are never
+        constructed here. quote() with a permissive safe set because MeTube's
+        own static route serves the path as written and a title with a slash in
+        it has already been sanitised on its side; percent-encoding the rest is
+        what keeps a title containing "#", "?" or a space from truncating the
+        URL. The separator is added rather than quoted, so an empty folder --
+        the default deployment, where files land at the root -- still produces
+        the path it always did.
         """
-        return f"{self.base}/audio_download/{quote(filename, safe='/')}"
+        prefix = f"{quote(folder.strip('/'), safe='/')}/" if folder else ""
+        return f"{self.base}/audio_download/{prefix}{quote(filename, safe='/')}"

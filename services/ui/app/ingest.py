@@ -358,7 +358,7 @@ async def fetch(request: Request, body: TokenRequest) -> Response:
     # NEVER PREDICTED. `filename` is OUTPUT_TEMPLATE sanitised and byte-trimmed
     # by MeTube; reconstructing it from the title is wrong for every title with
     # a slash, a colon or a non-BMP character in it.
-    source = client.audio_url(str(filename))
+    source = client.audio_url(str(filename), str(entry.get("folder") or ""))
     http: httpx.AsyncClient = request.app.state.client
     query = dict(request.query_params)
     # ALLOWLISTED, because this string is interpolated into a multipart frame

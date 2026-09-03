@@ -24,6 +24,7 @@ import json
 import socket
 
 import httpx
+from urllib.parse import unquote
 import pytest
 from fastapi.testclient import TestClient
 
@@ -75,6 +76,9 @@ class FakeMeTube:
         self.queue: dict[str, dict] = {}
         self.done: dict[str, dict] = {}
         self.refuse: str | None = None
+        # What finish() last wrote, so the static route can serve exactly it.
+        self.filename: str = ""
+        self.folder: str = ""
         # An OUTAGE rather than a refusal: MeTube unreachable, which must stay
         # a 502 now that a refusal is a 400. See
         # test_an_unreachable_metube_is_still_a_502.
@@ -92,7 +96,18 @@ class FakeMeTube:
                     "queue": list(self.queue.values()),
                     "done": list(self.done.values())})
             if path.startswith("/audio_download/"):
-                return httpx.Response(200, content=b"RIFFfake-audio-bytes")
+                # SERVES ONE EXACT PATH, and 404s on anything else, because the
+                # real one does. This used to answer 200 to any path under
+                # /audio_download/, which meant the suite could not tell a
+                # correct URL from one missing its folder segment -- and that
+                # is exactly the bug that shipped: every real download 404'd
+                # while 82 tests passed. A fixture more permissive than the
+                # thing it stands in for tests nothing.
+                want = "/audio_download/" + "/".join(
+                    part for part in (self.folder, self.filename) if part)
+                if unquote(path) == want:
+                    return httpx.Response(200, content=b"RIFFfake-audio-bytes")
+                return httpx.Response(404, text=f"not here; the file is at {want}")
             return httpx.Response(404)
 
         body = json.loads(request.content or b"{}")
@@ -133,12 +148,22 @@ class FakeMeTube:
             return httpx.Response(200, json={"status": "ok"})
         return httpx.Response(404)
 
-    def finish(self, url: str, filename: str = "A Title.opus") -> None:
+    def finish(self, url: str, filename: str = "A Title.opus",
+               folder: str = "stt-ingest") -> None:
+        """Finish a download.
+
+        `folder` defaults to the value compose.yaml actually deploys rather
+        than to "", because the default should be the deployed shape: MeTube
+        writes into that subdirectory and records it, and a fixture that
+        defaulted to no folder is why the missing path segment went unnoticed.
+        """
         self.queue.pop(url, None)
         self.pending.pop(url, None)
+        self.filename = filename
+        self.folder = folder
         self.done[url] = {"id": "short-id", "url": url, "title": "A Title",
                           "status": "finished", "filename": filename,
-                          "size": 1234, "percent": 100}
+                          "folder": folder, "size": 1234, "percent": 100}
 
 
 class Bytes(httpx.AsyncByteStream):

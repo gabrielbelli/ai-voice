@@ -249,3 +249,39 @@ def test_a_job_audio_path_is_forwarded_whole(client):
     assert gateway.seen[-1].url.path == "/jobs/abc-123/audio"
     api.get("/jobs/abc-123")
     assert gateway.seen[-1].url.path == "/jobs/abc-123"
+
+
+def test_the_download_url_carries_the_folder_metube_put_the_file_in():
+    """Omitting it 404'd every real download while the suite stayed green.
+
+    compose.yaml sets a folder so ingest files land in one place rather than in
+    the middle of the user's music library. MeTube writes them there and records
+    it in the entry's `folder`; the URL built from that entry dropped it, so the
+    file was fetched from /audio_download/<name> when it was at
+    /audio_download/stt-ingest/<name>. The user saw "Transcription failed: 500
+    Internal Server Error" and the cause was an httpx 404 three frames down.
+    """
+    from app.metube import MeTube
+
+    client = MeTube(None, base="http://metube.test")
+    assert client.audio_url("A Title.opus", "stt-ingest") == (
+        "http://metube.test/audio_download/stt-ingest/A%20Title.opus")
+
+
+def test_no_folder_still_produces_the_bare_path():
+    """The default deployment writes to the root, and must keep working."""
+    from app.metube import MeTube
+
+    client = MeTube(None, base="http://metube.test")
+    assert client.audio_url("A Title.opus", "") == (
+        "http://metube.test/audio_download/A%20Title.opus")
+    assert client.audio_url("A Title.opus") == (
+        "http://metube.test/audio_download/A%20Title.opus")
+
+
+def test_a_folder_with_odd_characters_is_encoded_not_broken():
+    from app.metube import MeTube
+
+    client = MeTube(None, base="http://metube.test")
+    got = client.audio_url("x.opus", "my ingest")
+    assert got == "http://metube.test/audio_download/my%20ingest/x.opus"
