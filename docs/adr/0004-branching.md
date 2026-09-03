@@ -1,83 +1,81 @@
-# ADR 0004 — Work happens on branches; `main` is not a scratchpad
+# ADR 0004 — Two long-lived branches: `prerelease` is where work happens, `main` is what was validated
 
 **Status:** accepted
 **Date:** 2026-09-03
 
 ## Decision
 
-Work goes on a branch and reaches `main` as a reviewed unit. `main` is not
-where a feature is figured out.
+Two branches, both long-lived. No branch per task.
+
+| branch | holds | publishes |
+|---|---|---|
+| `prerelease` | day-to-day work, committed directly | `:pre`, `:pre-<sha>` |
+| `main` | versions validated on real hardware | `:latest`, `:main-<sha>` |
+
+A topic branch is available when a change genuinely needs isolating — a risky
+refactor, or two people on one file — but it is the exception, not the routine.
+Most work is a commit on `prerelease`.
+
+## Why this shape rather than a branch per task
+
+Because the release boundary already existed and the *names* were the problem.
+
+The remote has always had a `prerelease` branch that publishes `:pre` and never
+`:latest`, so pulling the default tag cannot pick up an unvalidated build. What
+was confusing is that the local branch feeding it was called `main`:
 
 ```
-feat/<thing>     a feature or a fix
-docs/<thing>     documentation and ADRs, when they stand alone
-wip/<thing>      unfinished work parked so an interrupted session survives
+git push origin main:prerelease        # local main IS remote prerelease
 ```
 
-## Why, from what actually happened
+So "main" meant two different things depending on which side of the remote you
+were reading, and `main` locally was simultaneously the working branch and the
+name of the validated one. Renaming the local branch to `prerelease` costs
+nothing and removes the ambiguity entirely.
 
-The web UI, its five follow-up fixes and four ADRs all landed straight on
-`main`, and two of those commits exist only because the previous one was wrong:
+A branch per task was tried for about an hour and was more ceremony than this
+repository needs. The problem it was reaching for is real, but it is not
+solved by branching everything.
 
-- a paste handler that pasted twice, fixed the commit after it shipped
-- a download URL missing its folder, fixed the commit after that
-- a deploy that raced CI and ran the *previous* image, so a fix already on
-  `main` was reported as unfixed
+## The problem that IS real, and what actually fixes it
 
-That is a normal amount of back-and-forth for a feature being built live. It is
-not a good permanent record. On a branch it is one merge; on `main` it is the
-history everyone reads.
+Two sessions edited `services/ui/app/static/ui.html` at the same time without
+either knowing about the other. It surfaced only because the user mentioned it
+in passing. The 12 hunks of one change and 38 of the other could not afterwards
+be separated — neither a plain nor a three-way apply would land — so they
+shipped as a single commit describing both.
 
-There is a second, sharper reason. Two sessions edited
-`services/ui/app/static/ui.html` at the same time without either knowing about
-the other, and the collision was found only because the user mentioned it. Two
-branches would have made that a merge with a conflict — visible, mechanical,
-and impossible to miss — instead of two sets of uncommitted changes silently
-interleaved in one working tree.
+Branching every task would have caught that as a merge conflict. So would the
+cheaper habit:
 
-## How it maps onto the release layout, which is unusual here
+> **Before dispatching work into this repository, check whether the working
+> tree is already dirty, and check again before committing.**
 
-The remote has **no `main`**. Local `main` publishes to the remote's
-`prerelease` branch:
-
-```
-git push origin main:prerelease
-```
-
-That is deliberate and predates this ADR: `prerelease` publishes images tagged
-`:pre` and never `:latest`, so pulling the default tag cannot pick up an
-unvalidated build. The remote's `main` is reserved for versions that have been
-validated on real hardware.
-
-So the flow is:
-
-```
-feat/x  ->  main (local)  ->  origin/prerelease  ->  :pre images  ->  orko
-                                                        |
-                                            validated -> origin/main -> :latest
-```
-
-CI runs on `prerelease` and on pull requests, so a branch pushed as a PR is
-built and tested without publishing anything.
+`git status` would have shown it at any point. Use a topic branch when two
+writers are actually expected; do not pay for that insurance on every commit.
 
 ## Rules
 
-1. **Anything more than a one-line fix starts on a branch.** The exception is a
-   correction to something already on `main` that would otherwise leave it
-   broken — a green tree matters more than a tidy one.
-2. **A branch is merged, not rebased away.** The back-and-forth is real history
-   and belongs in the branch; the merge is what `main` reads.
-3. **`main` must always be deployable.** It is what `deploy.py` builds from.
-4. **`wip/` branches are allowed to be broken** and must say so in the commit
-   message. `wip/web-ui` is one: an interrupted workflow's output, parked
-   rather than lost.
+1. **Work commits to `prerelease`.** It is what the deploy script builds from,
+   so it must stay green: tests pass and the images build.
+2. **`main` only ever moves by merging `prerelease` after it has been validated
+   on hardware** — deployed to orko, exercised, and seen to work. That is what
+   `:latest` promises to anyone pulling it.
+3. **A topic branch when isolation is genuinely needed**, named `feat/`,
+   `docs/` or `wip/`, and merged with `--no-ff` so the grouping survives.
+   `wip/` branches may be broken and must say so in the commit message.
+4. **Check the tree is clean before starting and before committing.** The one
+   collision this repository has had would have been caught by that alone.
 
 ## Consequences
 
-- The four commits that prompted this were retroactively split onto
-  `feat/ui-player-and-controls` and `docs/api-and-glossary-adrs`, and `main`
-  was reset to `origin/prerelease`. Nothing was lost; both branches carry their
-  work and this ADR arrived on one of them.
-- A branch that is never merged is worse than no branch. `wip/web-ui` is
-  already close to that line and should be either merged or deleted once the
-  UI work settles.
+- Local `main` is no longer the working branch. `prerelease` tracks
+  `origin/prerelease` directly, so the push is `git push origin prerelease`
+  rather than a `main:prerelease` refspec that had to be remembered.
+- `origin/main` does not exist yet, because nothing has been through a
+  validation pass under this rule. It is created by the first merge that has.
+- `deploy.py` builds from whatever is checked out; on this machine that is
+  `prerelease`, which is correct — orko runs `:pre`.
+- The two branches that prompted the earlier version of this ADR,
+  `feat/ui-player-and-controls` and `docs/api-and-glossary-adrs`, are merged
+  into `prerelease` and can be deleted.
