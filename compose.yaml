@@ -277,7 +277,18 @@ services:
       # GATEWAY_API_KEYS so this does not widen that hole, but it does make it
       # load-bearing, and the fix is a deployment one: unpublish 30097 or
       # firewall it to the NAS and reach it by LAN IP.
-      # UI_METUBE_URL: http://192.0.2.10:30097
+      #
+      # SET, and by LAN IP rather than through the reverse proxy. This call
+      # never leaves the NAS: sending it to ytdl.gabrielbelli.com would go out
+      # to the router on 192.168.1.1 and hairpin straight back to this machine,
+      # adding HAProxy and a TLS handshake as failure modes for a hop between
+      # two containers on the same box. That proxy is also, at the time of
+      # writing, returning HAProxy's "No server is available" 503 for that
+      # hostname while MeTube answers 200 on 30097 — a backend pointing at
+      # MeTube's DOCUMENTED default port 8081, which TrueNAS does not publish:
+      # `docker port ix-metube-metube-1` shows 30097/tcp -> 0.0.0.0:30097 and
+      # nothing on 8081.
+      UI_METUBE_URL: http://192.168.1.111:30097
 
       # Ingest files land here rather than in the middle of the user's music
       # library. MeTube's AUDIO_DOWNLOAD_DIR defaults to %%DOWNLOAD_DIR and is
