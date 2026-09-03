@@ -124,6 +124,12 @@ PROXIED: tuple[tuple[str, str], ...] = (
 # here, and whose Content-Length is checked before a byte is forwarded.
 UPLOAD_PATHS = frozenset({"/v1/audio/transcriptions", "/transcribe"})
 
+# Where the page reaches the proxied routes from when this service is behind
+# the gateway. Both mounts are live at once: the bare paths still work for a
+# direct caller on this service's own port, and /ui/api works from the
+# gateway's origin. One allowlist serves both -- see _forward.
+UI_API_PREFIX = "/ui/api"
+
 HOP_BY_HOP = frozenset({
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailer", "trailers", "transfer-encoding", "upgrade",
@@ -335,7 +341,21 @@ async def _relay(upstream: httpx.Response, *, path: str,
 async def _forward(request: Request) -> Response:
     """Send this request to the gateway and stream the answer back."""
     started = time.monotonic()
+    # /ui/api is the SAME allowlist reached under a prefix, and the prefix is
+    # stripped here so everything downstream sees the real path. It exists
+    # because the gateway now fronts this service on one port: the page is
+    # served from the gateway's origin, so a relative call to /v1/... would
+    # land on the GATEWAY directly and skip this process -- and with it skip
+    # UI_GATEWAY_API_KEY, which is the only key the browser has since the key
+    # box was removed. Under /ui/api the call comes back here, is authenticated
+    # with the container's key, and goes on to the gateway as before.
+    #
+    # Stripping rather than rewriting: PROXIED is matched against the stripped
+    # path, so the allowlist is enforced on what is actually forwarded and a
+    # prefixed request cannot reach a route the unprefixed one could not.
     path = request.url.path
+    if path.startswith(UI_API_PREFIX + "/"):
+        path = path[len(UI_API_PREFIX):]
 
     if path in UPLOAD_PATHS:
         # THE CEILING THAT DOES NOT EXIST ANYWHERE ELSE IN THE CHAIN.
@@ -397,6 +417,10 @@ async def _forward(request: Request) -> Response:
 # list readable as a list.
 for _method, _path in PROXIED:
     app.add_api_route(_path, _forward, methods=[_method], include_in_schema=False)
+    # The same route, prefixed. Registered from the same table so the two
+    # mounts cannot drift into offering different sets.
+    app.add_api_route(UI_API_PREFIX + _path, _forward, methods=[_method],
+                      include_in_schema=False)
 
 
 # ------------------------------------------------------------------- page --
@@ -542,6 +566,14 @@ app.include_router(ingest.router)
 # ----------------------------------------------------------------- health --
 
 
+# ALSO AT /ui/health, and the page uses that one. The compose healthcheck
+# keeps calling /health -- it probes this container from inside it, where the
+# gateway is not involved. But once the gateway fronts this service, a page
+# served from the gateway's origin that asked for /health would get the
+# GATEWAY's health, which is a different shape: the page reads
+# HEALTH.gateway.health, and the gateway's own body has no `gateway` key, so
+# every status pill would silently read undefined.
+@app.get("/ui/health", include_in_schema=False)
 @app.get("/health", include_in_schema=False)
 async def health(request: Request) -> Response:
     """This container's own probe. Never a key, and always 200.

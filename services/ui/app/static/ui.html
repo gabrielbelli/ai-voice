@@ -685,8 +685,23 @@ function reason(payload, fallback) {
    collapsed into fetch() because every call site already goes through it, and
    a single seam is what made removing the header a three-line change instead
    of thirty. */
+/* THE PROXIED ROUTES MOVE UNDER A PREFIX WHEN THE GATEWAY IS THE ONLY DOOR.
+   The page is served from the gateway's origin now, so a bare relative call to
+   /v1/audio/transcriptions would land on the GATEWAY directly and never reach
+   this service -- skipping UI_GATEWAY_API_KEY, which is the only key a browser
+   has since the key box was removed. /ui/api/... comes back here first.
+
+   The service's own routes -- /ui/config, /ui/clips, /ui/resolve and the rest
+   -- are NOT prefixed: they are already under /ui and the gateway forwards
+   them as they are. Only the eleven proxied paths move.
+
+   Both mounts are live on the UI service, so this also works unchanged when
+   the page is opened on that service's own port directly. */
+const GATEWAY_ROUTES = /^\/(v1|transcribe|speak|voices|jobs)(\/|$)/;
+
 async function api(path, options) {
-  return fetch(path, options || {});
+  const target = GATEWAY_ROUTES.test(path) ? "/ui/api" + path : path;
+  return fetch(target, options || {});
 }
 
 async function json(path, options) {
@@ -774,7 +789,7 @@ async function poll() {
     /* /health is unauthenticated everywhere in this stack and always answers
        200 even when a backend is down, so the code is not the signal — the
        body is. */
-    HEALTH = await (await fetch("/health")).json();
+    HEALTH = await (await fetch("/ui/health")).json();
     const g = HEALTH.gateway && HEALTH.gateway.health;
     if (!g) throw new Error("gateway unreachable");
     const b = g.backends || {};

@@ -554,6 +554,79 @@ async def voices(request: Request) -> Response:
     return await _proxy(request, TTS, content=None)
 
 
+# ------------------------------------------------------------------- the page --
+#
+# ONE PUBLISHED PORT. voice-ui used to publish 30081 of its own, so the stack
+# had two doors and the sentence in compose.yaml about there being one was only
+# true of the backends. The page is now reached through this service, which is
+# what "the gateway is the only door" was supposed to mean all along.
+#
+# EXPLICITLY LISTED, NOT A WILDCARD, for the reason _http_error already gives:
+# a catch-all would proxy /docs and /openapi.json to a service that deliberately
+# does not publish them. These are exactly voice-ui's own routes -- `/`, the
+# page, and the /ui/* family -- and nothing else reaches it.
+#
+# The UI's PROXIED table is NOT among them and must not be. It forwards /v1 and
+# the native routes, which this service already answers itself; routing them to
+# voice-ui would send a request out to the UI so it could send it back here.
+# The page reaches them under /ui/api/, which voice-ui strips before forwarding
+# -- one origin for the browser, and the container's key still applied.
+UI = Backend(
+    name="voice-ui",
+    url=os.getenv("GATEWAY_UI_URL", "http://voice-ui:8090").rstrip("/"),
+    # 900 s because /ui/fetch is on this path: it streams a finished download
+    # from MeTube into the transcription route, and a two-hour podcast at the
+    # measured 8.5-10.4x realtime is ~847 s of compute inside that one request.
+    # Anything shorter would 504 a transcription that is still working.
+    read_timeout=float(os.getenv("GATEWAY_UI_TIMEOUT", "900")),
+    timeout_help="The page's own routes are quick; /ui/fetch is not, because "
+                 "it transcribes. Its ceiling is the same as /v1/audio/"
+                 "transcriptions -- roughly two hours of audio.",
+)
+
+UI_PATHS = (
+    ("GET", "/"),
+    ("GET", "/ui"),
+    ("GET", "/ui/health"),
+    ("GET", "/ui/config"),
+    ("GET", "/ui/clips"),
+    ("POST", "/ui/clips"),
+    ("DELETE", "/ui/clips/{name}"),
+    ("POST", "/ui/resolve"),
+    ("POST", "/ui/commit"),
+    ("POST", "/ui/abandon"),
+    ("GET", "/ui/progress"),
+    ("POST", "/ui/fetch"),
+    # The prefixed mount of voice-ui's own proxy. Everything under it is
+    # forwarded verbatim and voice-ui strips /ui/api before sending it back
+    # here with UI_GATEWAY_API_KEY attached. A path parameter rather than a
+    # list because the set it covers is voice-ui's PROXIED table, which is
+    # already an allowlist on that side; duplicating it here would be two
+    # lists to keep in step.
+    ("POST", "/ui/api/{rest:path}"),
+    ("GET", "/ui/api/{rest:path}"),
+    ("DELETE", "/ui/api/{rest:path}"),
+)
+
+
+async def _to_ui(request: Request) -> Response:
+    """Everything the page needs, streamed from voice-ui.
+
+    An upload body is streamed rather than read: POST /ui/clips carries a
+    reference clip and /ui/api/v1/audio/transcriptions carries whatever the
+    browser is transcribing, and buffering either here would put a file this
+    process has no reason to hold into a container limited to 512 MB.
+    """
+    streaming = request.method in ("POST", "PUT", "PATCH")
+    return await _proxy(request, UI,
+                        content=request.stream() if streaming else None)
+
+
+for _method, _path in UI_PATHS:
+    app.add_api_route(_path, _to_ui, methods=[_method],
+                      include_in_schema=False)
+
+
 # --------------------------------------------------------------- long jobs --
 #
 # Flat and unprefixed, which is load-bearing: tts-long's 202 carries

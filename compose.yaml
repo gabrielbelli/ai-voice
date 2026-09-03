@@ -3,8 +3,11 @@
 #   host:30080  ->  voice-gateway  ->  stt-stack:8000
 #                                     tts-stack:8001
 #                                     tts-long:8002
-#   host:30081  ->  voice-ui       ->  voice-gateway:8080  (and MeTube, by host
-#                                                           address, for links)
+#
+# ONE published port. voice-ui is behind the gateway now: the page is at
+# http://host:30080/ and the gateway forwards `/`, `/ui/*` and `/ui/api/*` to
+# it. voice-ui still talks to the gateway for the actual work, and to MeTube by
+# host address for links.
 #
 # WHAT CHANGED WHEN THE FIVE REPOSITORIES BECAME ONE. The image names, and
 # nothing else:
@@ -251,13 +254,14 @@ services:
     image: ghcr.io/gabrielbelli/ai-voice-ui:pre
     pull_policy: always
     restart: unless-stopped
-    ports:
-      # 30081, next to the gateway's 30080, and in the same 300xx band every
-      # other app on orko uses — rackula 30323, metube 30097, gitea 30008,
-      # unifi 30072-75, convertx 30154. The CONTAINER port is 8090 rather than
-      # 8080 so that a file mapping both can never be ambiguous about which it
-      # meant.
-      - "30081:8090"
+    # NO PORTS. The gateway reaches this service on the app-internal network
+    # and forwards `/`, `/ui/*` and `/ui/api/*` to it, so 30081 published
+    # nothing that 30080 does not now serve -- and while it existed the
+    # sentence at the top of this file about one door was only true of the
+    # backends. Closing it is the same move as closing 8000/8001/8002, for the
+    # same reason: a second door is a way round the process that checks tokens.
+    expose:
+      - "8090"
     environment:
       # A service name, on the app-internal network. The three backends are NOT
       # named here and must not be: this container talks to the gateway.

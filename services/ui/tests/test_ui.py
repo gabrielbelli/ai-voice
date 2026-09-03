@@ -278,3 +278,54 @@ def test_the_two_engine_panels_still_swap_with_the_chosen_voice(client):
     page = client()[0].get("/ui").text
     assert '$("tts-expert-fast").hidden = clone;' in page
     assert '$("tts-expert-clone").hidden = !clone;' in page
+
+
+# ------------------------------------------- the prefixed mount (one door) --
+#
+# The gateway now fronts this service on a single published port, so the page
+# is served from the gateway's origin. A bare relative call to /v1/... from
+# there lands on the GATEWAY and never reaches this process -- skipping
+# UI_GATEWAY_API_KEY, the only key a browser has since the key box was removed.
+# /ui/api/... comes back here first. These pin that both mounts exist and that
+# the prefixed one is not a way past the allowlist.
+
+
+def test_the_prefixed_mount_reaches_the_same_route(client):
+    api, gateway, _ = client()
+    gateway.json = {"text": "hello"}
+    assert api.post("/ui/api/v1/audio/transcriptions",
+                    files={"file": ("a.wav", b"RIFF", "audio/wav")},
+                    data={"model": "parakeet"}).status_code == 200
+    assert gateway.seen[-1].url.path == "/v1/audio/transcriptions", \
+        "the prefix must be stripped before the request leaves this service"
+
+
+def test_the_bare_mount_still_works_for_a_direct_caller(client):
+    """Both mounts are live: this service's own port is still a valid door."""
+    api, gateway, _ = client()
+    gateway.json = {"text": "hello"}
+    assert api.post("/v1/audio/transcriptions",
+                    files={"file": ("a.wav", b"RIFF", "audio/wav")},
+                    data={"model": "parakeet"}).status_code == 200
+    assert gateway.seen[-1].url.path == "/v1/audio/transcriptions"
+
+
+def test_the_prefix_is_not_a_way_past_the_allowlist(client):
+    """PROXIED is matched against the STRIPPED path, so a prefixed request
+    cannot reach a route the unprefixed one could not. /docs is the case that
+    matters: the gateway's own 404 handler exists because a wildcard would
+    proxy it to a service that deliberately does not publish it."""
+    api, _, _ = client()
+    for path in ("/ui/api/docs", "/ui/api/openapi.json", "/ui/api/health"):
+        assert api.get(path).status_code == 404, f"{path} should not be routed"
+
+
+def test_the_page_has_its_own_health_because_the_shapes_differ(client):
+    """The page reads HEALTH.gateway.health. The gateway's own /health has no
+    `gateway` key, so a page served from its origin asking for /health would
+    read undefined for every status pill."""
+    api, _, _ = client()
+    body = api.get("/ui/health").json()
+    assert "gateway" in body and "features" in body
+    assert api.get("/health").json() == body, \
+        "both paths are the same handler; only the URL differs"
