@@ -170,6 +170,12 @@ class MeTube:
             # with the stdlib `wave` module and can read nothing else. An opus
             # file reached it once and came back "that file is not a WAV this
             # service can read", which was true and unhelpful.
+            #
+            # `audio_format` IS MeTube'S SINGLE `format` FIELD and the name is
+            # now half a lie: with download_type "video" the caller passes a
+            # CONTAINER (mp4) rather than an audio codec. Kept as one parameter
+            # anyway, because MeTube has one field -- a second keyword here
+            # would be two ways to fill it and a rule about which wins.
             "format": audio_format or config.METUBE_FORMAT,
             # See config.METUBE_FOLDER: /download/ and /audio_download/ are the
             # same directory on this deployment, so without a folder our ingest

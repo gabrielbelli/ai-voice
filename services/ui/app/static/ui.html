@@ -403,9 +403,15 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
       </div>
       <div class="note ok" id="repaired" hidden></div>
       <!-- PLAY-ALONG, and it is here rather than on the drop zone because it
-           only ever exists once there is a transcript to follow. Hidden
-           entirely when the audio never reached this browser, which is every
-           link and every set of captions -- see #sttwhy. -->
+           only ever exists once there is a transcript to follow.
+
+           IT USED TO BE HIDDEN FOR EVERY LINK, and that was the bug: the
+           machinery below -- the picture, the caption band, the karaoke
+           highlight -- worked only for a dropped file, and a pasted link is
+           what this user actually uses. A finished link now plays through
+           /ui/media, which relays MeTube's own byte ranges so the element can
+           seek. Still hidden for a captions download, where skip_download
+           means there is genuinely no media anywhere -- see #sttwhy. -->
       <div id="sttplay" hidden style="margin-top:10px">
         <!-- TWO ELEMENTS, ONE VISIBLE AT A TIME. A <video> cannot be an
              <audio>, and the picture is the whole point when the file has
@@ -413,11 +419,18 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
              and everything else falls through to the audio element exactly as
              before. The band is a sibling rather than a child of <video>,
              because nothing may be a child of <video>. -->
+        <!-- preload="metadata" ON BOTH, and it is load-bearing for a link
+             rather than a nicety. A link's media is served back through
+             /ui/media, so preload="auto" would pull the whole file off the NAS
+             the moment a transcript appeared -- undoing, silently, the exact
+             thing the server-side fetch exists to avoid. With "metadata" the
+             element asks for the header, learns the duration, draws the scrub
+             bar, and fetches nothing else until play is pressed. -->
         <div class="stage" id="sttstage" hidden>
-          <video id="sttvideo" controls playsinline></video>
+          <video id="sttvideo" controls playsinline preload="metadata"></video>
           <div class="band" id="sttband" hidden><span id="sttbandtext"></span></div>
         </div>
-        <audio id="sttplayer" controls style="width:100%"></audio>
+        <audio id="sttplayer" controls preload="metadata" style="width:100%"></audio>
         <div class="row" style="margin-top:6px;align-items:center">
           <div class="tight">
             <label for="sttrate">Playback speed</label>
@@ -677,6 +690,14 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
          reader is on a confirmation card deciding whether to fetch something;
          what they need is that trimming costs nothing, not how. -->
     <div class="hint">Trimmed at the source — the rest is never downloaded.</div>
+    <!-- OFF BY DEFAULT AND PER LINK. download_type "audio" never pulls the
+         video stream at all, which is the whole reason a 2h14m podcast costs
+         ~131 MB rather than gigabytes, so this must never become the default
+         and must never be remembered from last time. The Download row above
+         changes the moment it is ticked: the cost is stated where the decision
+         is made, not in a paragraph underneath it. -->
+    <label style="margin-top:10px;display:block"><input type="checkbox" id="c-video"
+      style="width:auto"> Keep the video — a much bigger download</label>
     <div id="c-subs"></div>
   </div>
   <div class="foot">
@@ -1032,7 +1053,22 @@ const stt = { file:null, prepared:null, rate:null, seconds:null, token:null,
               /* Set once the <video> has raised an error, so the fallback to
                  the audio element cannot loop back into the element that just
                  failed. */
-              noVideo:false };
+              noVideo:false,
+              /* WHAT A FINISHED LINK CAN BE PLAYED FROM, or null. Set by
+                 watchDownload once MeTube says the file is on disk:
+                 {url, video}. The url is /ui/media, which relays MeTube's own
+                 byte ranges so the element can seek; nothing is fetched from
+                 it until someone presses play. Null for a file drop, where the
+                 bytes are already in this browser, and for a captions
+                 download, where skip_download means there is no media at all. */
+              media:null };
+
+/* WHICH ELEMENT A FINISHED DOWNLOAD BELONGS IN, read off the name MeTube
+   actually wrote rather than off what was asked for. A request for video that
+   came back as audio -- an extractor with no muxed format, a live stream that
+   ended -- must not put a black rectangle on screen with nothing saying why.
+   The same list is app/ingest.py's VIDEO_SUFFIXES. */
+const VIDEO_FILE = /\.(mp4|m4v|mkv|webm|mov)$/i;
 
 $("browse").addEventListener("click", () => $("file").click());
 $("file").addEventListener("change", () => { if ($("file").files[0]) pick($("file").files[0]); });
@@ -1109,6 +1145,11 @@ document.querySelectorAll("#fmt button").forEach(b => b.addEventListener("click"
 async function pick(file) {
   stt.file = file; stt.token = null; stt.prepared = null; stt.facts = null;
   stt.captions = false; stt.noVideo = false;
+  /* The previous run's link, if there was one. Cleared with the token rather
+     than left behind: sttSource() prefers a dropped file, so a stale one would
+     not be played -- but a state that is only harmless because of the order
+     something else checks things in is one bug away from not being. */
+  stt.media = null;
   $("picked").hidden = false;
   $("picked").innerHTML = `<span class="filechip">${esc(file.name)}
     <span class="hint">${human(file.size)}</span>
@@ -1199,9 +1240,10 @@ function updateRouteAvailability() {
      upload + native  /transcribe takes a file and nothing else -- no
                       response_format, no granularities, no include[], no
                       chunking_strategy
-     a link           /ui/fetch streams MeTube's file into /v1 with `model`
-                      and `response_format` and no other field (ingest.py
-                      fetch), so response_format is the one that survives
+     a link           /ui/fetch streams MeTube's file into /v1 with `model`,
+                      `response_format` and the timestamp granularities, and
+                      no other field (ingest.py fetch), so those are the ones
+                      that survive
 
    Disabled rather than hidden: the reason a control is unavailable is the
    route select sitting beside it, and a control that vanishes takes its own
@@ -1212,7 +1254,12 @@ function syncTranscribeControls() {
   const form = !link && !native;
   $("x-route").disabled = link;
   $("x-rf").disabled = native;
-  $("x-gran").disabled = !form;
+  /* GRANULARITIES REACH THE LINK PATH NOW, so greying them out there would be
+     the very thing this function exists to stop: a control disabled for a
+     reason that has stopped being true. /ui/fetch forwards them to /v1 as
+     repeated multipart fields, and that is what makes a link produce the same
+     cue list an upload does. The native route still carries none of it. */
+  $("x-gran").disabled = native;
   $("x-logprobs").disabled = !form;
   ["x-vad-t", "x-vad-p", "x-vad-s"].forEach(id => $(id).disabled = !form);
 }
@@ -1242,7 +1289,7 @@ async function resolveLink() {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ url }) });
     stt.facts = facts; stt.token = facts.token; stt.file = null; stt.prepared = null;
-    stt.captions = false;
+    stt.captions = false; stt.media = null; stt.noVideo = false;
     $("picked").hidden = false;
     $("picked").innerHTML = `<span class="filechip">${esc(facts.title)}
       <span class="hint">${facts.duration ? clock(facts.duration) : "duration unknown"}</span>
@@ -1275,7 +1322,7 @@ $("url").addEventListener("keydown", e => { if (e.key === "Enter") resolveLink()
 
 async function abandon() {
   const token = stt.token;
-  stt.token = null; stt.facts = null; stt.captions = false;
+  stt.token = null; stt.facts = null; stt.captions = false; stt.media = null;
   $("picked").hidden = true;
   $("go-stt").disabled = true;
   updateRouteAvailability();
@@ -1296,9 +1343,49 @@ async function abandon() {
   } catch (err) { note($("stt-note"), "warn", "Could not abandon it: " + err.message); }
 }
 
+/* THE DOWNLOAD ROW IS THE ONE THE VIDEO TICK CHANGES, which is why the facts
+   are painted by a function rather than once on the way in. Ticking a box that
+   turns 131 MB into gigabytes while the card goes on quoting 131 MB is how a
+   cost gets discovered afterwards instead of decided beforehand.
+
+   The size cannot be given as a number and is not invented as one. probe.py's
+   _best_audio_bytes deliberately measures the largest AUDIO-only format --
+   filesize_approx on a 4K video is the whole video and would make the card warn
+   about tens of gigabytes we were never going to fetch -- so with the video
+   kept there is no measured figure to quote. The honest form is the comparison,
+   and it is one line. */
+function paintFacts(facts, compute) {
+  const video = $("c-video").checked;
+  const download = video
+    ? (facts.bytes ? `video — gigabytes, not the ${human(facts.bytes)} of audio`
+                   : "video — gigabytes rather than megabytes")
+    : (facts.bytes ? human(facts.bytes) + " of audio only"
+                   : "unknown — audio only, roughly 1 MB a minute");
+  const rows = [
+    ["Length", facts.duration ? clock(facts.duration) : "unknown"],
+    ["Download", download],
+    ["Transcribe", compute ? roughly(compute) + ` at ${rate.stt().toFixed(1)}×`
+                           : "unknown, because the length is unknown"],
+  ];
+  $("c-facts").innerHTML = rows
+    .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
+}
+
+/* Bound once, at load, rather than inside showConfirm: the dialog is opened
+   again for every link and a listener added there is a listener added again
+   every time. */
+$("c-video").addEventListener("change", () => {
+  if (!stt.facts) return;
+  paintFacts(stt.facts, stt.facts.duration ? stt.facts.duration / rate.stt() : null);
+});
+
 function showConfirm(facts) {
   const dialog = $("confirm");
   const compute = facts.duration ? facts.duration / rate.stt() : null;
+  /* CLEARED FOR EVERY LINK. Audio-only is what makes links affordable, so the
+     expensive answer is never the one already selected when the card opens --
+     not even because it was selected for the previous link. */
+  $("c-video").checked = false;
   $("c-title").textContent = facts.is_live ? "This is a live stream." : "Fetch this?";
   $("c-sub").textContent = facts.uploader ? facts.title + " — " + facts.uploader : facts.title;
 
@@ -1309,15 +1396,7 @@ function showConfirm(facts) {
      "about 40 seconds" would be the one number on this card that was invented
      rather than measured. MeTube reports the real speed and eta once it is
      actually downloading, and that is what the progress line shows. */
-  const facts_html = [
-    ["Length", facts.duration ? clock(facts.duration) : "unknown"],
-    ["Download", facts.bytes ? human(facts.bytes) + " of audio only"
-                             : "unknown — audio only, roughly 1 MB a minute"],
-    ["Transcribe", compute ? roughly(compute) + ` at ${rate.stt().toFixed(1)}×`
-                           : "unknown, because the length is unknown"],
-  ];
-  $("c-facts").innerHTML = facts_html
-    .map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+  paintFacts(facts, compute);
 
   let live = "";
   if (facts.is_live) {
@@ -1361,7 +1440,7 @@ $("c-go").addEventListener("click", () => {
   const start = $("c-start").value === "" ? null : Number($("c-start").value);
   const end = $("c-end").value === "" ? null : Number($("c-end").value);
   $("confirm").close();
-  startFetch({ clip_start: start, clip_end: end });
+  startFetch({ clip_start: start, clip_end: end, video: $("c-video").checked });
 });
 
 async function startFetch(options) {
@@ -1372,6 +1451,10 @@ async function startFetch(options) {
      it wrong is the bug this path shipped with: the subtitle file went to
      /ui/fetch and was streamed into stt as if it were audio. */
   stt.captions = !!(options && options.captions);
+  /* Cleared here, not only on resolve: committing the same token a second time
+     -- the captions button after a look at the card -- would otherwise leave
+     the previous run's player pointed at a file that is about to be replaced. */
+  stt.media = null; stt.noVideo = false;
   note($("stt-note"), "flat", "Queued with MeTube…");
   try {
     await json("/ui/commit", {
@@ -1401,6 +1484,18 @@ async function watchDownload() {
         captionsToken();
         return;
       }
+      /* THE FILE IS ON THE NAS NOW, SO IT CAN BE PLAYED BACK -- and this
+         line is what makes the player, the caption band and the karaoke
+         highlight work for a link at all. Nothing is fetched by setting it:
+         the element is preload="metadata" and asks for ranges only once
+         somebody presses play, so a link that is read rather than watched
+         still costs this laptop a transcript and nothing else.
+
+         The FILENAME decides which element, never what was asked for. A video
+         commit that came back as audio -- an extractor with no muxed format --
+         would otherwise put a black rectangle on screen. */
+      stt.media = { url: "/ui/media?token=" + encodeURIComponent(stt.token),
+                    video: VIDEO_FILE.test(state.filename || "") };
       note(host, "ok", "Downloaded. Transcribing…");
       transcribeToken();
       return;
@@ -1436,38 +1531,88 @@ function chosenFormat() {
   return expert || (stt.format === "text" ? "text" : stt.format);
 }
 
-/* WHY AN UPLOAD ASKS FOR verbose_json WHEN THE USER ASKED FOR TEXT.
+/* WHETHER ANY TIMING THIS RESPONSE CARRIES WILL HAVE SOMETHING TO DRIVE.
+
+   IT USED TO MEAN "is there a file in this browser", and that answer was the
+   reason a link never had a highlight: the media was streamed MeTube -> here
+   -> the gateway server-side and never reached the page, so asking for word
+   timings would have been paying for numbers nothing on screen could use. That
+   is no longer true. A finished link is playable through /ui/media, so the
+   cues have a player to follow — for an audio-only link as much as for a
+   video one, since a karaoke highlight needs a clock and not a picture.
+
+   A captions download is still no: skip_download means no media was fetched at
+   all, and that path never reaches a transcriber anyway. */
+function willFollowAlong() {
+  if (sttAudio()) return true;
+  return !!stt.token && !stt.captions;
+}
+
+/* WHY THIS ASKS FOR verbose_json WHEN THE USER ASKED FOR TEXT.
    verbose_json's `text` IS the text format's whole body -- openai_api.py's
    _body() returns result.text for one and puts that same string in the other
    -- so the transcript on screen and the file the Download button writes are
    byte-identical either way, and the extra fields are the word timings the
    highlight follows. Nothing is given up and nothing is invented.
 
-   It is asked for only when there is audio in this browser to play along with,
-   because otherwise it is pure cost. Timestamps are a second decoder pass per
-   segment on Whisper, and asr.py has the measurement for Parakeet: 5.34 s
-   against 5.07 s on a 14.2 s clip, about 5%. Paying that for numbers nothing
-   on screen can use would be the wrong trade.
+   It is asked for only when something on screen can use it, because otherwise
+   it is pure cost. Timestamps are a second decoder pass per segment on
+   Whisper, and asr.py has the measurement for Parakeet: 5.34 s against 5.07 s
+   on a 14.2 s clip, about 5%.
 
    An explicit expert choice is never overridden. Someone who selected srt, or
    json, or verbose_json in the panel gets exactly that. */
-function formatForUpload(wanted) {
+function formatForTimings(wanted) {
   if ($("x-rf").value) return wanted;
   if (wanted !== "text") return wanted;      /* srt and vtt carry their own */
-  return sttAudio() ? "verbose_json" : "text";
+  return willFollowAlong() ? "verbose_json" : "text";
+}
+
+/* ONE ANSWER FOR BOTH PATHS, and that is the whole reason it is a function.
+   An upload puts these in a multipart form and a link puts them in a query
+   string /ui/fetch turns into the same multipart fields, so two copies of the
+   rule would be two things that must agree about a cue -- with only one of
+   them the one the tests read.
+
+   BOTH VALUES, and the order matters only to a reader. `word` is what the
+   highlight follows; `segment` is what the caption band is drawn from and what
+   the highlight falls back to when a word cannot be placed in the transcript
+   exactly. That is a real case rather than a defensive one: a glossary rule
+   spanning two words fires in the segment text and cannot fire in either word,
+   so the words stop reconstructing the line. The service takes the field
+   repeated (openai_api.py _values) and allows both values.
+
+   A DISABLED x-gran IS NOT A CHOICE, the same rule chosenFormat() follows: a
+   value left in a control the user can no longer reach must not go on
+   deciding what is sent. */
+function granularities(format, wanted) {
+  if ($("x-gran").value && !$("x-gran").disabled) return [$("x-gran").value];
+  if (format === "verbose_json" && format !== wanted) return ["word", "segment"];
+  return [];
 }
 
 async function transcribeToken() {
-  /* The bytes never touch this laptop: the UI container streams MeTube's file
-     straight into a multipart POST at the gateway. That is also the only way
-     it can work — MeTube emits no CORS headers at all, so a browser cannot
-     fetch from it. */
-  const format = chosenFormat();
+  /* THE MEDIA STILL DOES NOT COME DOWN HERE TO BE TRANSCRIBED. The UI
+     container streams MeTube's file straight into a multipart POST at the
+     gateway, which is what keeps a two-hour podcast off this connection and is
+     also the only way it can work at all — MeTube emits no CORS headers, so a
+     browser cannot fetch from it. What changed is the ASK: this route now
+     carries the granularities too, so the response has the cues the highlight
+     is drawn from. Playback is a separate, later, opt-in request to
+     /ui/media, made by the element and only once play is pressed. */
+  const wanted = chosenFormat();
+  const format = formatForTimings(wanted);
+  const query = new URLSearchParams({ response_format: format });
+  for (const grain of granularities(format, wanted)) {
+    query.append("timestamp_granularities", grain);
+  }
   try {
-    const response = await api("/ui/fetch?response_format=" + encodeURIComponent(format), {
+    const response = await api("/ui/fetch?" + query.toString(), {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ token: stt.token }) });
-    await render(response, format, format);
+    /* `wanted`, not `format`: the Download button must write the .txt that was
+       chosen even when verbose_json was asked for behind the scenes. */
+    await render(response, format, wanted);
     note($("stt-note"), "", "");
   } catch (err) {
     note($("stt-note"), "bad", "Transcription failed: " + err.message);
@@ -1555,23 +1700,15 @@ $("go-stt").addEventListener("click", async () => {
        rather than transcribe. */
   } else {
     path = "/v1/audio/transcriptions";
-    format = formatForUpload(wanted);
+    format = formatForTimings(wanted);
     /* `model` is required by /v1 validation and does NOT choose an engine —
        Parakeet runs regardless and the response says so in x-stt-engine. */
     form.append("model", "parakeet");
     form.append("response_format", format);
-    if ($("x-gran").value) {
-      form.append("timestamp_granularities[]", $("x-gran").value);
-    } else if (format === "verbose_json" && format !== wanted) {
-      /* BOTH, and the order matters only to a reader. `word` is what the
-         highlight follows; `segment` is what it falls back to when a word
-         cannot be placed in the transcript exactly, which is a real case
-         rather than a defensive one -- a glossary rule spanning two words
-         fires in the segment text and cannot fire in either word, so the
-         words stop reconstructing the line. The service takes the field
-         repeated (openai_api.py _values) and allows both values. */
-      form.append("timestamp_granularities[]", "word");
-      form.append("timestamp_granularities[]", "segment");
+    /* The same rule the link path applies, from the same function, so the two
+       cannot drift into asking for different cues. */
+    for (const grain of granularities(format, wanted)) {
+      form.append("timestamp_granularities[]", grain);
     }
     if ($("x-logprobs").checked) form.append("include[]", "logprobs");
     const t = $("x-vad-t").value, p = $("x-vad-p").value, s = $("x-vad-s").value;
@@ -1870,8 +2007,8 @@ $("transcript").addEventListener("click", ev => {
    16 kHz mono WAV this page decoded and uploaded, so it is the exact timeline
    the timings are on; `file` is the fallback for something the browser could
    not decode, where the server did its own decoding and the durations still
-   agree. Null for every link and every set of captions, which is not an
-   oversight -- see sttPlayback(). */
+   agree. Null for every link, where the bytes were never in this browser --
+   sttSource() is what finds one there. */
 function sttAudio() { return stt.prepared || stt.file; }
 
 /* THE ORIGINAL FILE, NEVER `prepared`, and only when it has a picture.
@@ -1893,7 +2030,37 @@ function sttVideo() {
   return $("sttvideo").canPlayType(file.type) ? file : null;
 }
 
+/* WHAT THIS PLAYER IS POINTED AT, in the order the page can trust it.
+
+   A dropped file is bytes this browser already holds: no request, no server,
+   and the exact timeline the timings were measured on. A LINK has none of
+   that, and used to have nothing at all -- /ui/fetch streams MeTube's file
+   into the gateway server-side and the page received not one byte, which is
+   what keeps a two-hour podcast off this connection and is why #sttwhy existed.
+
+   /ui/media is the way back, and it is narrow on purpose: it serves the file
+   MeTube has ALREADY downloaded, relays MeTube's own byte ranges so the
+   element can seek, and is fetched by the element rather than by this page --
+   so a transcript that is read and never played still costs nothing.
+
+   Returns {file} or {url}, plus whether it has a picture worth an element.
+   Null when there is genuinely nothing, which is now only the captions path
+   and a download this page cannot play. */
+function sttSource() {
+  const withPicture = sttVideo();
+  if (withPicture) return { file: withPicture, video: true };
+  const dropped = sttAudio();
+  if (dropped) return { file: dropped, video: false };
+  if (!stt.media) return null;
+  /* stt.noVideo is set once the <video> element has actually failed, so the
+     fallback cannot loop straight back into the element that just raised. */
+  return { url: stt.media.url, video: stt.media.video && !stt.noVideo };
+}
+
 let sttUrl = null;
+/* True while the player is pointed at /ui/media rather than at bytes this
+   browser already holds. Read only by the error handlers. */
+let sttStreaming = false;
 
 /* Sets up the player and the highlight for what render() just drew, and says
    plainly why there is nothing to play when there is not.
@@ -1909,55 +2076,70 @@ function sttPlayback(display, cues, lines) {
   lastPlayback = { display, cues, lines };
   stopKaraoke();
   $("transcript").className = "out";
-  if (sttUrl) {
-    /* The src goes before the revoke, not after. A media element told to
-       reload a revoked blob raises its own error event, and the one thing this
-       path must not do is put a red box under a transcript that is fine.
-       BOTH elements, because either could be the one holding the last URL. */
-    ["sttplayer", "sttvideo"].forEach(id => {
-      $(id).removeAttribute("src");
-      $(id).load();
-    });
-    URL.revokeObjectURL(sttUrl);
-    sttUrl = null;
-  }
+  /* BOTH ELEMENTS, EVERY TIME, and no longer only when a blob was in play. A
+     link's media is a plain URL rather than an object URL, and an element left
+     holding /ui/media goes on pulling ranges off the NAS behind a transcript
+     that has already been replaced.
 
-  const video = sttVideo();
-  const source = video || sttAudio();
+     The src is removed BEFORE the revoke, not after: a media element told to
+     reload a revoked blob raises its own error event, and the one thing this
+     path must not do is put a red box under a transcript that is fine. */
+  ["sttplayer", "sttvideo"].forEach(id => {
+    $(id).removeAttribute("src");
+    $(id).load();
+  });
+  if (sttUrl) { URL.revokeObjectURL(sttUrl); sttUrl = null; }
+
+  const source = sttSource();
   if (!source) {
     $("sttplay").hidden = true;
-    /* THE HONEST ANSWER, NOT A DISABLED BUTTON. /ui/fetch streams MeTube's
-       file straight into the gateway server-side and the browser never
-       receives a byte -- that is the design, and it is what makes a two-hour
-       podcast cost this laptop a transcript rather than 131 MB. Playing along
-       would mean a new route serving the media down here, which is the one
-       thing that architecture exists to avoid. */
-    /* The captions branch is a DIFFERENT FACT, not a shorter way of saying the
-       same one: on that path nothing was transcribed and no media was fetched
-       at all -- skip_download means the audio stream was never pulled -- so
-       the sentence about the server transcribing it would be untrue about the
-       one case where the page is fastest. */
+    /* THE HONEST ANSWER, NOT A DISABLED BUTTON -- and it is CONDITIONAL now,
+       because the sentence it used to always print stopped being true. It said
+       a link's audio never reaches this browser, which was the design and was
+       correct right up until /ui/media; leaving it there would be the page
+       explaining why a feature is missing directly above the feature working.
+
+       What is left is genuinely without media. A captions download sets
+       skip_download, so no audio stream was ever pulled and nothing was
+       transcribed either -- which is the one case where this page is fastest,
+       and it deserves its own sentence rather than a shortened version of
+       somebody else's. */
     $("sttwhy").textContent = stt.token
       ? (stt.captions
          ? "No player: the subtitles were taken and no media was downloaded."
-         : "No player: a link is downloaded and transcribed on the server and the "
-           + "audio never reaches this browser, which is what keeps a two-hour "
-           + "podcast off your connection. Drop the file in to follow along.")
+         : "No player: that download is not something this page can play back.")
       : "";
     $("sttwhy").hidden = !$("sttwhy").textContent;
     return;
   }
 
-  sttUrl = URL.createObjectURL(source);
+  const video = source.video;
+  /* Which of the two failures the error handlers below are looking at. A file
+     that will not decode is the browser's business; a URL that will not load
+     is this stack's, and telling someone their browser cannot play a file that
+     never arrived sends them to fix the wrong thing. */
+  sttStreaming = !source.file;
   const player = video ? $("sttvideo") : $("sttplayer");
-  player.src = sttUrl;
+  if (source.file) {
+    sttUrl = URL.createObjectURL(source.file);
+    player.src = sttUrl;
+  } else {
+    /* Straight to /ui/media. No fetch() and no blob: handing the element the
+       URL is what lets IT do the range requests, which is the entire reason
+       seeking works. Pulling the file here first would download the whole
+       thing before the first frame. */
+    player.src = source.url;
+  }
   $("sttstage").hidden = !video;
   $("sttplayer").hidden = !!video;
   $("sttplay").hidden = false;
   $("sttwhy").hidden = true;
 
+  /* Said once, where the player is, and only when it is true: the bytes are
+     coming off the NAS as they are needed rather than sitting in this tab. */
+  const streamed = source.url ? " Streamed from the server as you play." : "";
   if (!cues) {
-    $("sttplayhint").textContent = "No timings in this response.";
+    $("sttplayhint").textContent = "No timings in this response." + streamed;
     return;
   }
   karaoke.cues = cues;
@@ -1968,7 +2150,7 @@ function sttPlayback(display, cues, lines) {
   karaoke.lines = video && lines && lines.length ? lines : null;
   karaoke.spans = paint($("transcript"), display, cues);
   $("transcript").className = "out karaoke";
-  $("sttplayhint").textContent = "Click a word to jump there.";
+  $("sttplayhint").textContent = "Click a word to jump there." + streamed;
 }
 
 /* A file the browser cannot decode for playback is not a failure worth a red
@@ -1979,9 +2161,17 @@ $("sttplayer").addEventListener("error", () => {
   $("transcript").className = "out";
   $("sttplay").hidden = true;
   $("sttwhy").hidden = false;
-  $("sttwhy").textContent = "Your browser cannot play that file back, so there "
-    + "is nothing to follow along with. The transcript above is unaffected — "
-    + "the server decodes with libav and handles far more than a browser does.";
+  /* TWO DIFFERENT FAULTS, and they send you to two different places. A dropped
+     file that will not decode is the browser's limitation and the transcript
+     proves the server managed it. A link that will not load is /ui/media
+     answering something other than media -- the gateway missing the route is
+     the first thing to check -- and "your browser cannot play that file" would
+     be a false statement about a file the browser never received. */
+  $("sttwhy").textContent = sttStreaming
+    ? "No playback: the server would not serve that media back. The transcript above is unaffected."
+    : "Your browser cannot play that file back, so there "
+      + "is nothing to follow along with. The transcript above is unaffected — "
+      + "the server decodes with libav and handles far more than a browser does.";
 });
 
 /* A CONTAINER THE BROWSER WILL NOT RENDER COSTS THE PICTURE, NOT THE FEATURE.
@@ -1991,6 +2181,11 @@ $("sttplayer").addEventListener("error", () => {
    back to it keeps the transcript, the highlight and the audio; only the band
    and the picture go, and they are what could not work. */
 $("sttvideo").addEventListener("error", () => {
+  /* A LINK FALLS BACK THE SAME WAY. stt.media.video is read off the filename
+     MeTube wrote, and a name ending .mkv is exactly the case canPlayType would
+     have answered "maybe" to and then declined -- so the picture goes, the
+     same file plays through the audio element, and the transcript, the
+     highlight and the sound all survive. */
   if (stt.noVideo || !lastPlayback) return;
   stt.noVideo = true;
   sttPlayback(lastPlayback.display, lastPlayback.cues, lastPlayback.lines);

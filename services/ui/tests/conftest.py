@@ -82,6 +82,14 @@ class FakeMeTube:
         # What the static route hands back, so a test can serve a real WebVTT
         # body rather than the audio placeholder.
         self.content: bytes = b"RIFFfake-audio-bytes"
+        # What aiohttp guesses off the suffix, and what a <video> element
+        # refuses to play when it is application/octet-stream instead.
+        self.content_type: str = "audio/ogg"
+        # The two If-Range is compared against. Present because /ui/media
+        # relays the request header, and relaying it while dropping these makes
+        # every conditional range unconditional.
+        self.etag: str = '"fake-etag"'
+        self.last_modified: str = "Wed, 03 Sep 2026 10:00:00 GMT"
         # WHICH OF MeTube'S TWO STATIC ROUTES HOLDS THE FILE. Both resolve to
         # one directory on this deployment -- AUDIO_DOWNLOAD_DIR defaults to
         # "%%DOWNLOAD_DIR" and is unset -- so the default is "both", which is
@@ -119,7 +127,7 @@ class FakeMeTube:
                 want = f"/{route}/" + "/".join(
                     part for part in (self.folder, self.filename) if part)
                 if unquote(path) == want and self.served_from in offered:
-                    return httpx.Response(200, content=self.content)
+                    return self.static(request)
                 return httpx.Response(404, text=f"not here; the file is at {want}")
             return httpx.Response(404)
 
@@ -160,6 +168,48 @@ class FakeMeTube:
             # behaviour and it is why abandon() verifies afterwards.
             return httpx.Response(200, json={"status": "ok"})
         return httpx.Response(404)
+
+    def static(self, request: httpx.Request) -> httpx.Response:
+        """One finished file, served the way aiohttp's static route serves it.
+
+        RANGES ARE NOT OPTIONAL IN THIS FIXTURE, because they are the whole
+        subject of /ui/media. Verified against the live MeTube on this NAS
+        before it was written down here: `Range: bytes=0-1023` answered
+        `206 Partial Content` with `Content-Range: bytes 0-1023/533915`,
+        `Accept-Ranges: bytes` and `Content-Type: video/mp4`. A stub that
+        answered 200 to everything would let a relay that drops Range pass,
+        and a player served that way ignores every scrub.
+        """
+        body = self.content
+        common = {"accept-ranges": "bytes", "content-type": self.content_type,
+                  "etag": self.etag, "last-modified": self.last_modified}
+
+        wanted = request.headers.get("range")
+        # A stale If-Range means "send me the whole thing instead", and getting
+        # that backwards splices two different files together with no error
+        # anywhere. aiohttp compares against the ETag it would have sent.
+        condition = request.headers.get("if-range")
+        if condition is not None and condition != self.etag:
+            wanted = None
+        if not wanted or not wanted.startswith("bytes="):
+            return httpx.Response(200, content=body,
+                                  headers={**common,
+                                           "content-length": str(len(body))})
+
+        first, _, last = wanted[len("bytes="):].partition("-")
+        start = int(first) if first else 0
+        stop = int(last) + 1 if last else len(body)
+        stop = min(stop, len(body))
+        if start >= len(body) or start >= stop:
+            # What a range past the end really answers, and it carries the
+            # total so the client can correct itself.
+            return httpx.Response(416, headers={
+                **common, "content-range": f"bytes */{len(body)}"})
+        chunk = body[start:stop]
+        return httpx.Response(206, content=chunk, headers={
+            **common,
+            "content-length": str(len(chunk)),
+            "content-range": f"bytes {start}-{stop - 1}/{len(body)}"})
 
     def finish(self, url: str, filename: str = "A Title.opus",
                folder: str = "stt-ingest") -> None:

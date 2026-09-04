@@ -148,21 +148,30 @@ def test_the_job_audio_is_fetched_with_the_key_and_not_put_in_a_src():
 # ------------------------------------------------------- where cues come --
 
 
-def test_word_timings_are_asked_for_only_when_there_is_audio_to_play():
+def test_word_timings_are_asked_for_only_when_something_can_follow_them():
     """Otherwise it is pure cost for numbers nothing on screen can use.
 
     Timestamps are a second decoder pass per segment on Whisper, and stt's
     asr.py measures about 5% on Parakeet -- 5.34 s against 5.07 s on a 14.2 s
-    clip. A link is transcribed server-side and its audio never reaches this
-    browser, so on that path there is nothing to follow along with.
+    clip.
+
+    THE ANSWER USED TO BE "is there a file in this browser", and that is
+    exactly why a link never had a highlight: its media is streamed into the
+    gateway server-side, so sttAudio() is null and the page asked for plain
+    text. A finished link is playable through /ui/media now, so it qualifies --
+    and a captions download still does not, because skip_download means no
+    media was fetched at all.
     """
-    chooser = body_of("function formatForUpload(", "\n\nasync function transcribeToken")
-    assert "return sttAudio() ? \"verbose_json\" : \"text\";" in chooser
+    chooser = body_of("function formatForTimings(", "\n\n/* ONE ANSWER FOR BOTH")
+    assert "return willFollowAlong() ? \"verbose_json\" : \"text\";" in chooser
+    predicate = code(body_of("function willFollowAlong()", "\n\n/* WHY THIS ASKS"))
+    assert "if (sttAudio()) return true;" in predicate
+    assert "return !!stt.token && !stt.captions;" in predicate
 
 
 def test_an_expert_response_format_is_never_silently_overridden():
     """Someone who selected srt in the panel gets srt, not verbose_json."""
-    chooser = body_of("function formatForUpload(", "\n\nasync function transcribeToken")
+    chooser = body_of("function formatForTimings(", "\n\n/* ONE ANSWER FOR BOTH")
     first = chooser.index("if ($(\"x-rf\").value) return wanted;")
     assert first < chooser.index("verbose_json"), (
         "the expert choice is checked after the swap, so it can be overridden")
@@ -176,10 +185,39 @@ def test_both_granularities_are_requested_so_there_is_a_fallback():
     the line and locate() refuses them. Without segments in the same response
     the highlight would simply vanish for those files.
     """
-    submit = HTML[HTML.index('form.append("response_format", format);'):]
-    head = submit[:submit.index("x-logprobs")]
-    assert 'form.append("timestamp_granularities[]", "word");' in head
-    assert 'form.append("timestamp_granularities[]", "segment");' in head
+    chooser = code(body_of("function granularities(format, wanted)",
+                           "\n\nasync function transcribeToken"))
+    assert 'return ["word", "segment"];' in chooser
+    # A value left in a control the user cannot reach must not go on deciding
+    # what is sent -- the same rule chosenFormat() follows.
+    assert '$("x-gran").value && !$("x-gran").disabled' in chooser
+
+
+def test_the_link_and_the_upload_ask_for_the_same_cues():
+    """Two copies of this rule would be two things that must agree about a cue,
+    with only one of them the one these tests read.
+
+    The upload path puts them in a multipart form and the link path in a query
+    string /ui/fetch turns into the same fields, so the SHAPE differs and the
+    decision must not.
+    """
+    upload = HTML[HTML.index('form.append("response_format", format);'):]
+    upload = upload[:upload.index("x-logprobs")]
+    assert "for (const grain of granularities(format, wanted))" in upload
+    link = body_of("async function transcribeToken()", "\n\n/* THE CAPTIONS PATH")
+    assert "for (const grain of granularities(format, wanted))" in link
+
+
+def test_a_link_asks_for_the_verbose_body_the_cues_live_in():
+    """The other half of why a link had no highlight, and the half that is not
+    in this file: /ui/fetch forwarded `model` and `response_format` and nothing
+    else, so even asking would not have reached stt. Both had to move."""
+    link = code(body_of("async function transcribeToken()", "\n\n/* THE CAPTIONS PATH"))
+    assert "const format = formatForTimings(wanted);" in link
+    assert 'query.append("timestamp_granularities", grain);' in link
+    # `wanted`, so a transcript chosen as text still downloads as .txt even
+    # though verbose_json was asked for behind the scenes.
+    assert "await render(response, format, wanted);" in link
 
 
 def test_the_download_still_writes_the_format_the_user_asked_for():
@@ -349,18 +387,122 @@ def test_the_speech_direction_offers_no_highlight_and_says_why():
             f"to highlight with, and an estimate drifts from the first sentence")
 
 
-def test_the_link_path_says_why_there_is_nothing_to_play():
-    """Not a disabled button, and not a player that 404s.
+# ------------------------------------------------- a link, played back --
+#
+# EVERY SCREENSHOT THIS USER SENDS IS A PASTED LINK, and until /ui/media the
+# player, the caption band and the karaoke highlight all worked only for a
+# dropped file. Three separate things had to be true for a link and none of
+# them were: the response had to carry timings (formatForTimings and the
+# granularities above), the media had to reach the browser at all, and the
+# element had to be able to seek in it.
 
-    /ui/fetch streams MeTube's file straight into the gateway server-side and
-    the browser never receives a byte. That is the design -- it is what makes a
-    two-hour podcast cost this laptop a transcript rather than 131 MB -- so the
-    absence is explained rather than worked around.
+
+def _playback() -> str:
+    return body_of("function sttPlayback(display, cues, lines)",
+                   "/* A file the browser")
+
+
+def test_a_link_has_a_player_now_and_not_an_explanation_of_its_absence():
+    """The sentence #sttwhy used to always print stopped being true.
+
+    It said a link's audio never reaches this browser -- correct until
+    /ui/media, and afterwards the page explaining why a feature is missing
+    directly above that feature working.
     """
-    playback = body_of("function sttPlayback(display, cues, lines)",
-                       "/* A file the browser")
-    assert "$(\"sttwhy\").textContent = stt.token" in playback
-    assert "never reaches this browser" in playback
+    source = code(body_of("function sttSource()", "\nlet sttUrl"))
+    assert "if (!stt.media) return null;" in source
+    assert "return { url: stt.media.url" in source
+    body = code(_playback())
+    assert "never reaches this browser" not in body, (
+        "the page still claims a link cannot be played back")
+
+
+def test_the_only_link_left_without_a_player_is_the_captions_one():
+    """skip_download means no media stream was pulled at all, so that path
+    genuinely has nothing to play -- and it is the one case where this page is
+    fastest, which is worth its own sentence rather than a shortened version of
+    somebody else's."""
+    body = _playback()
+    assert '$("sttwhy").textContent = stt.token' in body
+    assert "the subtitles were taken and no media was downloaded" in body
+
+
+def test_the_element_is_given_the_url_and_does_the_ranges_itself():
+    """THE WHOLE REASON SEEKING WORKS. A <video> seeks by asking for a byte
+    range; fetch()ing the file here into a blob first would download the entire
+    thing before the first frame and put a two-hour podcast in this tab, which
+    is the exact cost the server-side design exists to avoid."""
+    body = code(_playback())
+    assert "player.src = source.url;" in body
+    assert "createObjectURL(source.file)" in body, (
+        "a dropped file must still play from bytes already in this browser")
+
+
+def test_nothing_is_fetched_until_somebody_presses_play():
+    """preload="auto" on an element pointed at /ui/media would pull the whole
+    file off the NAS the moment a transcript appeared, silently undoing the
+    thing that makes a link affordable."""
+    for element in ('<video id="sttvideo"', '<audio id="sttplayer"'):
+        tag = HTML[HTML.index(element):]
+        tag = tag[:tag.index(">")]
+        assert 'preload="metadata"' in tag, f"{element} may preload the lot"
+
+
+def test_a_stale_element_is_not_left_pulling_ranges_off_the_nas():
+    """A link's media is a plain URL rather than an object URL, so the old
+    "only clear it if there was a blob" guard left an element streaming behind
+    a transcript that had already been replaced."""
+    body = code(_playback())
+    clear = body.index('$(id).removeAttribute("src");')
+    revoke = body.index("URL.revokeObjectURL(sttUrl)")
+    assert clear < revoke, (
+        "the src must be dropped before the revoke, or the element raises an "
+        "error event over a transcript that is fine")
+    assert "if (sttUrl) { URL.revokeObjectURL" in body
+
+
+def test_which_element_is_decided_by_the_file_that_arrived():
+    """Not by what was asked for. A video commit that came back as audio -- an
+    extractor with no muxed format -- would otherwise be a black rectangle with
+    nothing on screen saying why."""
+    watch = code(body_of("async function watchDownload()", "\n/* ------"))
+    assert "video: VIDEO_FILE.test(state.filename" in watch
+    assert 'stt.media = { url: "/ui/media?token=" + encodeURIComponent(stt.token)' in watch
+
+
+def test_the_video_is_off_until_it_is_ticked_and_stays_off_next_time():
+    """Audio-only is what makes a link affordable and it is the default. A
+    checkbox that remembered its last value would make the expensive answer the
+    one already selected when the card opens."""
+    confirm = code(body_of("function showConfirm(facts)", "\n$(\"c-cancel\")"))
+    assert '$("c-video").checked = false;' in confirm
+    go = body_of('$("c-go").addEventListener', "\n\nasync function startFetch")
+    assert 'video: $("c-video").checked' in go
+    assert 'type="checkbox" id="c-video"' in HTML
+
+
+def test_the_card_says_what_keeping_the_video_costs_before_it_is_fetched():
+    """And says it in the row it changes. A tick that turns 131 MB into
+    gigabytes while the Download row goes on quoting 131 MB is a cost
+    discovered afterwards rather than decided beforehand."""
+    facts = body_of("function paintFacts(facts, compute)", "\n\n/* Bound once")
+    assert "gigabytes, not the ${human(facts.bytes)} of audio" in facts
+    # And the row is repainted when the box changes, or it says the old number.
+    assert '$("c-video").addEventListener("change"' in HTML
+
+
+def test_the_new_copy_stays_under_the_line_length_this_page_holds_to():
+    """The user has twice asked for interface copy to be CUT. Every string this
+    feature adds is one sentence, and this is the bar it was written to."""
+    strings = [
+        "Keep the video — a much bigger download",
+        "video — gigabytes rather than megabytes",
+        "No player: that download is not something this page can play back.",
+        " Streamed from the server as you play.",
+    ]
+    for line in strings:
+        assert line in HTML, f"the page no longer says {line!r}"
+        assert len(line) < 110, f"{len(line)} characters: {line!r}"
 
 
 def test_a_file_the_browser_cannot_decode_does_not_look_like_a_failure():
@@ -374,6 +516,20 @@ def test_a_file_the_browser_cannot_decode_does_not_look_like_a_failure():
 
 
 # ------------------------------------- following the text on the Speak tab --
+
+
+def test_a_link_that_will_not_load_is_not_blamed_on_the_browser():
+    """Two faults, two places to look. A dropped file that will not decode is
+    the browser's limitation; a link that will not load is /ui/media answering
+    something other than media, and the gateway missing the route is the first
+    thing to check. Telling someone their browser cannot play a file it never
+    received sends them to fix the wrong thing."""
+    handler = HTML[HTML.index('$("sttplayer").addEventListener("error"'):]
+    handler = handler[:handler.index("\n/* A CONTAINER THE BROWSER")]
+    assert "$(\"sttwhy\").textContent = sttStreaming" in handler
+    assert "the server would not serve that media back" in handler
+    body = code(_playback())
+    assert "sttStreaming = !source.file;" in body
 
 
 def test_the_speak_tab_follows_the_text_now_that_offsets_exist():
@@ -507,7 +663,7 @@ def test_a_video_upload_gets_a_video_element_and_not_only_sound():
     assert '<video id="sttvideo"' in HTML
     playback = body_of("function sttPlayback(display, cues, lines)",
                        "/* A file the browser")
-    assert 'const video = sttVideo();' in playback
+    assert "const video = source.video;" in playback
     assert '$("sttstage").hidden = !video;' in playback
     assert '$("sttplayer").hidden = !!video;' in playback
 
@@ -518,7 +674,7 @@ def test_the_video_plays_the_original_file_and_not_the_decoded_wav():
     from pick() with no maxSeconds and no startAt, so both are a whole-file
     decode on one timeline -- which is what makes drawing one over the other
     correct rather than approximately correct."""
-    fn = body_of("function sttVideo()", "\nlet sttUrl")
+    fn = body_of("function sttVideo()", "\n/* WHAT THIS PLAYER IS POINTED AT")
     assert "const file = stt.file;" in fn
     assert "stt.prepared" not in fn, "the video element is being given the WAV"
     assert "canPlayType" in fn, (

@@ -329,3 +329,30 @@ def test_the_page_has_its_own_health_because_the_shapes_differ(client):
     assert "gateway" in body and "features" in body
     assert api.get("/health").json() == body, \
         "both paths are the same handler; only the URL differs"
+
+
+def test_the_media_route_is_behind_the_same_key_check_as_the_rest(client):
+    """It is a <video src>, so no XHR wrapper and no header is involved -- the
+    browser fetches it the way it fetches an image, on the page's own origin,
+    and the container's credential is added here as it is for every other
+    /ui/* route. A route that serves bytes off a download directory must not be
+    the one that opted out of the middleware."""
+    api, gateway, _ = client(UI_GATEWAY_API_KEY="sk-container")
+    gateway.keys = ("sk-container",)
+    response = api.get("/ui/media", params={"token": "https://example.com/x"})
+    # 404 rather than 401: the key was accepted and MeTube simply has no such
+    # record. What matters is that the check ran at all.
+    assert response.status_code == 404
+    probe = [r for r in gateway.seen if r.url.path == "/v1/models"][-1]
+    assert probe.headers["authorization"] == "Bearer sk-container"
+
+
+def test_the_page_may_load_media_from_its_own_origin(client):
+    """/ui/media is same-origin, so `media-src 'self'` covers it -- but a CSP
+    tightened to `media-src blob:` alone would block every link's playback with
+    a console message and no visible cause."""
+    api, _, _ = client()
+    policy = api.get("/ui").headers["Content-Security-Policy"]
+    directive = [d.strip() for d in policy.split(";") if d.strip().startswith("media-src")]
+    assert directive, "there is no media-src at all, so default-src decides"
+    assert "'self'" in directive[0], directive

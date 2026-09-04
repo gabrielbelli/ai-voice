@@ -562,12 +562,49 @@ page writes and could not read back would break the highlight for anyone who
 saved a transcript and dropped it in again — and `tests/test_playback.py`
 asserts a written cue line still matches `CUE_LINE`.
 
-**Links still get no player**, and the result card still says so. `/ui/fetch`
-streams MeTube's file into the gateway server-side and the browser never
-receives a byte; a player for a link would mean a route serving media down to
-the laptop, which is the one thing that architecture exists to avoid. The
-sidecar buttons work there anyway, which is most of what a player was wanted
-for: drop the `.srt` next to your own copy of the video.
+### Links get a player too, and that took three separate fixes
+
+**Links used to get no player at all**, and every screenshot this feature was
+built from is a pasted link. Three things were wrong and none of them was the
+player:
+
+1. **No timings came back.** The cues come from `timedFromJson()`, which needs
+   `verbose_json`. `formatForUpload()` asked for it — on the upload path only.
+   A link went through `transcribeToken()`, which used `chosenFormat()`, so it
+   was transcribed as plain text and there was nothing to draw with.
+2. **`/ui/fetch` could not carry the ask.** It forwarded `model` and
+   `response_format` and nothing else, so requesting granularities would not
+   have reached stt even if the page had asked.
+3. **The media never reached the browser.** That one is deliberate and stays
+   the default: `/ui/fetch` streams MeTube → gateway → stt server-side, which
+   is what makes a two-hour podcast cost a transcript rather than 131 MB.
+
+`GET /ui/media` is the way back and it is narrow. It serves the file MeTube has
+**already** downloaded, only for a token this page resolved, only for a
+filename that is media, and only below `UI_MAX_MEDIA_BYTES`. It **relays** byte
+ranges rather than parsing them: MeTube's static route already answers `206`
+with `Content-Range` and `Accept-Ranges` — verified live — so `Range` and
+`If-Range` go up untouched and the answer comes back untouched. Ranges are not
+a nicety: without them a `<video>` plays from the start and ignores every
+scrub.
+
+Both elements are `preload="metadata"`, so a transcript that is read and never
+played still costs nothing; the bytes come off the NAS when someone presses
+play. The sidecar buttons work on that path as they always did.
+
+**Keeping the video is opt-in, per link, and off by default.** `download_type:
+"audio"` never pulls the video stream, which is the entire reason a link is
+affordable, so the tick sits on the confirm card next to the row it changes:
+the Download line stops saying "131 MB of audio only" and starts saying
+"video — gigabytes, not the 131 MB of audio". With it off, an audio-only link
+still plays and the transcript still follows along — a karaoke highlight needs
+a clock, not a picture; only the caption band needs the frame.
+
+**The gateway needs `("GET", "/ui/media")` in `UI_PATHS`.** Without it the page
+404s on playback when it is served from the published port, which is how
+`DELETE /jobs/{id}` stayed unreachable while tts-long had implemented it all
+along. The page says so honestly when it happens rather than blaming the
+browser for a file it never received.
 
 ---
 
@@ -673,10 +710,12 @@ Every variable is optional and every default degrades rather than fails.
 | `UI_METUBE_URL` | *(unset)* | MeTube, **by host address**. Unset hides the link box entirely |
 | `UI_METUBE_FOLDER` | `stt-ingest` | Mandatory in effect — see the table above |
 | `UI_METUBE_FORMAT` | `opus` | ~1 MB a minute. MeTube 400s on any `quality` but `best` for it |
+| `UI_METUBE_VIDEO_FORMAT` | `mp4` | Only when "keep the video" is ticked. mp4 because it is remuxed, not re-encoded, and a browser will actually render it |
 | `UI_PROBE` | on | `0` removes yt-dlp from the running system; the card degrades to a title |
 | `UI_PROBE_TIMEOUT` | `20` | Hard kill, not a suggestion |
 | `UI_MAX_UPLOAD_BYTES` | 2 GiB | Checked on `Content-Length` before a byte is forwarded |
 | `UI_MAX_CAPTION_BYTES` | 8 MiB | `/ui/captions` buffers rather than streams. An hour of dialogue is ~100 KB; this catches a file that is not subtitles |
+| `UI_MAX_MEDIA_BYTES` | 4 GiB | The ceiling on `/ui/media` playback. **Its own setting**: `UI_MAX_UPLOAD_BYTES` bounds what stt reads into memory, this bounds what a laptop pulls down a domestic line |
 | `UI_CONFIRM_SECONDS` | `600` | Below this **and** the size threshold, no dialog |
 | `UI_CONFIRM_BYTES` | 50 MiB | The second gate, not an alternative |
 | `UI_STT_RTF` | `8.5` | The conservative seed. The page measures its own |

@@ -19,8 +19,9 @@ import os
 
 __all__ = [
     "GATEWAY_URL", "GATEWAY_VERIFY", "GATEWAY_API_KEY", "gateway_authorization",
-    "METUBE_URL", "METUBE_FOLDER", "METUBE_FORMAT",
+    "METUBE_URL", "METUBE_FOLDER", "METUBE_FORMAT", "METUBE_VIDEO_FORMAT",
     "PROBE", "PROBE_TIMEOUT", "MAX_UPLOAD_BYTES", "MAX_CAPTION_BYTES",
+    "MAX_MEDIA_BYTES",
     "CONFIRM_SECONDS", "CONFIRM_BYTES", "STT_RTF_SEED", "STT_BUDGET_SECONDS",
     "VOICE_DIR", "MAX_CLIP_BYTES", "MAX_CLIP_SECONDS", "RESOLVE_PER_MINUTE",
     "flag",
@@ -123,6 +124,18 @@ METUBE_FOLDER = os.getenv("UI_METUBE_FOLDER", "stt-ingest")
 # a knob here.
 METUBE_FORMAT = os.getenv("UI_METUBE_FORMAT", "opus")
 
+# THE CONTAINER ASKED FOR WHEN THE USER TICKS "keep the video", and only then.
+# Verified live against this deployment's MeTube: POST /add with
+# download_type:"video", format:"mp4", quality:"best" answers {"status":"ok"}
+# and writes "Me at the zoo.mp4" into the stt-ingest folder.
+#
+# mp4 rather than the source container, because the file is served straight
+# back to a <video> element: Matroska is what canPlayType answers "maybe" to
+# and then declines, and a picture that will not render is the one thing this
+# choice exists to produce. yt-dlp remuxes rather than re-encodes for mp4, so
+# it costs no compute on MeTube's side.
+METUBE_VIDEO_FORMAT = os.getenv("UI_METUBE_VIDEO_FORMAT", "mp4")
+
 # The metadata probe. On by default; UI_PROBE=0 gives a title-only confirm card
 # and never spawns yt-dlp. See app/probe.py for why a probe is not a downloader
 # and what it is still on the hook for.
@@ -149,6 +162,19 @@ MAX_UPLOAD_BYTES = int(os.getenv("UI_MAX_UPLOAD_BYTES", str(2 * 1024**3)))
 # mem_limit: 384m -- the same shape of bug as the clip route's, which is
 # documented at MAX_CLIP_BYTES and was an OOM kill rather than a message.
 MAX_CAPTION_BYTES = int(os.getenv("UI_MAX_CAPTION_BYTES", str(8 * 1024**2)))
+
+# THE CEILING ON WHAT /ui/media WILL RELAY, and it is deliberately NOT
+# MAX_UPLOAD_BYTES. That one bounds what is pushed INTO the stack -- a body
+# services/stt reads whole into a container with a 6 GB limit, which is why it
+# is a memory question. This bounds what is pulled OUT of it, down a domestic
+# connection, into a browser tab: nothing here is buffered, so it is not about
+# memory at all, and answering "how big a file may stt decode" with "how big a
+# file may this laptop stream" would tie two unrelated decisions together.
+#
+# 4 GiB is about two hours of 1080p. Past that the honest answer is to fetch
+# the audio, keep the transcript and open the file some other way -- and the
+# confirm card says what the video costs before anything is downloaded.
+MAX_MEDIA_BYTES = int(os.getenv("UI_MAX_MEDIA_BYTES", str(4 * 1024**3)))
 
 # WHEN TO NAG, and why these two numbers.
 #

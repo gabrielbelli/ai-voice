@@ -513,3 +513,343 @@ def test_the_video_route_is_the_other_static_directory(client):
     tube = MeTube(None, base="http://metube.test")
     assert tube.video_url("A Title.en.vtt", "stt-ingest") == (
         "http://metube.test/download/stt-ingest/A%20Title.en.vtt")
+
+
+# ------------------------------------------------------------- the video --
+#
+# THE DEFAULT IS AUDIO AND MUST STAY AUDIO. download_type "audio" never pulls
+# the video stream, which is the whole reason a 2h14m podcast costs ~131 MB
+# instead of gigabytes. Every test below is about the opt-in NOT leaking into
+# the paths that did not ask for it.
+
+
+def test_keeping_the_video_asks_metube_for_a_container_a_browser_can_play(client):
+    api, _, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    body = api.post("/ui/commit", json={"token": URL, "video": True}).json()
+
+    add = [sent for path, sent in tube.calls if path == "/add"][-1]
+    assert add["download_type"] == "video"
+    assert add["format"] == "mp4", add
+    assert add["quality"] == "best"
+    assert add["auto_start"] is True
+    # Echoed, so the page picks the <video> element from what happened rather
+    # than from what it asked for.
+    assert body["video"] is True
+
+
+def test_a_video_commit_re_adds_because_start_cannot_change_the_type(client):
+    """/start promotes a pending item with the options it was ADDED with.
+
+    /ui/resolve queued it as download_type "audio", so a commit that merely
+    started it would download the audio and then hand the page a filename it
+    would try to show in a <video>: a black rectangle and no picture, with
+    nothing anywhere saying why.
+    """
+    api, _, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    api.post("/ui/commit", json={"token": URL, "video": True})
+    assert not any(path == "/start" for path, _ in tube.calls)
+
+
+def test_an_ordinary_commit_still_downloads_audio_only(client):
+    """The regression this whole feature could have been: silently expensive.
+
+    Nothing about adding an opt-in may change what happens when it is not
+    taken, and this asserts the cheap path is still both cheap and a /start
+    rather than the more expensive re-add.
+    """
+    api, _, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    body = api.post("/ui/commit", json={"token": URL}).json()
+    add = [sent for path, sent in tube.calls if path == "/add"][-1]
+    assert add["download_type"] == "audio" and add["format"] == "opus"
+    assert any(path == "/start" for path, _ in tube.calls)
+    assert body["video"] is False
+
+
+def test_a_clip_import_is_never_turned_into_a_video(client):
+    """clips.save reads WAV with the stdlib `wave` module and nothing else.
+
+    The clone sheet posts for_clip and never posts video, so this is about the
+    precedence holding if both ever arrive: an mp4 would reach clips.save and
+    come back "that file is not a WAV this service can read".
+    """
+    api, _, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    api.post("/ui/commit", json={"token": URL, "for_clip": True, "video": True})
+    add = [sent for path, sent in tube.calls if path == "/add"][-1]
+    assert (add["download_type"], add["format"]) == ("audio", "wav")
+
+
+def test_captions_beat_video_because_there_is_no_media_either_way(client):
+    """skip_download means no stream is pulled at all, so asking for both is a
+    contradiction and the cheap half of it wins."""
+    api, _, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    body = api.post("/ui/commit",
+                    json={"token": URL, "captions": True, "video": True}).json()
+    add = [sent for path, sent in tube.calls if path == "/add"][-1]
+    assert add["download_type"] == "captions"
+    assert body["video"] is False
+
+
+# ------------------------------------------------------------ /ui/media --
+#
+# WHAT THE PLAYER ACTUALLY NEEDS, which is byte ranges. A <video> seeks by
+# asking for one; served by something that ignores Range and answers 200 with
+# the whole file it plays from the start and drops every scrub on the floor.
+# MeTube already answers ranges correctly -- verified live: `Range:
+# bytes=0-1023` gave `206`, `Content-Range: bytes 0-1023/533915`,
+# `Accept-Ranges: bytes`, `Content-Type: video/mp4` -- so these tests are about
+# the RELAY being faithful, not about a range parser we deliberately do not
+# have.
+
+MEDIA = b"0123456789abcdefghij"
+
+
+def finished_media(tube, url, filename="A Title.mp4",
+                   content_type="video/mp4", body=MEDIA):
+    tube.finish(url, filename=filename)
+    tube.content = body
+    tube.content_type = content_type
+
+
+def test_a_link_is_playable_at_all_or_none_of_this_works(client):
+    """The plain request, which is what an element makes before it seeks."""
+    api, _, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    finished_media(tube, URL)
+
+    response = api.get("/ui/media", params={"token": URL})
+    assert response.status_code == 200
+    assert response.content == MEDIA
+    assert response.headers["content-type"] == "video/mp4"
+    # Without this the element never sends a Range at all and the scrub bar is
+    # decorative.
+    assert response.headers["accept-ranges"] == "bytes"
+
+
+def test_a_bounded_range_comes_back_as_a_206_and_not_as_the_whole_file(client):
+    api, _, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    finished_media(tube, URL)
+
+    response = api.get("/ui/media", params={"token": URL},
+                       headers={"Range": "bytes=4-9"})
+    assert response.status_code == 206
+    assert response.content == MEDIA[4:10]
+    assert response.headers["content-range"] == f"bytes 4-9/{len(MEDIA)}"
+    # THE SLICE, not the file. A content-length recomputed here is how a player
+    # ends up waiting for bytes that are never coming.
+    assert response.headers["content-length"] == "6"
+
+
+def test_an_open_ended_range_is_relayed_rather_than_interpreted_here(client):
+    """`bytes=12-` is what an element sends when it seeks and then plays on.
+
+    Nothing in this service parses it: the header goes up as it arrived and
+    MeTube's own answer comes back, which is why there is no second, worse
+    range implementation to keep in step with aiohttp's.
+    """
+    api, _, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    finished_media(tube, URL)
+
+    response = api.get("/ui/media", params={"token": URL},
+                       headers={"Range": "bytes=12-"})
+    assert response.status_code == 206
+    assert response.content == MEDIA[12:]
+    assert response.headers["content-range"] == f"bytes 12-19/{len(MEDIA)}"
+
+
+def test_a_range_past_the_end_is_the_416_a_browser_knows_how_to_correct(client):
+    """Not a 500, and not a 200 with the whole file.
+
+    A player that asked past the end reads the total out of the 416 and asks
+    again; dressed up as an outage it stops instead, and dressed up as a 200 it
+    is handed bytes it did not ask for and splices them in.
+    """
+    api, _, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    finished_media(tube, URL)
+
+    response = api.get("/ui/media", params={"token": URL},
+                       headers={"Range": "bytes=9000-9999"})
+    assert response.status_code == 416
+    assert response.headers["accept-ranges"] == "bytes"
+
+
+def test_if_range_goes_up_so_a_stale_player_is_not_handed_two_files(client):
+    """A conditional range whose condition never travels is unconditional.
+
+    If-Range is compared against the ETag, and both the request header and the
+    ETag that answers it have to survive the relay. Drop either and a player
+    holding a stale validator gets a slice of a DIFFERENT file and splices the
+    two together with no error anywhere.
+    """
+    api, _, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    finished_media(tube, URL)
+
+    fresh = api.get("/ui/media", params={"token": URL},
+                    headers={"Range": "bytes=0-3", "If-Range": tube.etag})
+    assert fresh.status_code == 206 and fresh.content == MEDIA[:4]
+
+    stale = api.get("/ui/media", params={"token": URL},
+                    headers={"Range": "bytes=0-3", "If-Range": '"gone"'})
+    # The whole file, which is what a stale condition means, rather than a
+    # slice of something the player cannot line up with what it already has.
+    assert stale.status_code == 200 and stale.content == MEDIA
+
+    # And the validator itself is relayed, or the browser has nothing to send
+    # back on the next request.
+    assert fresh.headers["etag"] == tube.etag
+    assert "last-modified" in fresh.headers
+
+
+def test_an_audio_only_link_is_served_too_because_the_words_still_follow(client):
+    """The video tick is opt-in and most links will not have it.
+
+    With the audio playable the transcript follows along exactly as an upload
+    does, which is the larger half of this feature: a caption band needs a
+    picture, a karaoke highlight does not.
+    """
+    api, _, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    finished_media(tube, URL, filename="A Title.opus", content_type="audio/ogg")
+
+    response = api.get("/ui/media", params={"token": URL})
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "audio/ogg"
+
+
+def test_media_refuses_a_subtitle_file_however_it_is_reached(client):
+    """A .vtt served as video/mp4 is a confusing failure two layers away."""
+    api, _, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    tube.finish(URL, filename="A Title.en.vtt")
+    assert api.get("/ui/media", params={"token": URL}).status_code == 409
+
+
+def test_media_refuses_a_name_that_is_not_media_at_all(client):
+    """An allowlist, so the info sidecar and the thumbnail yt-dlp may leave
+    beside the file are refused by default rather than served and corrected."""
+    api, _, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    tube.finish(URL, filename="A Title.info.json")
+    assert api.get("/ui/media", params={"token": URL}).status_code == 409
+
+
+def test_media_refuses_a_download_that_has_not_finished(client):
+    api, _, _ = client()
+    api.post("/ui/resolve", json={"url": URL})
+    assert api.get("/ui/media", params={"token": URL}).status_code == 409
+
+
+def test_media_serves_only_a_token_this_page_actually_resolved(client):
+    """The gate on the whole route. Without the /history lookup this is an open
+    read of anything in someone else's download directory, by a name a caller
+    supplies."""
+    api, _, _ = client()
+    response = api.get("/ui/media", params={"token": "https://media.example/other"})
+    assert response.status_code == 404
+
+
+def test_a_file_past_the_ceiling_is_refused_rather_than_streamed(client):
+    api, _, tube = client(UI_MAX_MEDIA_BYTES="10")
+    api.post("/ui/resolve", json={"url": URL})
+    finished_media(tube, URL)
+
+    response = api.get("/ui/media", params={"token": URL})
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "media_too_large"
+
+
+def test_the_ceiling_reads_the_whole_file_and_not_the_slice(client):
+    """Otherwise a 4 GB file walks in one kilobyte at a time.
+
+    On a 206 the size of the file is the figure after the slash in
+    Content-Range; Content-Length is the slice. A ceiling that read the slice
+    would pass every range ever sent.
+    """
+    api, _, tube = client(UI_MAX_MEDIA_BYTES="10")
+    api.post("/ui/resolve", json={"url": URL})
+    finished_media(tube, URL)
+
+    response = api.get("/ui/media", params={"token": URL},
+                       headers={"Range": "bytes=0-3"})
+    assert response.status_code == 413
+
+
+def test_the_media_ceiling_is_not_the_upload_ceiling(client):
+    """Two different questions: how big a file services/stt may read into a
+    6 GB container, and how big a file this laptop may pull down a domestic
+    line. Sharing one number would tie them together."""
+    from app import config
+    assert config.MAX_MEDIA_BYTES != config.MAX_UPLOAD_BYTES
+
+
+# ------------------------------------------- timings on the link path --
+#
+# WHY A LINK HAD NO HIGHLIGHT. The cues come from timedFromJson(), which needs
+# verbose_json; formatForUpload() asks for it but only ran on the upload path,
+# and this route forwarded `model` and `response_format` and nothing else -- so
+# a link was transcribed as plain text and no timing ever came back.
+
+
+def test_a_link_can_ask_for_the_timings_the_highlight_is_drawn_from(client):
+    api, gateway, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    tube.finish(URL, "A Title.opus")
+
+    response = api.post(
+        "/ui/fetch",
+        params=[("response_format", "verbose_json"),
+                ("timestamp_granularities", "word"),
+                ("timestamp_granularities", "segment")],
+        json={"token": URL})
+    assert response.status_code == 200
+
+    sent = [r for r in gateway.seen
+            if r.url.path == "/v1/audio/transcriptions"][-1].content
+    assert b'name="response_format"\r\n\r\nverbose_json' in sent
+    # BOTH, and a dict would have carried one. `word` is what the highlight
+    # follows; `segment` is what the caption band and the sidecar are built
+    # from, and what the highlight falls back to when a glossary rule spanning
+    # two words stops the words reconstructing the line.
+    assert sent.count(b'name="timestamp_granularities[]"') == 2
+    assert b'name="timestamp_granularities[]"\r\n\r\nword' in sent
+    assert b'name="timestamp_granularities[]"\r\n\r\nsegment' in sent
+
+
+def test_an_invented_granularity_never_reaches_the_multipart_frame(client):
+    """The frame is built by hand, so an unvalidated value carrying CRLF closes
+    one part and opens another -- the same hole response_format was allowlisted
+    for."""
+    api, gateway, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    tube.finish(URL, "A Title.opus")
+
+    response = api.post(
+        "/ui/fetch",
+        params=[("response_format", "verbose_json"),
+                ("timestamp_granularities",
+                 'word"\r\n\r\nx\r\n--boundary\r\nContent-Disposition: form-data; name="model')],
+        json={"token": URL})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_granularity"
+    assert not [r for r in gateway.seen if r.url.path == "/v1/audio/transcriptions"]
+
+
+def test_asking_for_no_granularity_still_sends_none(client):
+    """The audio-only, text-only case must not start paying for timestamps it
+    has nothing to draw with -- about 5% on Parakeet, measured in asr.py."""
+    api, gateway, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    tube.finish(URL, "A Title.opus")
+
+    api.post("/ui/fetch", params={"response_format": "text"}, json={"token": URL})
+    sent = [r for r in gateway.seen
+            if r.url.path == "/v1/audio/transcriptions"][-1].content
+    assert b"timestamp_granularities" not in sent

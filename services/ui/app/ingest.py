@@ -6,6 +6,30 @@
     GET  /ui/progress  MeTube /history, as percent / speed / eta
     POST /ui/fetch     MeTube's file -> multipart -> gateway -> stt-stack
     POST /ui/captions  MeTube's .vtt/.srt -> the page. NO stt CALL AT ALL
+    GET  /ui/media     MeTube's finished file -> the browser, byte ranges and all
+
+/ui/media IS THE ONE ROUTE HERE THAT SENDS MEDIA DOWNWARDS, and it is opt-in at
+every step rather than a hole in the design above. Everything else in this file
+exists so that a two-hour podcast costs this laptop a transcript and not
+131 MB; that stays the default and nothing fetches on its own. What /ui/media
+adds is that the file MeTube has ALREADY downloaded can be played back, on
+demand, when someone presses play -- which is what makes the caption band and
+the karaoke highlight work for a link at all. Before it, both features were
+upload-only and every screenshot the user sends is a pasted link.
+
+WHY IT MUST BE THIS SERVICE THAT SERVES THE BYTES. MeTube emits no CORS headers
+of any kind -- CORS_ALLOWED_ORIGINS is empty, on_prepare returns early, and its
+socket.io server was built with cors_allowed_origins=[] -- so a browser cannot
+fetch from port 30097 whatever the user does. Verified live.
+
+AND WHY IT IS A RELAY RATHER THAN A RANGE SERVER. MeTube's static route already
+does ranges properly: `Range: bytes=0-1023` came back `206 Partial Content`
+with `Content-Range: bytes 0-1023/533915`, `Accept-Ranges: bytes` and
+`Content-Type: video/mp4`. Parsing ranges here would be a second, worse
+implementation of something already correct one hop away, and it would have to
+agree with aiohttp about every edge -- an open-ended range, a range past the
+end, a stale If-Range. So the header goes up untouched and the answer comes
+back untouched.
 
 NOTHING IS DOWNLOADED BEFORE THE USER SAYS SO, which is the requirement the
 user pressed hardest on. `auto_start:false` on /add resolves the URL and parks
@@ -67,6 +91,27 @@ RESPONSE_FORMATS = frozenset({"json", "text", "srt", "vtt", "verbose_json"})
 # filename and in nothing else. That is why the check below is on the suffix.
 CAPTION_SUFFIXES = (".vtt", ".srt")
 
+# WHAT /ui/media WILL HAND TO A BROWSER, as an allowlist rather than "anything
+# that is not a subtitle". The route serves a file off someone else's
+# application by a name that application chose, and the difference between the
+# two spellings is what happens to the file MeTube writes that nobody here
+# anticipated -- a .part, a .json info sidecar, a .jpg thumbnail. An allowlist
+# refuses those by default; a denylist serves them and waits to be corrected.
+MEDIA_SUFFIXES = (".mp4", ".m4v", ".mkv", ".webm", ".mov",
+                  ".m4a", ".mp3", ".opus", ".ogg", ".oga", ".wav", ".flac",
+                  ".aac", ".weba")
+
+# The containers a <video> element is worth showing rather than an <audio>.
+# Read by the page from the finished filename, and repeated here so the route
+# can say which of the two it is serving without the page guessing twice.
+VIDEO_SUFFIXES = (".mp4", ".m4v", ".mkv", ".webm", ".mov")
+
+# The two values /v1/audio/transcriptions accepts for timestamp_granularities[]
+# (openai_api.py _values). Allowlisted for the same reason RESPONSE_FORMATS is:
+# these strings are interpolated into a multipart frame this module builds by
+# hand, and an unvalidated one carrying CRLF closes a part and opens another.
+GRANULARITIES = frozenset({"word", "segment"})
+
 router = APIRouter()
 
 # Per-caller budget for /ui/resolve. That route spawns a process which makes an
@@ -115,6 +160,13 @@ class CommitRequest(BaseModel):
     # seconds for near-zero cost, which beats transcribing it however fast
     # Parakeet is.
     captions: bool = False
+    # KEEP THE PICTURE, AND IT DEFAULTS OFF ON PURPOSE. Audio-only is what makes
+    # a link affordable -- download_type "audio" never pulls the video stream at
+    # all, so a 2h14m podcast is ~131 MB rather than gigabytes -- and that must
+    # not change because a feature was added. This is per link, ticked on the
+    # confirm card next to the size it changes, and the card says so before
+    # anything is fetched.
+    video: bool = False
 
 
 class TokenRequest(BaseModel):
@@ -254,33 +306,58 @@ async def commit(request: Request, body: CommitRequest) -> Response:
             code="not_resolved", param="token")
 
     trimmed = body.clip_start is not None or body.clip_end is not None
+    # WHICH OF THE THREE KINDS OF DOWNLOAD THIS IS, decided once. They are
+    # mutually exclusive and the precedence is not arbitrary:
+    #
+    #   captions  wins over everything. It sets skip_download, so there is no
+    #             media at all -- asking for a video AND for no media is a
+    #             contradiction, and the page's captions button never offers
+    #             the video tick anyway.
+    #   for_clip  wins over video. The clone sheet needs a WAV the stdlib
+    #             `wave` module can measure, and it never sets video; if some
+    #             future caller sets both, silently handing clips.save an mp4
+    #             would fail two services later with "that file is not a WAV".
+    #   video     the only one that is new, and the only one the user ticks.
+    if body.captions:
+        download_type, file_format = "captions", None
+    elif body.for_clip:
+        download_type, file_format = "audio", "wav"
+    elif body.video:
+        download_type, file_format = "video", config.METUBE_VIDEO_FORMAT
+    else:
+        download_type, file_format = "audio", None
     try:
-        if trimmed or body.captions:
+        if trimmed or download_type != "audio" or file_format is not None:
             # /start promotes a pending item with the options it was ADDED
-            # with; there is no route that edits them. So a clip range or a
-            # switch to captions means dropping the pending record and adding
-            # it again with the final options and auto_start:true. That costs a
-            # second extract_info on MeTube's side and is the only correct way
-            # to apply a trim.
+            # with; there is no route that edits them. So a clip range, a
+            # switch to captions or a switch to video means dropping the
+            # pending record and adding it again with the final options and
+            # auto_start:true. That costs a second extract_info on MeTube's
+            # side and is the only correct way to apply any of them.
+            #
+            # The condition is written as "anything but a plain untrimmed audio
+            # commit" rather than as a list of the cases that need it, because
+            # the list was already two items long and each new one was a
+            # download that quietly came back in the wrong format.
             await client.abandon(url)
             await client.add(url, auto_start=True,
-                             download_type="captions" if body.captions else "audio",
-                             audio_format="wav" if body.for_clip else None,
+                             download_type=download_type,
+                             audio_format=file_format,
                              clip_start=body.clip_start,
                              clip_end=body.clip_end)
-        elif body.for_clip:
-            # A clip import always re-adds, even with no trim, because /start
-            # promotes a pending item with the options it was ADDED with and
-            # the pending one was queued as opus by /ui/resolve. There is no
-            # route that edits them.
-            await client.abandon(url)
-            await client.add(url, auto_start=True, audio_format="wav")
         else:
             await client.start(url)
     except metube.MeTubeError as exc:
         return _unavailable(exc)
     return Response(media_type="application/json",
-                    content=_json({"token": url, "status": "started"}))
+                    content=_json({"token": url, "status": "started",
+                                   # Echoed rather than assumed by the page: it
+                                   # decides between the <video> and the
+                                   # <audio> element from this and from the
+                                   # finished filename, and a page that merely
+                                   # remembered what it asked for would show a
+                                   # black rectangle whenever the two differed.
+                                   "video": download_type == "video"}))
 
 
 @router.post("/ui/abandon")
@@ -329,9 +406,15 @@ async def progress(request: Request, token: str) -> Response:
     }))
 
 
-def _multipart(boundary: str, fields: dict[str, str], *, filename: str,
+def _multipart(boundary: str, fields: list[tuple[str, str]], *, filename: str,
                chunks: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
     """A multipart body streamed from a remote response, never buffered.
+
+    A LIST OF PAIRS AND NOT A DICT, because `timestamp_granularities[]` is sent
+    TWICE -- once for `word` and once for `segment` -- and a dict can hold one
+    of them. That is not a detail: `word` is what the highlight follows and
+    `segment` is what the caption band and the .srt sidecar are built from, and
+    a mapping would have silently dropped whichever came second.
 
     Written by hand rather than handed to httpx's `files=`, which wants a
     file-like object it can size. The alternative was buffering the whole
@@ -340,7 +423,7 @@ def _multipart(boundary: str, fields: dict[str, str], *, filename: str,
     touches. Multipart is four lines of framing; neither of those is worth it.
     """
     async def body() -> AsyncIterator[bytes]:
-        for name, value in fields.items():
+        for name, value in fields:
             yield (f"--{boundary}\r\n"
                    f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
                    f"{value}\r\n").encode()
@@ -604,12 +687,34 @@ async def fetch(request: Request, body: TokenRequest) -> Response:
             400, f"response_format must be one of "
                  f"{', '.join(sorted(RESPONSE_FORMATS))}, not {wanted!r}",
             code="invalid_response_format", param="response_format")
-    fields = {
+
+    # THE REASON A LINK HAD NO KARAOKE HIGHLIGHT AND NO CAPTION BAND, and it
+    # was never about the player. The cues come from timedFromJson(), which
+    # reads verbose_json's `words[]` and `segments[]`; formatForUpload() asks
+    # for verbose_json but only ever ran on the upload path, and this route
+    # forwarded `model` and `response_format` and nothing else -- so a link was
+    # transcribed as plain text and no timing ever came back to draw with. Both
+    # halves had to move: the page asks, and this route has to be able to carry
+    # the ask.
+    #
+    # REPEATED QUERY PARAMETER, one multipart field each, because that is the
+    # shape openai_api.py's _values() reads and it takes the field more than
+    # once. Allowlisted for the same reason response_format is: these strings
+    # go into a frame this module builds by hand.
+    granularities = request.query_params.getlist("timestamp_granularities")
+    for value in granularities:
+        if value not in GRANULARITIES:
+            return error_response(
+                400, f"timestamp_granularities must be one of "
+                     f"{', '.join(sorted(GRANULARITIES))}, not {value!r}",
+                code="invalid_granularity", param="timestamp_granularities")
+    fields = [
         # Required by /v1 validation, and it does NOT choose an engine --
         # Parakeet runs regardless and says so in x-stt-engine.
-        "model": "parakeet",
-        "response_format": wanted,
-    }
+        ("model", "parakeet"),
+        ("response_format", wanted),
+        *(("timestamp_granularities[]", value) for value in granularities),
+    ]
 
     async def upstream() -> AsyncIterator[bytes]:
         seen = 0
@@ -666,6 +771,177 @@ async def fetch(request: Request, body: TokenRequest) -> Response:
         relay(), status_code=upstream_response.status_code,
         media_type=upstream_response.headers.get("content-type",
                                                  "application/json"))
+
+
+# The headers a ranged media response is made of. Relayed rather than
+# regenerated, so this service never has an opinion about a range it did not
+# parse:
+#
+#   content-range    which bytes these are, and how many there are in total.
+#                    Without it a 206 is meaningless and Safari gives up.
+#   content-length   of THIS response, which for a 206 is the slice and not
+#                    the file. Recomputing it here is how a player ends up
+#                    waiting for bytes that are never coming.
+#   accept-ranges    what tells the element it may seek at all. Dropped, the
+#                    scrub bar becomes decorative and playback restarts from
+#                    zero on every attempt -- which is the exact failure this
+#                    route exists to avoid.
+#   content-type     video/mp4 or audio/*, from aiohttp's own guess off the
+#                    suffix. A <video> given application/octet-stream declines
+#                    to play it.
+#   etag,
+#   last-modified    what If-Range is COMPARED AGAINST. Relaying the request
+#                    header while dropping these two makes every conditional
+#                    range unconditional, which is a silently corrupted file
+#                    the moment a download is replaced mid-playback.
+#   content-encoding because the body is relayed raw (aiter_raw). Dropping it
+#                    would label gzip bytes as mp4.
+RELAYED = ("content-range", "content-length", "accept-ranges", "content-type",
+           "etag", "last-modified", "content-encoding")
+
+
+def _total_bytes(upstream: httpx.Response) -> int | None:
+    """The size of the WHOLE file, from whichever header carries it.
+
+    On a 206 that is the figure after the slash in `Content-Range: bytes
+    0-1023/533915`, and Content-Length is the slice -- so reading Content-Length
+    alone would compare a 1 KB first request against a 4 GiB ceiling and admit
+    a file of any size at all, one range at a time.
+    """
+    ranged = upstream.headers.get("content-range", "")
+    if "/" in ranged:
+        total = ranged.rsplit("/", 1)[1].strip()
+        if total.isdigit():
+            return int(total)
+    declared = upstream.headers.get("content-length", "")
+    if declared.isdigit() and upstream.status_code == 200:
+        return int(declared)
+    return None
+
+
+@router.get("/ui/media")
+async def media(request: Request, token: str) -> Response:
+    """Stream a finished download to the browser, byte ranges and all.
+
+    THE PART THAT MATTERS IS THE RANGE, not the streaming. A <video> or
+    <audio> element seeks by asking for a byte range; served by something that
+    ignores Range and answers 200 with the whole file, it plays from the start
+    and every scrub is silently ignored -- the picture moves back to zero and
+    the user concludes the player is broken. So the header goes up and the 206
+    comes back, and this function parses neither.
+
+    WHY THE ANSWER IS NOT SIMPLY PROXIED. Three things are checked first, and
+    each one is the boundary for a different failure:
+
+      * MeTube must already hold a FINISHED record for this token. That is what
+        "only a token this page actually resolved" means in practice, and it is
+        the same gate /ui/fetch and /ui/captions apply. Without it this route
+        is an open read of anything in someone else's download directory, by a
+        name a caller supplies.
+      * The filename must be media. A .vtt served as video/mp4 is a confusing
+        failure; a name that got past the suffix check is one this route
+        refuses rather than relays.
+      * The whole file must be inside MAX_MEDIA_BYTES. See config: it is
+        deliberately its own setting and not MAX_UPLOAD_BYTES, which bounds
+        what services/stt reads into memory rather than what a laptop pulls
+        down a domestic line.
+
+    NO guard.check ON THE TOKEN HERE, and that is deliberate rather than an
+    omission. guard.check resolves the hostname, and a single playback makes
+    dozens of range requests -- one getaddrinfo each would be a DNS lookup per
+    scrub for a URL that is never fetched on this path, only looked up in a
+    dictionary. The URL was guarded twice before anything was downloaded, by
+    /ui/resolve and by MeTube's own url_guard, and the /history lookup below is
+    what proves this is that same link.
+    """
+    client = _client(request)
+    try:
+        found = await client.find(token)
+    except metube.MeTubeError as exc:
+        return _unavailable(exc)
+    if found is None:
+        return error_response(404, "MeTube has no record of that link.",
+                              code="unknown_token", param="token")
+
+    where, entry = found
+    filename = entry.get("filename")
+    if where != "done" or entry.get("status") != metube.FINISHED or not filename:
+        return error_response(
+            409, f"that download is {entry.get('status') or where}, not finished",
+            code="not_ready", param="token")
+
+    name = str(filename)
+    if not name.lower().endswith(MEDIA_SUFFIXES):
+        return error_response(
+            409,
+            "That download is not media this page can play. A captions "
+            "download is read with POST /ui/captions instead.",
+            code="not_media", param="token")
+
+    source = client.audio_url(name, str(entry.get("folder") or ""))
+    # UP UNTOUCHED. Range because that is the whole point, and If-Range because
+    # a conditional range without it is not conditional: a player that holds a
+    # stale ETag would be handed a slice of a DIFFERENT file and would splice
+    # the two together with no error anywhere.
+    forwarded = {header: request.headers[header]
+                 for header in ("range", "if-range") if header in request.headers}
+
+    http: httpx.AsyncClient = request.app.state.client
+    try:
+        upstream = await http.send(
+            http.build_request("GET", source, headers=forwarded,
+                               # No overall ceiling: a player holds a range
+                               # open for as long as it is buffering, and a
+                               # read timeout here would cut a paused video
+                               # off mid-buffer.
+                               timeout=httpx.Timeout(None, connect=5.0)),
+            stream=True)
+    except httpx.RequestError as exc:
+        return error_response(
+            502, f"could not read the downloaded media ({type(exc).__name__})",
+            type_="server_error", code="ingestion_unavailable")
+
+    if upstream.status_code >= 400:
+        # A 416 is MeTube's honest answer to a range past the end and belongs
+        # to the browser, which retries correctly; it is not our failure and
+        # must not be dressed up as one. Anything else from a file MeTube
+        # itself reported is an outage on that side.
+        status = upstream.status_code
+        await upstream.aclose()
+        if status == 416:
+            return Response(status_code=416,
+                            headers={"accept-ranges": "bytes"})
+        return error_response(
+            502, f"MeTube answered {status} for the media file it reported",
+            type_="server_error", code="ingestion_unavailable")
+
+    total = _total_bytes(upstream)
+    if total is not None and total > config.MAX_MEDIA_BYTES:
+        await upstream.aclose()
+        return error_response(
+            413,
+            f"that download is {total / 1024**3:.1f} GB and playback here is "
+            f"capped at {config.MAX_MEDIA_BYTES / 1024**3:.1f} GB. The "
+            f"transcript is unaffected.",
+            code="media_too_large", param="token")
+
+    async def relay() -> AsyncIterator[bytes]:
+        try:
+            # aiter_raw, so content-length and content-encoding stay true of
+            # the bytes actually sent. Same rule as the proxy in app/main.py.
+            async for chunk in upstream.aiter_raw():
+                yield chunk
+        finally:
+            await upstream.aclose()
+
+    headers = {name: value for name in RELAYED
+               if (value := upstream.headers.get(name)) is not None}
+    # Belt and braces: MeTube sends this, but a 206 whose Accept-Ranges went
+    # missing on some future hop would leave the scrub bar dead, and asserting
+    # it costs one header.
+    headers.setdefault("accept-ranges", "bytes")
+    return StreamingResponse(relay(), status_code=upstream.status_code,
+                             headers=headers)
 
 
 def _json(payload: dict[str, Any]) -> bytes:

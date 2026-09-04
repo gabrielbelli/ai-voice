@@ -595,7 +595,10 @@ def test_the_native_route_greys_out_the_fields_it_cannot_carry():
     """
     body = _code(_fn("function syncTranscribeControls()"))
     assert '$("x-rf").disabled = native;' in body
-    assert '$("x-gran").disabled = !form;' in body
+    # native only: the link path carries granularities now, and greying a
+    # control out for a reason that has stopped being true is the very thing
+    # syncTranscribeControls exists to prevent.
+    assert '$("x-gran").disabled = native;' in body
     assert '$("x-logprobs").disabled = !form;' in body
     assert 'x-vad-t' in body and 'disabled = !form' in body
 
