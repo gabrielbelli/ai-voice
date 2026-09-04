@@ -2564,7 +2564,24 @@ async function refreshJobs() {
     if (jobs.has(seen.id)) { keep.push(seen); continue; }
     if (now - seen.at > TTL) continue;
     keep.push(seen);
-    if (before.has(seen.id)) jobs.set(seen.id, before.get(seen.id));
+    if (!before.has(seen.id)) continue;
+    /* THE SERVER ANSWERED AND DOES NOT KNOW THIS JOB. The catch above already
+       handled "unreachable", so reaching here means tts-long listed its jobs
+       and this was not among them.
+
+       Restoring the last state we saw is right for a job that was already
+       done -- the record is gone but the audio is on a volume and tts-long
+       recovers it on start. It is WRONG for one that was queued or running:
+       that work died with the process, and the page went on showing "queued"
+       for ever, waiting for a worker that no longer had the job. Which is
+       exactly what a restart looked like from here. */
+    const was = before.get(seen.id);
+    const unfinished = was.status === "queued" || was.status === "running";
+    jobs.set(seen.id, unfinished
+      ? { ...was, status: "failed",
+          error: "lost when the service restarted — the queue is in memory, "
+               + "so anything not finished did not survive" }
+      : was);
   }
   store.set("jobs", keep);
   for (const [id, job] of jobs) {

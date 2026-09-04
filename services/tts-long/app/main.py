@@ -354,9 +354,59 @@ def _discard(job: dict) -> None:
             Path(path).unlink()
 
 
+def _recover() -> int:
+    """Rebuild finished jobs from the audio still on disk.
+
+    `jobs` is a dict in this process, so a restart forgets every job -- while
+    the audio itself sits in a volume and survives. Three things went wrong
+    with that, and this fixes all three:
+
+      * a finished job became unreachable. The file was there, named after the
+        job, and nothing would serve it.
+      * the page remembers job ids in localStorage, so a job the service no
+        longer knew about rendered as PENDING for ever -- queued behind
+        nothing, waiting for a worker that had already finished it.
+      * the sweeper only removes files it has a job for, so every restart
+        orphaned another day's audio permanently. /output grew across restarts
+        with nothing able to clean it.
+
+    What is recoverable is exactly what the filename carries: the id and the
+    format. The rest -- voice, language, the generation parameters, the
+    realtime factor -- lived only in the dict and is gone. The recovered record
+    says so with `recovered: true` rather than inventing plausible values, and
+    `finished_at` comes from the file's mtime so the TTL sweep can finally
+    reach it.
+    """
+    found = 0
+    for path in sorted(OUT_DIR.glob("*.*")):
+        job_id, suffix = path.stem, path.suffix.lstrip(".")
+        if job_id in jobs or suffix not in FORMATS:
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        jobs[job_id] = {
+            "id": job_id, "status": "done", "format": suffix,
+            "path": str(path), "bytes": stat.st_size,
+            "created_at": stat.st_mtime, "started_at": stat.st_mtime,
+            "finished_at": stat.st_mtime, "cancelled": False,
+            # Named, not guessed. A reader can tell the difference between
+            # "one chunk" and "we do not know how many".
+            "recovered": True,
+        }
+        found += 1
+    return found
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    recovered = _recover()
+    if recovered:
+        log.info("recovered %d finished job(s) from %s; their audio is "
+                 "downloadable again and the sweeper can now expire them",
+                 recovered, OUT_DIR)
     state["synth"] = Synth(idle_timeout=IDLE_TIMEOUT, threads=THREADS)
     # One worker on purpose. The model is 6.5 GB and generation is sequential,
     # so a second job would double memory and slow both.
