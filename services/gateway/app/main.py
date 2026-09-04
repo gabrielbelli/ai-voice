@@ -640,6 +640,12 @@ UI_PATHS = (
     # which is how DELETE /jobs/{id} stayed unreachable while tts-long had
     # implemented it all along.
     ("POST", "/ui/captions"),
+    # The media relay. Without it playback 404s from the published port, which
+    # is the DELETE /jobs/{id} failure again -- implemented behind the gateway
+    # and unreachable through it. _proxy already relays Range and
+    # Content-Range: only hop-by-hop headers, host and authorization are
+    # dropped, so a byte range survives the hop untouched.
+    ("GET", "/ui/media"),
     # The prefixed mount of voice-ui's own proxy. Everything under it is
     # forwarded verbatim and voice-ui strips /ui/api before sending it back
     # here with UI_GATEWAY_API_KEY attached. A path parameter rather than a
