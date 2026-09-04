@@ -129,6 +129,48 @@ def listing() -> list[dict[str, object]]:
     return out
 
 
+def _trim(path: Path, seconds: float) -> float | None:
+    """Cut a WAV down to `seconds` in place. Returns the new length.
+
+    WHY THIS EXISTS RATHER THAN A REJECTION. yt-dlp's clip trimming seeks to
+    KEYFRAMES, so asking for a twenty-second window yields whatever the nearest
+    keyframes bracket -- measured against the deployed instance, twenty seconds
+    requested came back as 25.97 and thirty came back as 36. The ceiling was
+    therefore unreachable from the link path: asking for the maximum guaranteed
+    exceeding it, and the error told the user their clip was too long for a
+    length they had not chosen.
+
+    Trimming rather than refusing also makes the two import paths agree. The
+    browser's toWav has always trimmed to the ceiling instead of rejecting; the
+    server refusing was the odd one out.
+
+    stdlib `wave` throughout: this image has no ffmpeg and no audio library, and
+    truncating frames needs neither -- the format is a header and a block of
+    samples, and fewer samples is a shorter file.
+    """
+    try:
+        with wave.open(str(path), "rb") as handle:
+            rate = handle.getframerate()
+            if not rate:
+                return None
+            keep = int(seconds * rate)
+            if handle.getnframes() <= keep:
+                return handle.getnframes() / rate
+            params = handle.getparams()
+            frames = handle.readframes(keep)
+    except (wave.Error, OSError, EOFError):
+        return None
+
+    try:
+        with wave.open(str(path), "wb") as out:
+            out.setparams(params._replace(nframes=keep))
+            out.writeframes(frames)
+    except (wave.Error, OSError) as exc:
+        log.warning("could not trim %s: %s", path, exc)
+        return None
+    return keep / rate
+
+
 def _duration(path: Path) -> float | None:
     try:
         with wave.open(str(path), "rb") as handle:
@@ -181,10 +223,14 @@ def save(name: str, data: bytes, *, replace: bool = False) -> dict[str, object]:
                 "normally converts whatever you give it before uploading, so "
                 "this usually means the conversion was skipped.")
         if seconds > config.MAX_CLIP_SECONDS:
-            raise ClipError(
-                f"that clip is {seconds:.0f} s; the ceiling is "
-                f"{config.MAX_CLIP_SECONDS:.0f} s. Chatterbox wants 10-30 s of "
-                "one speaker.")
+            trimmed = _trim(temporary, config.MAX_CLIP_SECONDS)
+            if trimmed is None:
+                raise ClipError(
+                    f"that clip is {seconds:.0f} s, over the "
+                    f"{config.MAX_CLIP_SECONDS:.0f} s ceiling, and it could "
+                    "not be trimmed.")
+            log.info("trimmed %s from %.1f s to %.1f s", stem, seconds, trimmed)
+            seconds = trimmed
         if seconds < 1.0:
             raise ClipError(f"that clip is only {seconds:.1f} s of audio")
         os.replace(temporary, target)

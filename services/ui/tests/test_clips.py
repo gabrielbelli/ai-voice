@@ -13,7 +13,7 @@ import wave
 
 import pytest
 
-from app import clips
+from app import clips, config
 
 
 def wav_bytes(seconds: float, rate: int = 24000) -> bytes:
@@ -82,10 +82,16 @@ def test_default_is_reserved_because_it_is_chatterboxs_own_speaker(store):
         clips.save("default", wav_bytes(12))
 
 
-def test_a_clip_over_the_duration_ceiling_is_refused_and_leaves_nothing(store):
-    with pytest.raises(clips.ClipError, match="ceiling"):
-        clips.save("long", wav_bytes(45))
-    assert list(store.iterdir()) == [], "a rejected upload must leave no partial file"
+def test_a_clip_over_the_duration_ceiling_is_trimmed_and_leaves_one_file(store):
+    """This asserted a REFUSAL until yt-dlp's keyframe seeking made the ceiling
+    unreachable from the link path -- see the trim tests at the end of this
+    file. What still matters is the half it was really guarding: exactly one
+    file in the directory afterwards, and no `.part` left behind.
+    """
+    saved = clips.save("long", wav_bytes(45))
+    assert saved["seconds"] <= config.MAX_CLIP_SECONDS + 0.01
+    files = sorted(p.name for p in store.iterdir())
+    assert files == ["long.wav"], f"expected one finished clip, got {files}"
 
 
 def test_a_clip_that_is_not_a_wav_is_refused_and_leaves_nothing(store):
@@ -134,3 +140,31 @@ def test_the_route_returns_the_refreshed_list(client, tmp_path):
     assert [v["name"] for v in response.json()["voices"]] == ["gabriel"]
     assert api.get("/ui/clips").json()["writable"] is True
     assert api.delete("/ui/clips/gabriel").json()["voices"] == []
+
+
+# ------------------------------------------ the ceiling is a trim, not a wall --
+
+
+def test_a_clip_over_the_ceiling_is_trimmed_not_refused(store):
+    """yt-dlp seeks to KEYFRAMES, so a requested window overshoots.
+
+    Measured against the deployed instance: twenty seconds requested came back
+    as 25.97, thirty came back as 36. That made the ceiling unreachable from
+    the link path -- asking for the maximum guaranteed exceeding it -- and the
+    error told the user their clip was too long for a length they had never
+    chosen. The browser's toWav has always trimmed rather than rejected; the
+    server refusing was the odd one out.
+    """
+    saved = clips.save("overshoot", wav_bytes(36))
+    assert saved["seconds"] <= config.MAX_CLIP_SECONDS + 0.01, saved
+
+
+def test_a_clip_under_the_ceiling_is_left_alone(store):
+    saved = clips.save("short", wav_bytes(12))
+    assert abs(float(saved["seconds"]) - 12) < 0.01
+
+
+def test_a_clip_that_is_too_short_is_still_refused(store):
+    """Trimming cannot invent audio, so the lower bound stays a refusal."""
+    with pytest.raises(clips.ClipError):
+        clips.save("tiny", wav_bytes(0.4))
