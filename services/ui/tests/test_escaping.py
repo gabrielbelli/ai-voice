@@ -423,3 +423,30 @@ def test_the_upload_carries_its_real_extension():
     is another."""
     assert 'name + clipSuffix' in HTML
     assert 'name + ".wav"' not in HTML
+
+
+def test_forget_deletes_on_the_server_not_just_in_the_page():
+    """It removed the job from this page's map and localStorage and stopped
+    there, so the next poll listed it again three seconds later. The button had
+    done exactly what it said and nothing anyone wanted.
+
+    It matters more since tts-long started recovering finished jobs from
+    /output at startup: a forgotten job came back from disk on every restart,
+    permanently.
+    """
+    body = HTML[HTML.index("async function forgetJob(id)"):]
+    body = body[:body.index("\n}\n")]
+    assert 'method: "DELETE"' in body, "forget must reach the server"
+    assert "jobs.delete(id)" in body, "and still clear the local copy"
+    order = body.index('method: "DELETE"') < body.index("jobs.delete(id)")
+    assert order, "delete on the server before forgetting locally"
+
+
+def test_forget_treats_a_404_as_success():
+    """The service not having it either -- swept, or lost to a restart this
+    page still remembers -- is the case where local cleanup IS the whole job.
+    Alerting there would make the button look broken for the one state it
+    handles perfectly."""
+    body = HTML[HTML.index("async function forgetJob(id)"):]
+    body = body[:body.index("\n}\n")]
+    assert "err.status !== 404" in body

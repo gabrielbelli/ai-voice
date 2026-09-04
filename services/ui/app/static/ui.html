@@ -2476,9 +2476,7 @@ function renderJobs() {
   $("joblist").querySelectorAll("[data-retry]").forEach(b =>
     b.addEventListener("click", () => retryJob(b.dataset.retry)));
   $("joblist").querySelectorAll("[data-forget]").forEach(b =>
-    b.addEventListener("click", () => { jobs.delete(b.dataset.forget);
-      store.set("jobs", remembered().filter(j => j.id !== b.dataset.forget));
-      renderJobs(); }));
+    b.addEventListener("click", () => forgetJob(b.dataset.forget)));
 }
 
 let jobUrl = null;
@@ -2522,6 +2520,33 @@ async function downloadJob(id) {
   const a = document.createElement("a");
   a.href = url; a.download = id + ".wav"; a.click();
   setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+async function forgetJob(id) {
+  /* IT HAS TO REACH THE SERVER. This used to delete the job from this page's
+     map and from localStorage and stop there, so the next poll listed it again
+     three seconds later and the button looked broken -- it had done exactly
+     what it said and nothing anyone wanted.
+
+     It matters more since tts-long started recovering finished jobs from
+     /output at startup: a forgotten job now came back from disk on every
+     restart, permanently. DELETE /jobs/{id} discards the audio and the record
+     together, which is what "forget" means here.
+
+     A 404 is success. It means the service does not have it either -- an
+     already-swept job, or one lost to a restart that this page still
+     remembers -- and the local cleanup below is the whole job in that case. */
+  try {
+    await json(`/jobs/${encodeURIComponent(id)}`, { method: "DELETE" });
+  } catch (err) {
+    if (err.status !== 404) {
+      alert("Could not forget it: " + err.message);
+      return;
+    }
+  }
+  jobs.delete(id);
+  store.set("jobs", remembered().filter(j => j.id !== id));
+  renderJobs();
 }
 
 async function stopJob(id) {
