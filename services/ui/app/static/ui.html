@@ -3136,19 +3136,28 @@ function speakCues(parts, plain, header) {
   const texts = parts && parts.length ? parts.map(p => p.text || "") : [plain || ""];
   if (offsets.length !== texts.length) return;
 
-  /* Joined the way it reads, not the way it was sent: a blank line between
-     segments preserves the paragraphs someone typed instead of running them
-     into one block. */
-  const sep = "\n\n";
-  const cues = [];
-  let at = 0;
-  texts.forEach((t, i) => {
-    cues.push({ at, length: t.length,
-                start: offsets[i],
-                end: i + 1 < offsets.length ? offsets[i + 1] : Infinity });
-    at += t.length + sep.length;
-  });
-  const display = texts.join(sep);
+  /* THE TEXT AS TYPED, HIGHLIGHTED IN PLACE. This used to rebuild the passage
+     by joining the sentences with a blank line, which is a different document:
+     every paragraph break the writer made was replaced by one the page chose,
+     and a line break inside a sentence disappeared. The point of following
+     along is reading your own text, not a reflowed copy of it.
+
+     locate() is the same function the subtitle path uses to map cues onto a
+     transcript: it walks forward through the original finding each piece, so
+     the spans are offsets INTO what was typed and every space, newline and
+     blank line between them is untouched.
+
+     A piece that cannot be found returns null and the highlight is skipped
+     rather than approximated. That happens if the split and the original
+     disagree -- and a highlight sliding off the words is worse than none. */
+  const display = plain || texts.join(" ");
+  const spans = locate(display, texts.map((t, i) => ({
+    text: t,
+    start: offsets[i],
+    end: i + 1 < offsets.length ? offsets[i + 1] : Infinity,
+  })));
+  if (!spans) return;
+  const cues = spans;
   karaoke.cues = cues;
   karaoke.player = $("player");
   karaoke.spans = paint($("speaktext"), display, cues);

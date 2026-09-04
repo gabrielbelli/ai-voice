@@ -561,10 +561,18 @@ def test_the_speak_highlight_is_segment_level_and_says_so():
 
 
 def test_paragraphs_survive_into_the_highlight():
-    """Segments are joined the way they read, not the way they were sent."""
+    """Not by rebuilding them -- by never taking them apart.
+
+    This asserted a separator the page inserted between sentences. That was
+    the bug: the passage was reconstructed, so the writer's own line breaks
+    were replaced by the page's. The spans are now offsets into the text as
+    typed, and the whitespace between them is whatever was already there.
+    """
     body = HTML[HTML.index("function speakCues("):]
     body = body[:body.index("\n}\n")]
-    assert 'const sep = "\\n\\n"' in body
+    code = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+    assert "const sep =" not in code, "the page is still choosing the separator"
+    assert "const display = plain" in code, "the original text should be shown"
 
 
 def test_a_mismatched_offset_count_is_ignored_rather_than_guessed():
@@ -840,3 +848,32 @@ def test_no_burn_in_arrived_by_the_back_door():
     assert "install -y --no-install-recommends util-linux" in container, (
         "the image installs something new; if it is a codec library the "
         "no-burn-in decision has been undone")
+
+
+def test_the_spoken_text_is_shown_as_typed_not_rebuilt():
+    """It used to join the sentences back together with a blank line, which is
+    a DIFFERENT DOCUMENT: every paragraph break the writer made was replaced by
+    one the page chose, and a line break inside a sentence vanished. The point
+    of following along is reading your own text, not a reflowed copy.
+    """
+    body = HTML[HTML.index("function speakCues("):]
+    body = body[:body.index("\n}\n")]
+    code = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+    assert 'texts.join("\\n\\n")' not in code, "the text is still being rebuilt"
+    assert "locate(display" in code, \
+        "spans should be offsets into the original, as the subtitle path does"
+
+
+def test_an_unlocatable_split_shows_no_highlight_rather_than_a_wrong_one():
+    """If the split and the original disagree, locate() returns null. A
+    highlight sliding off the words is worse than none."""
+    body = HTML[HTML.index("function speakCues("):]
+    body = body[:body.index("\n}\n")]
+    assert "if (!spans) return;" in body
+
+
+def test_the_rendered_text_preserves_whitespace():
+    """Without pre-wrap the browser collapses the newlines the spans were
+    measured against, so the highlight would land in the wrong place."""
+    assert "white-space:pre-wrap" in HTML[HTML.index(".out{"):
+                                          HTML.index(".out{") + 120]
