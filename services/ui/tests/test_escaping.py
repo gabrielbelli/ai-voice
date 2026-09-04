@@ -660,7 +660,8 @@ def test_the_language_control_is_off_where_it_is_not_sent():
 def test_the_speak_route_is_the_one_that_reads_the_segments():
     """Read inside the branch that sends them, so this cannot come back."""
     body = _code(_fn("async function speakNow("))
-    assert "const parts = useV1 ? null : segments();" in body
+    assert "useV1 ? null : (segments() || autoSegments(text))" in body, \
+        "segments must still be read only on the route that carries them"
     assert "language: resolvedLanguage().code" in body
 
 
@@ -718,3 +719,27 @@ def test_cancelling_the_clone_sheet_drops_the_resolved_link():
     assert "forgetClipLink()" in body
     assert '$("cliplink").value = "";' in body
     assert '"/ui/abandon"' in _fn("async function forgetClipLink()")
+
+
+def test_plain_text_is_split_into_sentences_so_there_is_something_to_follow():
+    """A plain `text` request makes one piece of audio and therefore one
+    offset, so the highlight covered the whole passage and karaoke on this tab
+    did nothing unless you had opened the expert panel and built segments by
+    hand. Which nobody does.
+    """
+    body = _code(_fn("function autoSegments("))
+    assert "split(/(?<=[.!?" in body, "no sentence split"
+    assert "out.length > 1 ? out : null" in body, \
+        "one sentence is one highlight over everything -- worse than none"
+
+
+def test_the_split_keeps_paragraphs():
+    body = _code(_fn("function autoSegments("))
+    assert 'split(/\\n\\s*\\n/)' in body
+
+
+def test_the_split_inserts_no_pauses():
+    """speak() already chunks at MAX_CHUNK_PHONEMES, so this moves a break from
+    a token budget to a full stop. Adding silence would change the audio."""
+    body = _code(_fn("function autoSegments("))
+    assert "pause_after" not in body

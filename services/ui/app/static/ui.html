@@ -2867,6 +2867,48 @@ $("addseg").addEventListener("click", () => addSegment(""));
 /* Delegated, so it covers rows that do not exist yet. */
 $("segments").addEventListener("input", estimate);
 
+/* SENTENCES, SO THERE IS SOMETHING TO FOLLOW.
+   A plain `text` request produces exactly one piece of audio and therefore one
+   offset, so the highlight covered the whole passage and karaoke on this tab
+   did nothing -- it only ever worked if you had opened the expert panel and
+   built segments by hand, which nobody does.
+
+   The server cannot fix this for us. Kokoro's plan() phonemises the WHOLE text
+   and then splits the phoneme string at a token budget, so its chunk
+   boundaries exist in phoneme space with no way back to the characters that
+   produced them. Splitting the SOURCE first is the only thing that yields a
+   span the page can highlight.
+
+   Split here rather than in the service, deliberately: /speak already accepts
+   segments and already returns their offsets, so this needs no API change and
+   cannot alter what any other client -- Open WebUI, a script -- gets back for
+   the same request it sends today.
+
+   The audio is not degraded by it. speak() ALREADY chunks at
+   MAX_CHUNK_PHONEMES, an arbitrary budget that can fall mid-sentence; a full
+   stop is a better place to break than a token count, and pause_after is left
+   at 0 so nothing is inserted between them.
+
+   Blank lines are kept as paragraph breaks so the rendered text reads the way
+   it was typed. */
+function autoSegments(text) {
+  const paragraphs = (text || "").split(/\n\s*\n/);
+  const out = [];
+  for (const paragraph of paragraphs) {
+    /* A sentence end is punctuation followed by whitespace. Kept WITH the
+       sentence rather than dropped, or the audio would lose its full stops and
+       the highlighted text would not match what was said. */
+    for (const piece of paragraph.split(/(?<=[.!?…])\s+/)) {
+      const trimmed = piece.trim();
+      if (trimmed) out.push({ text: trimmed });
+    }
+  }
+  /* One sentence is one highlight over everything, which is what this exists
+     to avoid: better to send it as plain text and show no highlight than to
+     draw one that says nothing. */
+  return out.length > 1 ? out : null;
+}
+
 function segments() {
   /* A HIDDEN CONTROL MUST NOT APPLY. The segments editor lives inside the
      Kokoro expert panel, and onVoiceChange hides that panel when a Chatterbox
@@ -2923,7 +2965,11 @@ async function speakNow(voice, text) {
      used on one branch, which is how the Language control and the segments
      editor came to be settable on a route that has neither -- see
      syncSpeakControls, which is what now says so on the screen. */
-  const parts = useV1 ? null : segments();
+  /* Hand-built segments win; otherwise the text is split into sentences so
+     there is something to follow. /v1 has no segments at all, so on that route
+     there is nothing to split into and no highlight -- which syncSpeakControls
+     already says on screen. See autoSegments. */
+  const parts = useV1 ? null : (segments() || autoSegments(text));
 
   let path, body;
   if (useV1) {
