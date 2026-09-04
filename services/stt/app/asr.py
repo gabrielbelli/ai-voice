@@ -13,9 +13,10 @@ cheap or distant microphone — cost Whisper +206% WER on CORAA and Parakeet
 physical limit.
 
 Whisper remains available, because it genuinely wins on clean read speech and
-it is the only one of the two that accepts a vocabulary at DECODE time — the
-distinction matters now that a request's vocabulary reaches both engines, and
-only reaches the decoder on one.
+because it translates. It used to be here for a third reason — that it was the
+only one of the two that accepted a vocabulary at DECODE time — and that reason
+is gone: see boosting.py. Both engines now bias their decoder, by different
+mechanisms, from the same list of terms.
 
 There is deliberately no second recogniser. A consensus pass was tried and
 removed: across every disagreement observed, the second model was the wrong
@@ -38,18 +39,26 @@ would have done the work.
                   Parakeet v3 takes none — onnx-asr's RecognizeOptions
                   documents `language` as "only for Whisper and Canary models"
                   — and surfaces no detected language to report back.
-  vocabulary      Whisper accepts hotwords at decode time. Parakeet's TDT
-                  decoder has no vocabulary argument at all; the glossary is
-                  post-decode repair there, which cannot recover a word the
-                  acoustic model never approached.
-                  `accepts_vocabulary` is a claim about the DECODER and only
-                  about the decoder. It is what decides whether a request's
-                  terms are joined into hotwords — it does NOT decide whether
-                  `prompt` and `keywords[]` are accepted, which they now are on
-                  both engines, because those terms also compile into that
-                  request's post-decode repair. openai_api._terms carries the
-                  reasoning; this flag stays false on Parakeet because it is
-                  still true.
+  vocabulary      BOTH ENGINES, by different mechanisms, from one list of
+                  terms. Whisper takes hotwords at decode time. Parakeet takes
+                  a boosting automaton through its TDT decoding loop — shallow
+                  fusion added to the joint's logits one frame before the
+                  argmax; boosting.py is the whole argument and the measured
+                  numbers.
+                  This file said for a long time that Parakeet "has no
+                  vocabulary argument at all". That was true of the ARGUMENT
+                  and false about what is reachable, and believing it cost this
+                  service a feature and cost `prompt` a 4xx on the default
+                  engine. Corrected here rather than left as a footnote,
+                  because it is the sentence that misled everyone who read it.
+                  `accepts_vocabulary` is still a claim about the DECODER and
+                  only about the decoder. It is now true on Parakeet, and it is
+                  set per INSTANCE rather than per class, because a version of
+                  onnx-asr whose decoding seam this service has not been read
+                  against turns it back off — see boosting.verify_seam. It does
+                  not decide whether `prompt` and `keywords[]` are accepted;
+                  those are accepted either way, because the terms also compile
+                  into that request's post-decode repair.
   temperature     Whisper has one, though pinning it disables the fallback
                   ladder. A TDT decoder has no sampling temperature.
   streaming       faster-whisper yields each segment as its 30 s window is
@@ -72,9 +81,12 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 from dataclasses import dataclass
 
 import numpy as np
+
+from . import boosting
 
 log = logging.getLogger("stt-stack.asr")
 
@@ -132,7 +144,21 @@ class Options:
     """What one request asked the recogniser for."""
 
     language: str | None = None
-    hotwords: str | None = None
+    # The same vocabulary in the two shapes the two decoders take. Both are
+    # filled from one list — openai_api._decode_vocabulary — so they cannot
+    # disagree about what this request asked for, and each engine reads the one
+    # it can use. Re-splitting the joined string would corrupt a term with a
+    # comma in it, which is why the tuple exists rather than being derived.
+    hotwords: str | None = None          # faster-whisper's shape
+    vocabulary: tuple[str, ...] = ()     # boosting.compile_automaton's shape
+    # Decode-time biasing on Parakeet is OPT-IN PER REQUEST and off by default.
+    # A glossary whose terms do not occur in the audio raised WER by 12% on
+    # this engine across 250 conditions, so a boost list nobody asked for is a
+    # measured cost rather than a neutral. Whisper's hotwords are unaffected by
+    # this flag: they predate it, they are what `prompt` has always done there,
+    # and moving them would change a shipped engine under a change about the
+    # other one. See openai_api._boost.
+    boost: bool = False
     temperature: float | None = None
     task: str = "transcribe"
     want_words: bool = False
@@ -158,21 +184,50 @@ class Recognition:
     segments: tuple[Segment, ...] | None = None
     words: tuple[Word, ...] = ()
     logprobs: tuple[TokenLogprob, ...] | None = None
+    # The phrases that actually reached the decoder as a boost automaton.
+    # Empty when nothing was boosted, which is the default.
+    #
+    # This exists so that "honoured" and "did something" can be told apart from
+    # outside, which is the same reason X-Glossary-Repaired exists for the
+    # repair half. A term can be dropped from the boost list for three
+    # different reasons — no pieces for one of its characters, under the
+    # minimum length, over the phrase ceiling — and a caller who cannot see
+    # which of their terms survived is back to believing their vocabulary was
+    # applied when it was not.
+    boosted: tuple[str, ...] = ()
 
 
 class Parakeet:
-    """Parakeet TDT via ONNX Runtime. CTC/TDT, so no decode-time vocabulary.
+    """Parakeet TDT via ONNX Runtime, with decode-time biasing.
 
-    Terms are repaired after decoding instead (see glossary.py), and that now
-    includes a request's own `prompt` and `keywords[]` rather than a 400. It is
-    weaker than biasing — it recovers a proper noun the model heard and
-    mis-spelled, not one it never approached — but it is what this runtime
-    offers, and it is more than the refusal it replaced. FluidAudio implements
-    real CTC boosting for the same model, and is CoreML-only.
+    A GLOSSARY HAS TWO HALVES HERE NOW, AND IT USED TO HAVE ONE. Terms are
+    still repaired after decoding (glossary.py), and a request that opts in
+    with `boost` additionally gets them compiled into a boosting automaton and
+    fused into the TDT decoding loop before the argmax. boosting.py holds the
+    mechanism, the measured logit scale and every default.
+
+    What this docstring said until that landed — "CTC/TDT, so no decode-time
+    vocabulary", and that FluidAudio's CTC boosting for the same model was
+    CoreML-only and therefore out of reach — was wrong in the way that matters:
+    it described onnx-asr's public argument list as though it were the model's
+    capability, and the next reader concluded the feature was impossible. It
+    was reachable in about forty lines.
+
+    Biasing is off unless a request asks, because a boost list whose terms are
+    absent from the audio is a measured accuracy cost, not a neutral.
     """
 
     name = "parakeet"
-    accepts_vocabulary = False
+    # Set per instance in __init__ as well, and deliberately: a version of
+    # onnx-asr whose decoding seam has not been read turns this back off rather
+    # than accepting a boost list and quietly discarding it.
+    accepts_vocabulary = True
+    # Whether `boost` is a field this engine has an answer for. Separate from
+    # accepts_vocabulary on purpose: Whisper takes a vocabulary at decode time
+    # and has no switch for it, so it refuses the field rather than pretending
+    # the request changed something. One flag per capability, as the header
+    # above argues, so that a refusal cannot drift from the code behind it.
+    accepts_boost = True
     reports_segments = False
     accepts_language = False
     accepts_temperature = False
@@ -183,9 +238,86 @@ class Parakeet:
     reports_token_ids = False
 
     def __init__(self, model_id: str, quantisation: str) -> None:
-        import onnx_asr  # noqa: PLC0415
+        # Compiled automata, keyed by the exact term tuple that produced them.
+        # This is a CACHE OF DERIVED IMMUTABLE DATA and nothing else — no
+        # request's state lives on this object, because pipeline.py guards the
+        # model with a BoundedSemaphore and main.py decodes in a threadpool, so
+        # anything mutable and per-request here would be one caller's
+        # vocabulary appearing in another caller's transcript. The Booster that
+        # holds the live matches is built per call and rides the stack.
+        self._automata: dict[tuple[str, ...], boosting.Automaton] = {}
+        self._automata_lock = threading.Lock()
+        self.vocabulary_unavailable: str | None = None
 
-        self._model = onnx_asr.load_model(model_id, quantization=quantisation)
+        try:
+            self._model = boosting.load(model_id, quantisation)
+        except (AttributeError, TypeError) as exc:
+            # boosting.load reaches two underscore-prefixed helpers on
+            # onnx-asr's Manager. If a version bump moves them this is where it
+            # surfaces, and the right answer is to serve without biasing rather
+            # than to refuse to start: transcription is the service, biasing is
+            # an opt-in extra. It is loud in the log, false in /health and
+            # refused by name on the route — the one thing it must never be is
+            # accepted and silently skipped.
+            import onnx_asr  # noqa: PLC0415
+
+            self._model = onnx_asr.load_model(model_id, quantization=quantisation)
+            self._disable_boosting(
+                f"onnx-asr's loader would not construct the boosted decoder "
+                f"({type(exc).__name__}: {exc})")
+            return
+
+        try:
+            boosting.verify_seam(self._model)
+        except boosting.UnsupportedSeam as exc:
+            # The adapter still works — BoostedParakeetTdt with no boost
+            # argument delegates to upstream's own loop — so there is nothing
+            # to reload, only a capability to withdraw.
+            self._disable_boosting(str(exc))
+
+    def _disable_boosting(self, reason: str) -> None:
+        self.accepts_vocabulary = False
+        self.accepts_boost = False
+        self.vocabulary_unavailable = reason
+        log.error("decode-time biasing is UNAVAILABLE: %s", reason)
+
+    def vocabulary_problems(self, terms: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
+        """Phrases this model cannot spell, as (phrase, offending character).
+
+        A phrase fails only when it contains a character with no
+        single-character piece in the model's vocabulary — "café ☕" at '☕',
+        "日本語" at '日' — while "São Paulo", "conteúdo" and "ação" all build.
+        The route turns this into a 400 naming both, for the same reason
+        profiles.UnknownProfile exists: a caller who believes their vocabulary
+        was applied when it was not is the silence this surface is built to
+        prevent.
+        """
+        return self._automaton(terms).untokenisable
+
+    def _automaton(self, terms: tuple[str, ...]) -> boosting.Automaton:
+        with self._automata_lock:
+            cached = self._automata.get(terms)
+            if cached is not None:
+                return cached
+        compiled = boosting.compile_automaton(self._model.asr._vocab, terms)
+        with self._automata_lock:
+            # Bounded for profiles.py's reason rather than a fresh one: a
+            # client sending a different one-off term list every request should
+            # not grow this without limit. Cleared rather than evicted by age
+            # because the cost of a miss is a few hundred microseconds.
+            if len(self._automata) >= 64:
+                self._automata.clear()
+            self._automata[terms] = compiled
+        return compiled
+
+    def _booster(self, opts: Options) -> tuple[object | None, tuple[str, ...]]:
+        """This request's boost automaton, and the phrases that survived it."""
+        if not (opts.boost and opts.vocabulary and self.accepts_vocabulary):
+            return None, ()
+        automaton = self._automaton(opts.vocabulary)
+        if not automaton:
+            return None, ()
+        return boosting.Booster(automaton=automaton), automaton.phrases
 
     def transcribe(self, samples: np.ndarray, opts: Options) -> Recognition:
         # Parakeet v3 detects language itself and takes no hint, and its TDT
@@ -193,25 +325,35 @@ class Parakeet:
         # reaching here, so either still set would be a routing bug rather than
         # something to swallow quietly.
         #
-        # opts.hotwords is the one that is NOT a routing bug when absent: the
-        # route honours `prompt` here, it just honours it in the repair stage
-        # downstream of this call, and leaves hotwords None because there is
-        # nothing on this decoder to hand it to. See openai_api._terms.
+        # opts.hotwords is neither honoured nor a bug here: it is the same
+        # vocabulary in faster-whisper's shape, filled by the same function
+        # that filled opts.vocabulary. This engine reads the tuple.
+        booster, boosted = self._booster(opts)
+        # `boost=None` is not merely equivalent to the unboosted path, it IS
+        # the unboosted path: BoostedParakeetTdt delegates straight to
+        # onnx-asr's own _decoding, so a request that does not opt in runs
+        # upstream's code. Verified on sixteen real corpus clips —
+        # tests/test_boosting.py, text, tokens, timestamps and logprobs all
+        # identical.
+        extra = {"boost": booster} if booster is not None else {}
+
         if not opts.want_detail:
             # The plain adapter, for the default response_format. Asking for
             # timestamps costs about 5% on a 14.2 s clip here (5.07 s against
             # 5.34 s), which is not worth paying on every dictation request for
             # numbers no one reads.
-            text = self._model.recognize(samples, sample_rate=SAMPLE_RATE).strip()
-            return Recognition(text=text)
+            text = self._model.recognize(
+                samples, sample_rate=SAMPLE_RATE, **extra).strip()  # type: ignore[arg-type]
+            return Recognition(text=text, boosted=boosted)
 
         result = self._model.with_timestamps().recognize(
-            samples, sample_rate=SAMPLE_RATE)
+            samples, sample_rate=SAMPLE_RATE, **extra)  # type: ignore[arg-type]
         words, logprobs = _parakeet_words(result)
         return Recognition(
             text=result.text.strip(),
             words=words,
             logprobs=logprobs if opts.want_logprobs else None,
+            boosted=boosted,
         )
 
     def stream(self, samples: np.ndarray, opts: Options):
@@ -268,10 +410,15 @@ def _parakeet_words(result) -> tuple[tuple[Word, ...], tuple[TokenLogprob, ...]]
 
 
 class Whisper:
-    """Whisper via CTranslate2. Accepts hotwords at decode time."""
+    """Whisper via CTranslate2. Takes its vocabulary as decoder hotwords."""
 
     name = "whisper"
     accepts_vocabulary = True
+    # No `boost` switch: hotwords here are unconditional and predate the field.
+    # Adding one would change what `prompt` does on a shipped engine as a side
+    # effect of a change about the other engine.
+    accepts_boost = False
+    vocabulary_unavailable: str | None = None
     reports_segments = True
     accepts_language = True
     accepts_temperature = True
@@ -290,6 +437,11 @@ class Whisper:
         self._model = WhisperModel(
             model_id, device="cpu", compute_type=compute_type, cpu_threads=threads
         )
+
+    def vocabulary_problems(self, terms: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
+        """None ever. Whisper's tokeniser has a byte fallback, so every string
+        it is handed is expressible; there is no phrase it cannot spell."""
+        return ()
 
     def _vocabulary(self, extra: str | None) -> str | None:
         """The configured glossary, plus whatever this request added.
@@ -389,7 +541,10 @@ def build(threads: int, hotwords: str | None) -> Parakeet | Whisper:
     if choice in {"parakeet", "parakeet-v3"}:
         model_id = os.getenv("STT_MODEL_ID", PARAKEET_DEFAULT)
         model = Parakeet(model_id, os.getenv("STT_QUANTISATION", "int8"))
-        log.info("parakeet ready: %s (no decode-time vocabulary)", model_id)
+        log.info("parakeet ready: %s (decode-time biasing %s)", model_id,
+                 "available, opt in per request with boost=true"
+                 if model.accepts_vocabulary else
+                 f"UNAVAILABLE: {model.vocabulary_unavailable}")
         return model
 
     if choice == "whisper":

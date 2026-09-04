@@ -35,9 +35,14 @@ ghosty = Ghostty
 #
 # `comet = commit` used to be a replacement and is demoted here on this file's
 # own rule: "comet" is an ordinary English word, so the rule would rewrite a
-# sentence that was right all along. Whisper still gets it right from the
-# hotword; Parakeet takes no decode-time vocabulary at all and therefore gets
-# nothing from this section, which is the honest cost of the demotion.
+# sentence that was right all along. Whisper gets it right from the hotword.
+#
+# This comment used to end "Parakeet takes no decode-time vocabulary at all and
+# therefore gets nothing from this section, which is the honest cost of the
+# demotion". The cost is gone: Parakeet is biased at decode time now, so this
+# section works on both engines, and the demotion is free. It only fires on a
+# request that sent boost=true, which is what keeps a term absent from the
+# audio from costing accuracy — see the README.
 commit
 Anthropic
 Claude Code

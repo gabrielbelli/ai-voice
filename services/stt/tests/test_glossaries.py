@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 from starlette.testclient import TestClient
 
-from app import asr, openai_api, pipeline, profiles
+from app import asr, boosting, openai_api, pipeline, profiles
 from app.main import app
 
 REPO = Path(__file__).resolve().parents[1]
@@ -41,17 +41,34 @@ def wav(seconds: float = 0.5, rate: int = 16_000) -> bytes:
     return buffer.getvalue()
 
 
-class FakeEngine:
-    """Parakeet's capability profile: no decode-time vocabulary at all.
+# A stand-in piece inventory: every ASCII character this file's terms are made
+# of, and nothing else. It is what makes `vocabulary_problems` below a real
+# answer rather than a hard-coded one — a term outside this alphabet has no
+# pieces, exactly as "café ☕" has none in the shipped model, and the same
+# boosting.compile_automaton decides so.
+FAKE_VOCAB = {i: c for i, c in enumerate(
+    " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-")}
+FAKE_VOCAB[len(FAKE_VOCAB)] = "<blk>"
 
-    The default here on purpose. Parakeet is what this service deploys, it is
-    the engine for which a glossary is post-decode repair ONLY, and it is
-    therefore the one where "the profile was applied" has to be visible in the
-    text rather than in an argument passed to a decoder.
+
+class FakeEngine:
+    """Parakeet's capability profile, INCLUDING decode-time biasing.
+
+    The default here on purpose: Parakeet is what this service deploys. Its
+    profile changed when boosting.py landed and this fake changed with it —
+    `accepts_vocabulary` was False here for as long as the codebase believed a
+    TDT decoder could not be biased, and a fake left behind at that value would
+    have gone on asserting the old behaviour was correct.
+
+    Both halves of a glossary now run on this engine, so "the profile was
+    applied" is visible in two places: the repaired text, and the terms that
+    reached the decoder.
     """
 
     name = "parakeet"
-    accepts_vocabulary = False
+    accepts_vocabulary = True
+    accepts_boost = True
+    vocabulary_unavailable = None
     accepts_language = False
     accepts_temperature = False
     can_translate = False
@@ -65,10 +82,17 @@ class FakeEngine:
         self.text = text
         self.seen: asr.Options | None = None
 
+    def vocabulary_problems(self, terms):  # noqa: ANN001, ANN201
+        return boosting.compile_automaton(FAKE_VOCAB, terms).untokenisable
+
     def transcribe(self, samples, opts):  # noqa: ANN001, ANN201
         del samples
         self.seen = opts
-        return asr.Recognition(text=self.text, words=())
+        boosted = ()
+        if opts.boost and opts.vocabulary:
+            boosted = boosting.compile_automaton(
+                FAKE_VOCAB, opts.vocabulary).phrases
+        return asr.Recognition(text=self.text, words=(), boosted=boosted)
 
     def stream(self, samples, opts):  # noqa: ANN001, ANN201
         raise NotImplementedError(self.name)
@@ -224,20 +248,36 @@ def test_glossary_is_allowlisted_rather_than_an_unknown_field(
     assert "Theoria dashboard" in response.json()["text"]
 
 
-def test_a_profile_is_repair_only_on_an_engine_with_no_vocabulary(
-        client: TestClient) -> None:
-    """Parakeet's TDT decoder takes no hotwords, and onnx-asr exposes none.
+def test_a_profile_reaches_both_halves_on_parakeet(client: TestClient) -> None:
+    """The repair half, and — only when asked — the decoder half.
 
-    The profile still has to WORK there — post-decode repair is the whole
-    mechanism on that engine — so `glossary` is honoured while `prompt` is
-    refused by name. Passing the terms into asr.Options.hotwords would be
-    handing an argument to a decoder that has nowhere to put it.
+    THIS TEST USED TO ASSERT THE OPPOSITE. It was called
+    `test_a_profile_is_repair_only_on_an_engine_with_no_vocabulary` and it
+    pinned `seen.hotwords is None` on the grounds that a TDT decoder had
+    nowhere to put a vocabulary. That was true of onnx-asr's argument list and
+    false about the decoder, and an assertion is exactly how a wrong belief
+    outlives the comment that explained it.
+
+    The default is still repair only, because biasing is opt-in — so the
+    profile's terms are CARRIED on the options either way and only reach the
+    decoder when boost said so. Both are checked here: a request that did not
+    ask gets no boosting, and the one that did gets both halves.
     """
-    response = client.post("/v1/audio/transcriptions",
-                           files={"file": ("clip.wav", wav(), "audio/wav")},
+    files = {"file": ("clip.wav", wav(), "audio/wav")}
+    response = client.post("/v1/audio/transcriptions", files=files,
                            data={"model": "whisper-1", "glossary": "dictation"})
     assert response.status_code == 200
-    assert pipeline.state["asr"].seen.hotwords is None
+    assert "Theoria dashboard" in response.json()["text"]
+    assert pipeline.state["asr"].seen.boost is False
+    assert "x-boost-applied" not in response.headers
+
+    response = client.post("/v1/audio/transcriptions", files=files,
+                           data={"model": "whisper-1", "glossary": "dictation",
+                                 "boost": "true"})
+    assert response.status_code == 200
+    assert pipeline.state["asr"].seen.boost is True
+    assert "Theoria dashboard" in pipeline.state["asr"].seen.vocabulary
+    assert "Theoria dashboard" in response.headers["x-boost-applied"]
     assert "Theoria dashboard" in response.json()["text"]
 
 
@@ -584,16 +624,18 @@ def test_a_prompt_is_honoured_on_parakeet_rather_than_refused(
     `prompt` is defined as text that guides the model and vocabulary is what it
     carries in practice, so refusing it was less compliant than honouring it,
     not more — ADR 0001 says exactly that and then cited this refusal as its
-    example of saying no by name. The engine takes no decode-time vocabulary
-    and still does not; the terms reach the repair stage instead.
+    example of saying no by name. The terms reach the repair stage — and, since
+    boosting.py, the decoder too, but only when the request asks for it.
     """
     client = serve(builtin, engine=FakeEngine("I opened the theoria dashboard"))
     try:
         response = v1(client, prompt="Theoria")
         assert response.status_code == 200
         assert "Theoria dashboard" in response.json()["text"]
-        # Still no decode-time vocabulary, and /health still says so.
-        assert pipeline.state["asr"].seen.hotwords is None
+        # Carried, but NOT boosted: the decoder half is opt-in, so a prompt
+        # that says nothing about boosting must not quietly acquire it.
+        assert pipeline.state["asr"].seen.vocabulary == ("Theoria",)
+        assert pipeline.state["asr"].seen.boost is False
     finally:
         pipeline.state.clear()
 
@@ -878,3 +920,138 @@ def test_the_repaired_header_reaches_the_formats_with_no_body_key(
                 response_format)
         finally:
             pipeline.state.clear()
+
+
+# ── decode-time biasing, at the route ─────────────────────────────────────────
+
+
+def test_boosting_is_off_unless_the_request_asks(builtin: Path) -> None:
+    """The failure: an always-on boost list, which is what the +12% rules out.
+
+    A glossary whose terms do NOT occur in the audio raised WER by 12% on
+    Parakeet across 250 conditions, so a vocabulary the caller did not ask to
+    have BIASED must not acquire it by arriving. Every other way of sending
+    terms — prompt, keywords[], a named profile — is checked here, because the
+    default has to hold on all of them and not merely on the one that was
+    written first.
+    """
+    for data in ({"prompt": "Theoria"},
+                 {"keywords[]": "Theoria"},
+                 {"glossary": "dictation"}):
+        client = serve(builtin, engine=FakeEngine("the theory dashboard"))
+        try:
+            response = v1(client, **data)
+            assert response.status_code == 200
+            assert pipeline.state["asr"].seen.boost is False, data
+            assert "x-boost-applied" not in response.headers, data
+        finally:
+            pipeline.state.clear()
+
+
+def test_untokenisable_phrase_is_a_400_naming_the_character(builtin: Path) -> None:
+    """The failure: a caller believing their vocabulary reached the decoder.
+
+    Same argument as profiles.UnknownProfile. A phrase whose characters have no
+    pieces cannot be biased towards at all, and a caller who asked for biasing
+    and silently did not get it is indistinguishable from one who did — right
+    up until a transcript is wrong. Named with the offending character, because
+    "one of your terms" is not something anybody can act on.
+    """
+    client = serve(builtin, engine=FakeEngine())
+    try:
+        response = v1(client, prompt="日本語", boost="true")
+        assert response.status_code == 400
+        error = response.json()["error"]
+        assert error["param"] == "boost"
+        assert "日本語" in error["message"]
+        assert "日" in error["message"]
+
+        # …and the SAME term is accepted without boost=true, because
+        # post-decode repair does not care whether the model can spell it.
+        assert v1(client, prompt="日本語").status_code == 200
+    finally:
+        pipeline.state.clear()
+
+
+def test_hotwords_off_refuses_boost_rather_than_dropping_it(
+        builtin: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The failure: STT_HOTWORDS=0 becoming a half-open door on the default engine.
+
+    That switch exists so a benchmark can measure the model rather than the
+    vocabulary. It used to be Whisper-only because Parakeet had no decoder to
+    switch off; now it covers both, and a request that asked to bias must be
+    told no rather than answered with an unbiased transcript that looks
+    biased. pipeline.run holds the second lock on the same door.
+    """
+    monkeypatch.setattr(pipeline, "HOTWORDS_ENABLED", False)
+    client = serve(builtin, engine=FakeEngine())
+    try:
+        response = v1(client, prompt="Theoria", boost="true")
+        assert response.status_code == 400
+        assert response.json()["error"]["param"] == "boost"
+        assert "STT_HOTWORDS" in response.json()["error"]["message"]
+        # The repair half is untouched by the switch, as it always was.
+        assert v1(client, prompt="Theoria").status_code == 200
+    finally:
+        pipeline.state.clear()
+
+
+def test_hotwords_off_strips_the_vocabulary_inside_the_pipeline_too(
+        builtin: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The second lock, tested at the second lock.
+
+    The route's refusal is reachable only through /v1. pipeline.run is what
+    every other caller goes through, and if it cleared only `hotwords` a
+    benchmark would believe it had measured the model while the default engine
+    was still being biased.
+    """
+    monkeypatch.setattr(pipeline, "HOTWORDS_ENABLED", False)
+    client = serve(builtin, engine=FakeEngine())
+    try:
+        pipeline.run(wav(), asr.Options(hotwords="Theoria",
+                                        vocabulary=("Theoria",), boost=True))
+        seen = pipeline.state["asr"].seen
+        assert seen.hotwords is None
+        assert seen.vocabulary == ()
+        assert seen.boost is False
+    finally:
+        pipeline.state.clear()
+
+
+def test_boost_reports_which_phrases_reached_the_decoder(builtin: Path) -> None:
+    """The failure: a term dropped by a ceiling with nobody told.
+
+    Only ONE of the three ways a term can fail to reach the decoder is a 400 —
+    the one that is a fact about the model's vocabulary. The other two are
+    policy ceilings, and a caller whose term went over one has to be able to
+    find out. x-boost-applied names what actually got there; its absence means
+    nothing did.
+    """
+    client = serve(builtin, engine=FakeEngine())
+    try:
+        response = v1(client, prompt="Anthropic, US, Theoria", boost="true")
+        assert response.status_code == 200
+        applied = unquote(response.headers["x-boost-applied"])
+        assert "Anthropic" in applied
+        assert "Theoria" in applied
+        assert "US" not in applied.split(", "), (
+            "a two-character term reached the decoder")
+    finally:
+        pipeline.state.clear()
+
+
+def test_a_malformed_boost_is_refused_rather_than_read_as_false(
+        builtin: Path) -> None:
+    """The failure: boost=yes-please quietly meaning off.
+
+    A value this route cannot parse is a request whose intent it does not know,
+    and guessing "off" would be the accepted-and-dropped defect wearing a
+    different hat.
+    """
+    client = serve(builtin, engine=FakeEngine())
+    try:
+        response = v1(client, prompt="Theoria", boost="yes-please")
+        assert response.status_code == 400
+        assert response.json()["error"]["param"] == "boost"
+    finally:
+        pipeline.state.clear()

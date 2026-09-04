@@ -94,10 +94,16 @@ class FakeWhisper:
 
 
 class FakeParakeet:
-    """The profile of the default engine: batch, no hints, token logprobs."""
+    """The profile of the default engine: batch, no hints, token logprobs.
+
+    `accepts_vocabulary` is True here and was False until boosting.py landed.
+    It is a claim about the DECODER, and the decoder changed.
+    """
 
     name = "parakeet"
-    accepts_vocabulary = False
+    accepts_vocabulary = True
+    accepts_boost = True
+    vocabulary_unavailable = None
     accepts_language = False
     accepts_temperature = False
     can_translate = False
@@ -107,8 +113,13 @@ class FakeParakeet:
     reports_token_logprobs = True
     reports_token_ids = False
 
+    def vocabulary_problems(self, terms):  # noqa: ANN001, ANN201
+        del terms
+        return ()
+
     def transcribe(self, samples, opts):  # noqa: ANN001, ANN201
-        del samples, opts
+        self.seen = opts
+        del samples
         return asr.Recognition(
             text="First piece. Second piece.",
             words=(asr.Word("First", 0.0, 0.5, -0.1),
@@ -241,11 +252,51 @@ def test_parakeet_answers_a_vocabulary_rather_than_refusing_it(
         parakeet: TestClient, field: str, value: str) -> None:
     """The 400 these used to get was a refusal of a field with a working half.
 
-    Parakeet's decoder still takes no vocabulary and `accepts_vocabulary` is
-    still false — that flag is a claim about the decoder. The terms reach this
-    request's post-decode repair instead, which is the half that works here.
+    Both halves work here now: the terms reach this request's post-decode
+    repair always, and its decoder when the request opts in with boost.
+    `accepts_vocabulary` was False on this engine when this test was written
+    and is True now — the flag is a claim about the decoder, and the decoder
+    changed.
     """
     assert post(parakeet, **{field: value}).status_code == 200
+
+
+def test_whisper_refuses_boost_because_it_has_no_such_switch(
+        whisper: TestClient) -> None:
+    """The failure: `boost` looking like it did something on the wrong engine.
+
+    Whisper's hotwords are unconditional and predate this field — `prompt` has
+    always reached its decoder. Giving `boost` a meaning here would have
+    changed what a shipped engine does as a side effect of a change about the
+    other one, and accepting it to do nothing is the defect this whole surface
+    is built against. So it is refused by name, with the reason, exactly as
+    `language` is refused on Parakeet.
+    """
+    response = post(whisper, prompt="Theoria", boost="true")
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["param"] == "boost"
+    assert "whisper" in error["message"]
+    # boost=false is not a refusal: it asks for what Whisper cannot switch off
+    # but also is not being asked to switch on, so there is nothing to say no to.
+    assert post(whisper, prompt="Theoria", boost="false").status_code == 200
+
+
+def test_parakeet_boosts_only_when_the_request_opts_in(
+        parakeet: TestClient) -> None:
+    """The failure: the default engine acquiring biasing by arrival.
+
+    `accepts_vocabulary` is True on this engine now, which is what routes the
+    terms to the decoder at all. It is NOT what turns biasing on: a boost list
+    whose terms are absent from the audio is a measured accuracy cost, so the
+    caller who knows what is in their audio is the one who decides.
+    """
+    assert post(parakeet, prompt="Theoria").status_code == 200
+    assert parakeet.engine.seen.vocabulary == ("Theoria",)  # type: ignore[attr-defined]
+    assert parakeet.engine.seen.boost is False  # type: ignore[attr-defined]
+
+    assert post(parakeet, prompt="Theoria", boost="true").status_code == 200
+    assert parakeet.engine.seen.boost is True  # type: ignore[attr-defined]
 
 
 def test_whisper_honours_language_and_temperature(whisper: TestClient) -> None:

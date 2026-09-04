@@ -178,6 +178,17 @@ class Selection:
     # None when nothing was selected, so the absent case reaches the engine as
     # the absent case rather than as an empty string.
     hotwords: str | None = None
+    # THE SAME VOCABULARY, UNJOINED. Both fields are built from one list in
+    # `select`, and the duplication is the point rather than an oversight: the
+    # two engines want different shapes and re-splitting the joined string on
+    # ", " would corrupt any term containing a comma.
+    #
+    # faster-whisper takes one string. Parakeet's decode-time biasing takes a
+    # list of phrases, because boosting.compile_automaton tokenises each phrase
+    # separately against the model's own piece inventory — see boosting.py.
+    # Until that landed there was no second consumer and this field would have
+    # been unused, which is why it is new.
+    terms: tuple[str, ...] = ()
 
 
 # ── parsing ───────────────────────────────────────────────────────────────────
@@ -475,6 +486,7 @@ class Registry:
             names=wanted,
             rules=glossary.compile_rules(replacements),
             hotwords=", ".join(vocabulary) or None,
+            terms=tuple(vocabulary),
         )
         self._compiled[wanted] = selection
         return selection

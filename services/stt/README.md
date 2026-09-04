@@ -27,11 +27,10 @@ degrades far more gracefully — band-limiting to 4 kHz, which is what a cheap
 or distant microphone does, cost Whisper +206% WER on CORAA and Parakeet +41%.
 
 **Whisper is worth choosing** for clean read speech, where it genuinely leads,
-and when you need decode-time vocabulary: it accepts `hotwords`, Parakeet does
-not. A request's `prompt` and `keywords[]` are honoured on both, but under
-Parakeet they reach only the post-decode repair, which is weaker — it fixes a
-proper noun the model heard and mis-spelled, and cannot recover a word the
-acoustic model never approached.
+and for translation. It used to be the only engine that could take a vocabulary
+at decode time; that is no longer true. Both engines now bias their decoder
+from the same terms — Whisper always, Parakeet when a request adds
+`boost=true`. See [Decode-time biasing on Parakeet](#decode-time-biasing-on-parakeet).
 
 ## Status
 
@@ -172,8 +171,9 @@ find out without spending a request on a refusal.
 | `stream=true` | refused — batch decoder | transcript deltas, one per window |
 | `/v1/audio/translations` | refused — no translate task | `task="translate"` |
 | `language` | refused — takes no hint | honoured |
-| `prompt`, `keywords[]` | honoured — post-decode repair of the terms' own spelling | joined into hotwords, *and* the same repair |
-| `glossary` | honoured — post-decode repair | honoured — repair *and* hotwords |
+| `prompt`, `keywords[]` | honoured — post-decode repair, *and* decode-time biasing with `boost=true` | joined into hotwords, *and* the same repair |
+| `glossary` | honoured — repair, *and* biasing with `boost=true` | honoured — repair *and* hotwords |
+| `boost` | honoured — switches decode-time biasing on for this request | refused — hotwords here are unconditional, there is nothing to switch |
 | `temperature` | refused — no sampling temperature | honoured, and it disables the fallback ladder |
 | `include[]=logprobs` | per-token logprobs | refused — only a per-segment average exists |
 | `verbose_json.language` | `"unknown"` — no language ID in the image | the detected language, e.g. `"english"` |
@@ -276,9 +276,12 @@ that has no such mechanism and nothing downstream that can stand in for one.
 Deploy with `STT_MODEL=whisper` if you need them, and pay the order of
 magnitude in latency.
 
-`prompt` and `keywords[]` used to be a fifth and sixth. They are not refused
-any more, because a vocabulary has a second half that does work here — see
-below.
+`prompt` and `keywords[]` used to be a fifth and sixth, on the grounds that
+Parakeet's decoder took no vocabulary. That was wrong twice over: they reach
+the post-decode repair, and since decode-time biasing landed they reach the
+decoder too. The lesson is in the list above — a refusal has to name a
+mechanism that genuinely does not exist, and "the library exposes no argument
+for it" is not that.
 
 **No diarisation.** `diarized_json`, `known_speaker_names[]` and
 `known_speaker_references[]` are refused. There is no speaker-embedding or
@@ -597,14 +600,77 @@ Use the bare form when the likely mishearing is an ordinary word. "Belli" is
 heard as "belly", but a `belly = Belli` rule would corrupt any sentence that
 genuinely says belly. Biasing the decoder is safe; rewriting is not.
 
-Decoder biasing is much the stronger of the two, **on the engine that has it**.
-Measured against real recordings, hotwords alone fixed every technical term —
-`commit` (heard as "comet"), `Theoria` ("theory"), `FreeBSD` ("free BSD"),
-`Belli` ("Belly") — and the post-decode replacement never had to fire. It can
-also recover a word string replacement never sees, because the wrong spelling
-was never in the list. **Parakeet has no such mechanism**: it is CTC/TDT and
-onnx-asr exposes no biasing argument, so under it a profile is post-decode
-repair only and its hotword-only lines do nothing.
+Decoder biasing is much the stronger of the two. Measured against real
+recordings, hotwords alone fixed every technical term — `commit` (heard as
+"comet"), `Theoria` ("theory"), `FreeBSD` ("free BSD"), `Belli` ("Belly") — and
+the post-decode replacement never had to fire. It can also recover a word
+string replacement never sees, because the wrong spelling was never in the
+list.
+
+This paragraph used to end **"Parakeet has no such mechanism"**, and a
+hotword-only line really did nothing on the default engine. Both are now false;
+see below.
+
+### Decode-time biasing on Parakeet
+
+Add `boost=true` to a request and its vocabulary — the profiles it selected,
+its own `prompt` and `keywords[]` — is compiled into a boosting automaton and
+fused into Parakeet's TDT decoding loop, one frame before the argmax. A
+hotword-only line finally does something on the engine this service actually
+deploys.
+
+```bash
+curl -s http://localhost:8000/v1/audio/transcriptions \
+  -F file=@clip.wav -F model=whisper-1 \
+  -F glossary=tech -F boost=true
+```
+
+**It is off unless you ask, and that is the measurement talking.** A glossary
+whose terms do NOT occur in the audio raised WER by 12% on Parakeet across 250
+conditions. Biasing is a bet on knowing what is in the audio, so the caller who
+knows makes it. `STT_BOOST=1` changes the default for a deployment that wants
+it on everything, at that cost.
+
+Measured on a synthetic probe of this feature — mechanism and scale, not WER:
+
+| | transcript |
+|---|---|
+| unboosted | Anthropic released clode code, and the **Thearia** dashboard uses Ghost Pepper for dictation. |
+| `boost=true` | Anthropic released clode code, and the **Theoria** dashboard uses Ghost Pepper for dictation. |
+| terms absent from the audio | byte-identical to unboosted |
+
+Two things that table does not say, and both matter more than what it does.
+`clode code` was **not** recovered, because a phrase must be entered on
+acoustics — see `STT_BOOST_START_WEIGHT`. And no WER number here is real: a
+6.6 s clip from macOS `say` establishes that the mechanism works, not what it
+costs. **Run `bench/bench.py` on both axes — terms present and terms absent —
+before switching this on for a deployment.**
+
+A response carries `x-boost-applied` naming the phrases that reached the
+decoder, and nothing when none did. A term can fail to get there three ways:
+
+| | what happens |
+|---|---|
+| a character the model has no piece for (`日本語`, `café ☕`) | **400** naming the phrase and the character |
+| shorter than `STT_BOOST_MIN_PHRASE_CHARS` (default 4) | dropped, absent from `x-boost-applied` |
+| over `STT_BOOST_MAX_PHRASES` (default 200) | dropped, absent from `x-boost-applied` |
+
+The knobs, all with measured defaults for **Parakeet TDT 0.6B v3 at int8**.
+They are calibrated against that model's raw logit scale and do not transfer to
+another model or quantisation:
+
+| variable | default | what it does |
+|---|---|---|
+| `STT_BOOST` | `0` | the default for requests that do not send `boost` |
+| `STT_BOOST_WEIGHT` | `3.0` | bonus per character for a token that CONTINUES a match |
+| `STT_BOOST_START_WEIGHT` | `0.0` | bonus on a phrase's FIRST token. At 0 a phrase must be entered on acoustics and is only helped to finish, which is the setting with no measured collateral. Raising it recovered more terms *and* inserted a spurious "The" and capitalised two innocent words |
+| `STT_BOOST_GATE` | `6.0` | a bonus applies only to a token already within this many logits of the winner. **This is the guard, not the weight ceiling** — clamping the weight and leaving the gate open still destroyed a transcript |
+| `STT_BOOST_MAX_WEIGHT` | `6.0` | hard ceiling, clamping all three above |
+| `STT_BOOST_MAX_PHRASES` | `200` | bounds the collateral-damage surface, not the runtime |
+| `STT_BOOST_MIN_PHRASE_CHARS` | `4` | short terms match constantly; `US` would rewrite "he told us" |
+
+`STT_HOTWORDS=0` switches the whole thing off on both engines, and `boost=true`
+is then refused by name rather than answered with an unbiased transcript.
 
 ### A request's own vocabulary
 
@@ -712,11 +778,15 @@ drops in via `STT_MODEL_ID`, with `STT_MODEL` left at `parakeet`.
 
 ### Switching biasing off
 
-`STT_HOTWORDS=0` is absolute **about the decoder**: no glossary hotwords from
-any profile, and the terms in a `prompt` or `keywords[]` are dropped rather
-than passed to it. Half an off switch is worse than none — a benchmark run that
-sets `prompt` would get biasing back on exactly the requests that carried one,
-and measure something other than what it thinks.
+`STT_HOTWORDS=0` is absolute **about the decoder, on both engines**: no
+glossary hotwords from any profile, no boosting automaton on Parakeet, and the
+terms in a `prompt` or `keywords[]` are dropped rather than passed to either.
+A request that sends `boost=true` is refused by name. Half an off switch is
+worse than none — a benchmark run that sets `prompt` would get biasing back on
+exactly the requests that carried one, and measure something other than what it
+thinks. It covered Whisper only until Parakeet acquired a decoder to switch
+off, which would have made it exactly that half-open door on the DEFAULT
+engine.
 
 Text repair is unaffected either way, and that includes the repair a request's
 own terms compile into. The switch exists so a benchmark can separate what the

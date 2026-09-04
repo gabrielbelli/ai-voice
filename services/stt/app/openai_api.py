@@ -32,17 +32,24 @@ this surface used to drop eleven of them.
                              that cannot — see the streaming note below
   language, temperature      honoured on Whisper, refused by name on Parakeet,
                              which has no mechanism for either
-  prompt, keywords[]         honoured on BOTH engines, in whichever halves the
-                             engine has: joined into Whisper's hotwords, and on
-                             either engine compiled into this request's own
-                             post-decode repair. Parakeet used to answer them
-                             with a 400 — see _terms for why that was the wrong
-                             reading of the specification and of this module
+  prompt, keywords[]         honoured on BOTH engines and now in BOTH halves:
+                             joined into Whisper's hotwords, compiled into this
+                             request's post-decode repair, and — when the
+                             request set boost=true — fused into Parakeet's TDT
+                             decoding loop. Parakeet used to answer them with a
+                             400 on the grounds that its decoder took no
+                             vocabulary; see _terms and boosting.py for why
+                             that was wrong twice over
   glossary                   an EXTENSION, allowlisted beside keywords[] and
                              languages[]: named glossary profiles, applied to
-                             this request only. Honoured on both engines,
-                             because post-decode repair works on both; only its
-                             decode-time half is Whisper-only
+                             this request only. Honoured on both engines, in
+                             both halves
+  boost                      an EXTENSION on the same pattern, defaulting to
+                             OFF: switches on decode-time biasing for this
+                             request under Parakeet. Refused by name on Whisper,
+                             which biases unconditionally and has no switch.
+                             Off by default because irrelevant vocabulary is a
+                             measured accuracy cost — see _boost
   languages[], diarisation   refused by name; nothing here can do them
   unknown fields             refused by name. CreateTranscriptionRequest sets
                              additionalProperties: false, and lenience here is
@@ -120,7 +127,7 @@ from starlette.concurrency import run_in_threadpool
 
 from voice_common.errors import ApiError
 
-from . import asr, glossary, languages, pipeline, profiles
+from . import asr, boosting, glossary, languages, pipeline, profiles
 
 log = logging.getLogger("stt-stack.openai")
 
@@ -154,9 +161,17 @@ TRANSCRIPTION_FIELDS = frozenset({
     # so it cannot collide with a specification field, reachable from an SDK
     # with extra_body={"glossary": "tech"} and absent by default.
     "glossary",
+    # The second extension, on the same pattern and for the same reason. It
+    # switches on decode-time biasing for this request under Parakeet; see
+    # _boost for why that has to be asked for rather than assumed.
+    "boost",
 })
 TRANSLATION_FIELDS = frozenset({
     "file", "model", "prompt", "response_format", "temperature",
+    # Allowlisted so the two routes cannot disagree about which fields exist.
+    # It is still refused by name on the only engine that can translate, which
+    # is a refusal about the ENGINE and not about the route.
+    "boost",
     # Translation runs the same pipeline and therefore the same post-decode
     # repair. Allowlisted here too, so that a client cannot discover that one
     # of the two routes refuses an extension the other honours.
@@ -327,22 +342,28 @@ def _terms(form) -> tuple[str, ...]:  # noqa: ANN001
     defined as text that guides the model; vocabulary is what it is used for;
     ADR 0001 says in as many words that feeding a request's glossary terms
     through `prompt` is MORE compliant than refusing it. The refusal was
-    justified by the decoder — Parakeet's TDT decoder takes no vocabulary
-    argument and onnx-asr exposes none — but the decoder is only one of the two
-    halves a glossary has here, and the other half runs on both engines.
+    justified by the decoder — "Parakeet's TDT decoder takes no vocabulary
+    argument and onnx-asr exposes none" — and that justification has since
+    turned out to be wrong on its own terms as well as beside the point. It was
+    beside the point because the decoder is only one of the two halves a
+    glossary has here and the other runs on both engines. It was wrong because
+    the missing thing was an ARGUMENT, not a capability: boosting.py fuses a
+    vocabulary into that decoder's greedy loop.
 
-    So the field is honoured everywhere now, in whichever halves the engine
-    has, exactly as `glossary` already was:
+    So the field is honoured everywhere, in every half the engine has:
 
       Whisper    the terms are joined into the decoder's hotwords, unchanged,
                  AND compiled into this request's repair rules.
-      Parakeet   the terms compile into this request's repair rules only.
-                 See glossary.term_rules: that recovers a proper noun the
-                 model heard and mis-spelled, and it does NOT recover one the
-                 acoustic model never approached. The engine's
-                 `accepts_vocabulary` flag is unchanged and still false, and
-                 /health still reports it, because it is a claim about the
-                 DECODER and remains true.
+      Parakeet   the terms are compiled into this request's repair rules
+                 always, and into a decode-time boosting automaton when the
+                 request added boost=true. `accepts_vocabulary` is now TRUE
+                 here and /health reports it — the flag is a claim about the
+                 DECODER, and the decoder changed.
+
+    The two halves recover different failures and it is worth keeping them
+    apart: repair fixes a word the model HEARD and spelled wrong; biasing can
+    recover one it never approached, at the cost of firing on audio the terms
+    are absent from. That cost is why the second half is opt-in — see _boost.
 
     Nothing here is accepted and dropped, but "honoured" is not the same as
     "did something", and the difference is worth being exact about because this
@@ -410,19 +431,76 @@ def _glossary(form) -> profiles.Selection:  # noqa: ANN001
             param="glossary") from exc
 
 
-def _decode_vocabulary(engine, selection: profiles.Selection,  # noqa: ANN001
-                       terms: tuple[str, ...]) -> str | None:
-    """What actually reaches the decoder: the profiles' terms, then the request's.
+def _boost(form, engine) -> bool:  # noqa: ANN001
+    """`boost=true` — send this request's vocabulary to Parakeet's decoder.
 
-    A glossary has two halves and only one of them is engine-dependent:
+    OFF BY DEFAULT, AND THAT IS THE WHOLE POINT OF THE FIELD. Across 250
+    conditions a glossary whose terms do NOT occur in the audio raised WER by
+    12% on this engine. A boost list is therefore a bet — it recovers a term
+    the acoustic model mangled, and it costs accuracy on every request where
+    the terms are simply absent — and the caller who knows what is in their
+    audio is the one who can make it. A deployment that wants it for every
+    request sets STT_BOOST=1 and pays that cost knowingly, exactly as
+    STT_GLOSSARY_DEFAULT re-enables an always-on repair glossary.
+
+    Refused by name on Whisper rather than silently accepted, because Whisper
+    has no such switch: its hotwords have always been unconditional, and giving
+    this field a meaning there would change what `prompt` does on a shipped
+    engine as a side effect of a change about the other one.
+
+    Refused by name, with the reason, when the engine loaded but its decoding
+    seam did not verify — an onnx-asr whose greedy loop this service has not
+    been read against. That refusal is the entire reason the seam is checked at
+    startup: upstream reads its options with kwargs.get() and ignores unknown
+    keys, so the alternative to refusing is accepting the field and having it
+    do nothing, which is the failure this module exists to prevent.
+    """
+    raw = (_value(form, "boost") or "").strip().lower()
+    if not raw:
+        return boosting.ENABLED_BY_DEFAULT and engine.accepts_boost
+    if raw not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
+        raise _bad(f"'boost' must be a boolean, got {raw!r}.", param="boost")
+    wanted = raw in {"true", "1", "yes", "on"}
+    if not wanted:
+        return False
+    if not getattr(engine, "accepts_boost", False):
+        reason = getattr(engine, "vocabulary_unavailable", None)
+        raise _unsupported(
+            "boost",
+            f"is not supported by the '{engine.name}' engine: {reason}"
+            if reason else
+            f"is not supported by the '{engine.name}' engine, whose decoder "
+            "takes its vocabulary as hotwords unconditionally — there is "
+            "nothing here to switch on. Send `prompt`, `keywords[]` or "
+            "`glossary` and they reach the decoder already.")
+    if not pipeline.HOTWORDS_ENABLED:
+        raise _unsupported(
+            "boost",
+            "cannot be honoured: this deployment has STT_HOTWORDS=0, which "
+            "switches off decode-time biasing on every engine so that a "
+            "benchmark can measure the model rather than the vocabulary. The "
+            "terms still reach post-decode repair.")
+    return True
+
+
+def _decode_vocabulary(engine, selection: profiles.Selection,  # noqa: ANN001
+                       terms: tuple[str, ...]) -> tuple[str | None, tuple[str, ...]]:
+    """What reaches the decoder: the profiles' terms, then the request's own.
+
+    Returns ONE vocabulary in the two shapes the two decoders take — a joined
+    string for faster-whisper, a tuple of phrases for the boosting automaton.
+    Both are derived here rather than one from the other, because re-splitting
+    the joined string on ", " would corrupt any term containing a comma.
+
+    A glossary has two halves and BOTH now run on both engines, which is the
+    change this docstring exists to record. It used to say "decode-time
+    biasing: Whisper only":
 
       post-decode repair   both engines, always — see _repair_rules.
-      decode-time biasing  Whisper only, and only with STT_HOTWORDS on. Absent
-                           under Parakeet, which is not the "accepted and
-                           ignored" failure this module exists to prevent: the
-                           field IS honoured, in whichever half the engine has,
-                           and /health reports `accepts_vocabulary` false so a
-                           client can find out without spending a request.
+      decode-time biasing  Whisper as hotwords, unconditionally. Parakeet as a
+                           boosting automaton fused into its TDT decoding loop,
+                           and only when the request opted in — see _boost and
+                           boosting.py.
 
     STT_HOTWORDS=0 empties this and leaves the repair half alone, which is what
     that switch has always meant — it exists so a benchmark can measure the
@@ -431,12 +509,42 @@ def _decode_vocabulary(engine, selection: profiles.Selection,  # noqa: ANN001
     on the same door.
 
     The request's own terms come last, so a caller's one-off term is never
-    dropped in favour of a server-side profile.
+    dropped in favour of a server-side profile. The joined string is built
+    exactly as it always was — `selection.hotwords` then the request's terms,
+    with no cross-deduplication — because Whisper's behaviour must not move
+    under a change that is about the other engine.
     """
     if not (engine.accepts_vocabulary and pipeline.HOTWORDS_ENABLED):
-        return None
+        return None, ()
     parts = [part for part in (selection.hotwords, ", ".join(terms)) if part]
-    return ", ".join(parts) or None
+    vocabulary = tuple(dict.fromkeys([*selection.terms, *terms]))
+    return ", ".join(parts) or None, vocabulary
+
+
+def _check_vocabulary(engine, vocabulary: tuple[str, ...]) -> None:  # noqa: ANN001
+    """Refuse a phrase this model has no way to spell, naming the character.
+
+    Only reached when a request actually asked to boost, because this is a
+    question about the DECODER: a phrase with no pieces still repairs a
+    finished transcript perfectly well, and a 400 on a request that never asked
+    for biasing would refuse work the service can do.
+
+    Named rather than dropped, on profiles.UnknownProfile's argument. A caller
+    who believes their vocabulary was applied when it was not is
+    indistinguishable from one whose vocabulary worked, right up until a
+    transcript is wrong. Verified failures are '日' and '☕'; "São Paulo",
+    "conteúdo", "ação" and "naïve" all build cleanly.
+    """
+    problems = engine.vocabulary_problems(vocabulary)
+    if not problems:
+        return
+    named = "; ".join(f"{phrase!r} at {char!r}" for phrase, char in problems)
+    raise _bad(
+        f"'boost' cannot be honoured for {len(problems)} term(s): {named}. "
+        "This model's vocabulary has no piece for those characters, so the "
+        "decoder has no token sequence to bias towards. Drop the term, or "
+        "send it without boost=true — post-decode repair still applies to it.",
+        param="boost")
 
 
 def _repair_rules(selection: profiles.Selection,
@@ -804,6 +912,7 @@ _TRANSCRIPTION_SCHEMA = _schema({
     "prompt": {"type": "string"},
     "keywords": {"type": "array", "items": {"type": "string"}},
     "glossary": {"type": "string"},
+    "boost": {"type": "boolean"},
     "response_format": {"type": "string", "enum": list(FORMATS)},
     "temperature": {"type": "number", "minimum": 0, "maximum": 1},
     "include": {"type": "array", "items": {"type": "string", "enum": ["logprobs"]}},
@@ -821,6 +930,7 @@ _TRANSLATION_SCHEMA = _schema({
     "model": {"type": "string"},
     "prompt": {"type": "string"},
     "glossary": {"type": "string"},
+    "boost": {"type": "boolean"},
     "response_format": {"type": "string", "enum": list(TRANSLATION_FORMATS)},
     "temperature": {"type": "number", "minimum": 0, "maximum": 1},
 }, ["file", "model"])
@@ -838,6 +948,14 @@ def _headers(engine,  # noqa: ANN001
     response_format anyway — `text`, `srt` and `vtt` have nowhere to put a key.
     `x-stt-engine` already sets the precedent on this surface.
 
+    `x-boost-applied` answers the same question for the other half, and it is
+    not decoration. A term sent with boost=true can fail to reach the decoder
+    for three different reasons — no piece for one of its characters, under
+    STT_BOOST_MIN_PHRASE_CHARS, over STT_BOOST_MAX_PHRASES — and only the first
+    of those is a 400. Without this header the other two are exactly the silent
+    drop the rest of this module refuses to commit. Present only when something
+    was boosted, so its absence means the decoder saw no vocabulary.
+
     PERCENT-ENCODED UTF-8, comma-separated. Starlette encodes a header value as
     latin-1, so a repaired term is a 500 waiting for the first deployment whose
     vocabulary is not Western European — `日本語` is a perfectly good glossary
@@ -851,6 +969,9 @@ def _headers(engine,  # noqa: ANN001
     if result is not None and result.repaired:
         headers["x-glossary-repaired"] = ", ".join(
             quote(term, safe=" ") for term in result.repaired)
+    if result is not None and result.boosted:
+        headers["x-boost-applied"] = ", ".join(
+            quote(term, safe=" ") for term in result.boosted)
     return headers
 
 
@@ -896,9 +1017,15 @@ async def transcriptions(request: Request,
     rules = _repair_rules(selection, terms)
 
     want_segments = "segment" in granularities or response_format in {"srt", "vtt"}
+    hotwords, vocabulary = _decode_vocabulary(engine, selection, terms)
+    boost = _boost(form, engine)
+    if boost:
+        _check_vocabulary(engine, vocabulary)
     opts = asr.Options(
         language=_language(form, engine),
-        hotwords=_decode_vocabulary(engine, selection, terms),
+        hotwords=hotwords,
+        vocabulary=vocabulary,
+        boost=boost,
         temperature=_temperature(form, engine),
         task="transcribe",
         # The engine that reports no segments of its own has them cut from its
@@ -947,8 +1074,16 @@ async def translations(request: Request,
     selection = _glossary(form)
     terms = _terms(form)
 
+    # Whisper is the only engine with a translate task, and _boost refuses the
+    # field there — so this is a validation call, not a plumbing one. It is
+    # here so a `boost` sent to /translations is refused by name rather than
+    # accepted by an allowlist and then ignored.
+    _boost(form, engine)
+    hotwords, vocabulary = _decode_vocabulary(engine, selection, terms)
+
     opts = asr.Options(
-        hotwords=_decode_vocabulary(engine, selection, terms),
+        hotwords=hotwords,
+        vocabulary=vocabulary,
         temperature=_temperature(form, engine),
         task="translate",
         want_segments=response_format in {"verbose_json", "srt", "vtt"},

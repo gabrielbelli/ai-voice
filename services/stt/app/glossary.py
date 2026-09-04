@@ -1,12 +1,28 @@
 """Post-transcription term repair: the mechanism, not the vocabulary.
 
-Parakeet is a CTC/TDT model. Unlike Whisper it takes no `hotwords` and no
-`initial_prompt`, so nothing here can steer the decoder. The repair happens
-after decoding, on the text.
+The repair happens after decoding, on the text. It is one of the two halves a
+glossary has here, and it is the half that runs unconditionally on both
+engines.
 
-This is cruder than decoder biasing — it cannot recover a term the acoustic
-model never got close to — but it costs nothing and it fixes the failure that
-actually matters: a correctly-heard word mapped to the wrong spelling.
+WHAT THIS HEADER USED TO SAY, AND WHY THE CORRECTION MATTERS. It said Parakeet
+"takes no `hotwords` and no `initial_prompt`, so nothing here can steer the
+decoder", and offered this module as the consolation prize. The first clause is
+true and the conclusion was wrong: onnx-asr's greedy TDT loop is plain Python
+with the joint's logits in hand, and boosting.py steers that decoder directly.
+The sentence read as a statement about the model when it was a statement about
+an argument list, and it is why this service refused `prompt` with a 400 for
+months.
+
+So repair is no longer the only thing available — but it is still the cheaper
+and safer of the two, and the division of labour is worth stating exactly:
+
+  repair    fixes a word the model HEARD and spelled wrong. Costs nothing, has
+            no acoustic risk, and cannot be undone by the decoder.
+  boosting  can recover a word the model never approached, which repair cannot.
+            It is opt-in per request because it is a bet: a boost list whose
+            terms are absent from the audio raised WER by 12% on Parakeet
+            across 250 conditions, and the damage lands inside the decode where
+            this module cannot reach it.
 
 TWO KINDS OF RULE, FROM TWO KINDS OF LINE
 -----------------------------------------

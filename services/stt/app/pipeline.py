@@ -60,13 +60,16 @@ DEFAULT_PROFILES = os.getenv("STT_GLOSSARY_DEFAULT", "")
 THREADS = int(os.getenv("STT_THREADS", "4"))
 VAD_ENABLED = os.getenv("STT_VAD", "1") not in {"0", "false", "no"}
 # Off switch for decode-time biasing, so a benchmark can separate what the
-# vocabulary contributes from what the model does. Whisper only — Parakeet has
-# no such mechanism. Text repair is unaffected either way, and that includes
-# the repair a request's own `prompt` now compiles into: this switch is about
-# what the DECODER is told, which is the only place a vocabulary changes what
-# the model produces. A benchmark measuring the model is not contaminated by a
-# rewrite applied to the model's finished output, and would be lied to by an
-# off switch that quietly dropped it.
+# vocabulary contributes from what the model does. BOTH ENGINES: it used to say
+# "Whisper only — Parakeet has no such mechanism", which stopped being true
+# when boosting.py landed, and an off switch that covered one of the two
+# engines would have made this variable a lie on the default deployment.
+# Text repair is unaffected either way, and that includes the repair a
+# request's own `prompt` compiles into: this switch is about what the DECODER
+# is told, which is the only place a vocabulary changes what the model
+# produces. A benchmark measuring the model is not contaminated by a rewrite
+# applied to the model's finished output, and would be lied to by an off switch
+# that quietly dropped it.
 HOTWORDS_ENABLED = os.getenv("STT_HOTWORDS", "1") not in {"0", "false", "no"}
 # Requests allowed inside the recogniser at once, or 0 for no limit.
 #
@@ -115,6 +118,10 @@ class Result:
     words: tuple[asr.Word, ...] = ()
     logprobs: tuple[asr.TokenLogprob, ...] | None = None
     task: str = "transcribe"
+    # Phrases that reached the decoder as a boost automaton, for
+    # x-boost-applied. Empty on every request that did not opt in, which is
+    # every request by default.
+    boosted: tuple[str, ...] = ()
 
 
 def start() -> None:
@@ -134,13 +141,18 @@ def start() -> None:
     state["rules"] = default.rules
 
     # Whisper takes the glossary at decode time, which beats repairing the text
-    # afterwards. Parakeet cannot, so for it the glossary is repair only.
-    #
-    # Only the DEFAULT profiles can be baked in here, because faster-whisper
-    # takes its hotwords when the model is constructed. A profile a request
-    # names reaches the decoder through asr.Options.hotwords instead, on the
-    # same argument, so per-request selection is not second-class — see
+    # afterwards, and only the DEFAULT profiles can be baked in here because
+    # faster-whisper takes its hotwords when the model is constructed. A
+    # profile a request names reaches the decoder through asr.Options instead,
+    # on the same argument, so per-request selection is not second-class — see
     # openai_api._glossary.
+    #
+    # Nothing is baked in for Parakeet, and that is deliberate rather than a
+    # gap. Its biasing is compiled per request from asr.Options.vocabulary and
+    # is off unless the request asked, because a deployment-wide always-on
+    # boost list is the shape the +12% measurement above rules out. A
+    # deployment that wants it anyway sets STT_BOOST=1, which changes the
+    # DEFAULT the route applies rather than bypassing the route.
     hotwords = default.hotwords if HOTWORDS_ENABLED else None
 
     state["asr"] = asr.build(THREADS, hotwords)
@@ -405,11 +417,13 @@ def run(data: bytes, opts: asr.Options | None = None, *,
     STT_GLOSSARY_DEFAULT names profiles — an unselected request gets no
     repair, which is the specification's behaviour and the measured one.
 
-    `opts.hotwords` extends the glossary's decode-time vocabulary for this
-    request. Whisper honours it. Parakeet has no mechanism for one, so the /v1
-    route leaves it None there and puts that request's terms into `rules`
-    instead — the field is honoured in the half the engine has, rather than
-    refused as it used to be. See openai_api._terms.
+    `opts.hotwords` and `opts.vocabulary` are one vocabulary in the two shapes
+    the two decoders take, and both are extended for this request. Whisper
+    reads the joined string as hotwords. Parakeet compiles the tuple into a
+    boosting automaton and fuses it into its TDT decoding loop, but only when
+    `opts.boost` is set — see boosting.py. This docstring used to say Parakeet
+    "has no mechanism for a vocabulary"; that was true of onnx-asr's argument
+    list and false about the decoder.
 
     STT_HOTWORDS=0 outranks the request: with biasing switched off, a request
     carrying a vocabulary is transcribed without it.
@@ -424,8 +438,13 @@ def run(data: bytes, opts: asr.Options | None = None, *,
     # without it — silently, and only on the requests that carried a prompt,
     # which is the worst way for a benchmark to be wrong. The route refuses the
     # field when biasing is off; this is the second lock on the same door.
-    if not HOTWORDS_ENABLED and opts.hotwords:
-        opts = replace(opts, hotwords=None)
+    #
+    # ALL THREE FIELDS, not just hotwords. Clearing the Whisper half and
+    # leaving the Parakeet half would make STT_HOTWORDS=0 a half-open door on
+    # the DEFAULT engine, which is worse than not having the switch: a
+    # benchmark would believe it had measured the model.
+    if not HOTWORDS_ENABLED and (opts.hotwords or opts.vocabulary or opts.boost):
+        opts = replace(opts, hotwords=None, vocabulary=(), boost=False)
 
     samples = decode(data, allow_resample=allow_resample)
     if samples.size == 0:
@@ -447,9 +466,10 @@ def run(data: bytes, opts: asr.Options | None = None, *,
         segments, words = _segments_from_words(recognition.words, speech, rules)
     compute = time.monotonic() - started
 
-    log.info("%.1fs audio, %.1fs speech, %.2fs compute (%.1fx), repaired=%s",
-             audio_seconds, speech_seconds, compute,
-             audio_seconds / compute if compute else 0.0, repaired or "none")
+    log.info("%.1fs audio, %.1fs speech, %.2fs compute (%.1fx), repaired=%s, "
+             "boosted=%s", audio_seconds, speech_seconds, compute,
+             audio_seconds / compute if compute else 0.0, repaired or "none",
+             ", ".join(recognition.boosted) or "none")
 
     return Result(
         text=text,
@@ -465,6 +485,7 @@ def run(data: bytes, opts: asr.Options | None = None, *,
         words=words,
         logprobs=recognition.logprobs,
         task=opts.task,
+        boosted=recognition.boosted,
     )
 
 
@@ -490,8 +511,8 @@ def open_stream(data: bytes, opts: asr.Options, *, allow_resample: bool = True,
     """
     model = engine()
     tuning = tuning or Tuning()
-    if not HOTWORDS_ENABLED and opts.hotwords:
-        opts = replace(opts, hotwords=None)
+    if not HOTWORDS_ENABLED and (opts.hotwords or opts.vocabulary or opts.boost):
+        opts = replace(opts, hotwords=None, vocabulary=(), boost=False)
 
     samples = decode(data, allow_resample=allow_resample)
     if samples.size == 0:
