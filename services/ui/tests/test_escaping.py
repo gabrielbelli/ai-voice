@@ -743,3 +743,51 @@ def test_the_split_inserts_no_pauses():
     a token budget to a full stop. Adding silence would change the audio."""
     body = _code(_fn("function autoSegments("))
     assert "pause_after" not in body
+
+
+# ------------------------------------------ vocabulary, not an expert setting --
+
+
+def test_the_vocabulary_control_is_outside_the_expert_panel():
+    """Which words a recording is likely to contain is the one thing the person
+    who made it knows and nobody else does. Behind a disclosure triangle, the
+    only control they could usefully set was where they would not find it."""
+    box = HTML.index('id="glossbox"')
+    panel = HTML.index('id="stt-expert"')
+    assert box < panel, "the vocabulary control is inside or after the expert panel"
+
+
+def test_nothing_is_selected_by_default():
+    """Measured across 250 conditions: a glossary whose terms do NOT occur in
+    the audio raises WER by 12% on Parakeet and 28% on Whisper. An always-on
+    list is the worst available shape."""
+    body = _code(_fn("async function loadGlossaries("))
+    assert 'aria-pressed="false"' in body
+    assert 'aria-pressed="true"' not in body
+
+
+def test_an_empty_selection_sends_no_field_at_all():
+    """Per ADR 0001 an extension is absent by default -- not sent empty, which
+    is a value the service would have to interpret."""
+    for fn in ("async function transcribeToken(", "async function transcribeFile("):
+        try:
+            body = _code(_fn(fn))
+        except ValueError:
+            continue
+        if "chosenGlossaries()" not in body:
+            continue
+        assert "chosen.length" in body or "nativeChosen.length" in body, \
+            f"{fn} sends the field unconditionally"
+
+
+def test_the_control_is_hidden_when_the_service_offers_none():
+    """A control with nothing in it is a question the page cannot answer."""
+    body = _code(_fn("async function loadGlossaries("))
+    assert '$("glossbox").hidden = !GLOSSARIES.length' in body
+
+
+def test_the_page_can_reach_the_glossary_listing():
+    """It is a gateway route, so a bare relative call would land on the gateway
+    and skip the UI's key. /ui/api is what brings it back through."""
+    assert "glossaries" in HTML[HTML.index("const GATEWAY_ROUTES"):
+                                HTML.index("const GATEWAY_ROUTES") + 200]

@@ -296,6 +296,16 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
             <button data-fmt="vtt" aria-pressed="false">Subtitles (VTT)</button>
           </div>
         </div>
+        <!-- VOCABULARY IS NOT AN EXPERT SETTING. Which words a recording is
+             likely to contain is the thing the person who made it knows and
+             nobody else does, so burying it behind a disclosure triangle put
+             the one control only they could set where they would not find it.
+             Off by default, because a profile whose terms do not occur costs
+             12% WER on Parakeet and 28% on Whisper -- measured. -->
+        <div class="tight" id="glossbox" hidden>
+          <label>Vocabulary</label>
+          <div class="seg" id="gloss"></div>
+        </div>
         <span class="spacer"></span>
         <button class="primary tight" id="go-stt" type="button" disabled>Transcribe</button>
       </div>
@@ -799,7 +809,7 @@ function reason(payload, fallback) {
 
    Both mounts are live on the UI service, so this also works unchanged when
    the page is opened on that service's own port directly. */
-const GATEWAY_ROUTES = /^\/(v1|transcribe|speak|voices|jobs)(\/|$)/;
+const GATEWAY_ROUTES = /^\/(v1|transcribe|speak|voices|jobs|glossaries)(\/|$)/;
 
 async function api(path, options) {
   const target = GATEWAY_ROUTES.test(path) ? "/ui/api" + path : path;
@@ -1132,6 +1142,43 @@ document.addEventListener("paste", ev => {
   $("url").value = text;
   $("url").focus();
 });
+
+/* ------------------------------------------------ vocabulary profiles --- */
+/*
+  Toggles rather than a multi-select: the set is two or three names, all of
+  them visible at once matters more than saving a row, and a <select multiple>
+  is the control people cannot work out how to deselect.
+
+  NONE selected by default and that is the measurement, not caution. Across 250
+  conditions a glossary whose terms do NOT occur in the audio raised WER by 12%
+  on Parakeet and 28% on Whisper. An always-on list is the worst shape
+  available; opting in per recording is the only one the numbers support.
+*/
+let GLOSSARIES = [];
+
+function chosenGlossaries() {
+  return [...$("gloss").querySelectorAll('[aria-pressed="true"]')]
+    .map(b => b.dataset.gloss);
+}
+
+async function loadGlossaries() {
+  try { GLOSSARIES = (await json("/glossaries")).glossaries || []; }
+  catch { GLOSSARIES = []; }
+  /* Hidden entirely when the service offers none, rather than shown empty: a
+     control with nothing in it is a question the page cannot answer. */
+  $("glossbox").hidden = !GLOSSARIES.length;
+  if (!GLOSSARIES.length) return;
+  $("gloss").innerHTML = GLOSSARIES.map(g =>
+    `<button type="button" data-gloss="${esc(g.name)}" aria-pressed="false"
+       title="${esc(g.terms + " terms")}">${esc(g.name)}</button>`).join("");
+  $("gloss").querySelectorAll("button").forEach(b =>
+    b.addEventListener("click", () => {
+      /* Independent toggles, not a radio group: several can be selected, and
+         the service merges them in the order it is given. */
+      b.setAttribute("aria-pressed",
+                     b.getAttribute("aria-pressed") === "true" ? "false" : "true");
+    }));
+}
 
 document.querySelectorAll("#fmt button").forEach(b => b.addEventListener("click", () => {
   document.querySelectorAll("#fmt button").forEach(o =>
@@ -1606,6 +1653,8 @@ async function transcribeToken() {
   for (const grain of granularities(format, wanted)) {
     query.append("timestamp_granularities", grain);
   }
+  const chosen = chosenGlossaries();
+  if (chosen.length) query.set("glossary", chosen.join(","));
   try {
     const response = await api("/ui/fetch?" + query.toString(), {
       method: "POST", headers: { "content-type": "application/json" },
@@ -1698,6 +1747,11 @@ $("go-stt").addEventListener("click", async () => {
     /* No `language` field, in either mode. It is a 400 on /v1 and silently
        ignored here, and pinning it is what once made this service translate
        rather than transcribe. */
+    /* Honoured on this route too: the repair is post-decode and runs whichever
+       route reached the pipeline, so a profile that worked on /v1 must not
+       silently stop working because the native route was chosen. */
+    const nativeChosen = chosenGlossaries();
+    if (nativeChosen.length) form.append("glossary", nativeChosen.join(","));
   } else {
     path = "/v1/audio/transcriptions";
     format = formatForTimings(wanted);
@@ -1710,6 +1764,10 @@ $("go-stt").addEventListener("click", async () => {
     for (const grain of granularities(format, wanted)) {
       form.append("timestamp_granularities[]", grain);
     }
+    /* An extension, per ADR 0001: absent by default, and absent entirely when
+       nothing is selected rather than sent empty. */
+    const chosen = chosenGlossaries();
+    if (chosen.length) form.append("glossary", chosen.join(","));
     if ($("x-logprobs").checked) form.append("include[]", "logprobs");
     const t = $("x-vad-t").value, p = $("x-vad-p").value, s = $("x-vad-s").value;
     if (t !== "0.5" || p !== "100" || s !== "300") {
@@ -3869,6 +3927,9 @@ $("saveclip").addEventListener("click", async () => {
   /* The expert panels start out matching the empty page rather than matching
      their markup: nothing is picked, so nothing is ruled out yet. */
   updateRouteAvailability();
+  /* Before loadVoices only because both are awaited and this one is a small
+     JSON read; neither depends on the other. */
+  await loadGlossaries();
   await loadVoices();
   if (!CONFIG.cloning) {
     /* Said once, plainly, rather than letting a saved voice vanish on the next

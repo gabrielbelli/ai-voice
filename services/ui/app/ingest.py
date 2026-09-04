@@ -708,12 +708,18 @@ async def fetch(request: Request, body: TokenRequest) -> Response:
                 400, f"timestamp_granularities must be one of "
                      f"{', '.join(sorted(GRANULARITIES))}, not {value!r}",
                 code="invalid_granularity", param="timestamp_granularities")
+    # The vocabulary profiles this request selected, forwarded verbatim and
+    # deliberately NOT validated here: stt owns the list and answers 400 naming
+    # an unknown profile, so a second copy of that check in this service would
+    # be another thing to keep in step with a directory it cannot see.
+    glossary = (query.get("glossary") or "").strip()
     fields = [
         # Required by /v1 validation, and it does NOT choose an engine --
         # Parakeet runs regardless and says so in x-stt-engine.
         ("model", "parakeet"),
         ("response_format", wanted),
         *(("timestamp_granularities[]", value) for value in granularities),
+        *((("glossary", glossary),) if glossary else ()),
     ]
 
     async def upstream() -> AsyncIterator[bytes]:

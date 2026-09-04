@@ -118,6 +118,11 @@ PROXIED: tuple[tuple[str, str], ...] = (
     ("DELETE", "/jobs/{job_id}"),
     ("GET", "/jobs/{job_id}/audio"),
     ("GET", "/v1/models"),
+    # READ ONLY. The page offers the profiles a transcription can select, so it
+    # needs to list them; creating and deleting one is an operator action over
+    # curl, and putting a write route in the page's allowlist would make this
+    # service a way to reach it without the key the gateway checks.
+    ("GET", "/glossaries"),
 )
 
 # Routes whose request body is an upload and must therefore never be buffered
