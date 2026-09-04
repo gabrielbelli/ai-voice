@@ -27,6 +27,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import re
 import threading
 import time
 import zlib
@@ -36,12 +37,22 @@ from dataclasses import dataclass, field, replace
 import numpy as np
 from fastapi import HTTPException
 
-from . import asr, audio, glossary, vad
+from . import asr, audio, glossary, profiles, vad
 
 SAMPLE_RATE = 16_000
 
 MODEL = os.getenv("STT_MODEL", "parakeet")
-GLOSSARY_PATH = os.getenv("STT_GLOSSARY", "/etc/stt-stack/glossary.txt")
+# Profiles applied when a request selects none. UNSET BY DEFAULT, and that is a
+# deliberate behaviour change: this service used to compile one file at boot and
+# apply it to every transcript, which is both a public image carrying one
+# person's project names and a measured accuracy cost — a glossary whose terms
+# do NOT occur in the audio raised WER by 12% on Parakeet and 28% on Whisper
+# across 250 conditions. Absent a selection, behaviour is now the
+# specification's: no glossary, no biasing.
+#
+# A deployment that wants the old always-on shape asks for it by name —
+# STT_GLOSSARY_DEFAULT=dictation,tech — and pays the cost knowingly.
+DEFAULT_PROFILES = os.getenv("STT_GLOSSARY_DEFAULT", "")
 # The one knob that matters on a shared host. ONNX Runtime and CTranslate2
 # both size their pools from the host core count, not the cgroup, so a
 # container CPU limit without this leaves threads fighting for their own
@@ -105,15 +116,27 @@ def start() -> None:
     """Load the glossary, the recogniser and, if enabled, the VAD."""
     os.environ.setdefault("OMP_NUM_THREADS", str(THREADS))
 
-    terms, hotword_list = glossary.load(GLOSSARY_PATH)
-    state["rules"] = glossary.compile_rules(terms)
-    # Whisper takes the glossary at decode time, which beats repairing the
-    # text afterwards. Parakeet cannot, so for it the glossary is repair only.
+    registry = profiles.load_registry()
+    state["glossaries"] = registry
+    log.info("glossary profiles: %s", ", ".join(
+        f"{name} ({registry.profiles[name].source})" for name in registry.names)
+        or "none")
+
+    # The default selection, which is EMPTY unless STT_GLOSSARY_DEFAULT names
+    # profiles. state["rules"] is what a request that selects nothing gets;
+    # everything else is compiled per selection and cached in the registry.
+    default = registry.select(profiles.split_selection(DEFAULT_PROFILES))
+    state["rules"] = default.rules
+
+    # Whisper takes the glossary at decode time, which beats repairing the text
+    # afterwards. Parakeet cannot, so for it the glossary is repair only.
     #
-    # Note this is not free: measured on audio containing NONE of its terms, a
-    # glossary raised WER by 12% on Parakeet and 28% on Whisper. Keep the list
-    # relevant to what is actually being said.
-    hotwords = (", ".join(hotword_list) or None) if HOTWORDS_ENABLED else None
+    # Only the DEFAULT profiles can be baked in here, because faster-whisper
+    # takes its hotwords when the model is constructed. A profile a request
+    # names reaches the decoder through asr.Options.hotwords instead, on the
+    # same argument, so per-request selection is not second-class — see
+    # openai_api._glossary.
+    hotwords = default.hotwords if HOTWORDS_ENABLED else None
 
     state["asr"] = asr.build(THREADS, hotwords)
 
@@ -129,6 +152,31 @@ def stop() -> None:
 def loaded() -> object | None:
     """The recogniser, or None while it is still loading. For /health."""
     return state.get("asr")
+
+
+def registry() -> profiles.Registry:
+    """The glossary profiles this process serves.
+
+    Built at startup, but never frozen there: the four /glossaries routes and
+    every request that names a profile call refresh() first, which rescans only
+    when a stat() says a file changed. "Load once at boot" was the shape that
+    made per-request selection meaningless — changing one term needed a new
+    container.
+    """
+    existing = state.get("glossaries")
+    if existing is None:
+        # Only reachable before the lifespan has run — the /glossaries routes
+        # are as useful with no model loaded as with one, and refusing them
+        # with a 503 about the RECOGNISER would be answering a question nobody
+        # asked. A registry built here is replaced by start()'s.
+        existing = profiles.load_registry()
+        state["glossaries"] = existing
+    return existing  # type: ignore[return-value]
+
+
+def default_rules() -> list[tuple[re.Pattern[str], str]]:
+    """Rules for a request that selected no profile. Usually empty."""
+    return state.get("rules") or []  # type: ignore[return-value]
 
 
 def engine() -> asr.Parakeet | asr.Whisper:
@@ -343,8 +391,14 @@ def _place_segments(segments: tuple[asr.Segment, ...], speech: vad.Speech,
 
 
 def run(data: bytes, opts: asr.Options | None = None, *,
-        allow_resample: bool = False, tuning: Tuning | None = None) -> Result:
+        allow_resample: bool = False, tuning: Tuning | None = None,
+        rules: list[tuple[re.Pattern[str], str]] | None = None) -> Result:
     """Transcribe one clip. Blocking CPU work — never call this on the loop.
+
+    `rules` is this request's compiled glossary, from the profiles it selected.
+    None means the deployment default, which is empty unless
+    STT_GLOSSARY_DEFAULT names profiles — an unselected request gets no
+    repair, which is the specification's behaviour and the measured one.
 
     `opts.hotwords` extends the glossary's decode-time vocabulary for this
     request. Whisper honours it; Parakeet has no mechanism for a vocabulary,
@@ -377,7 +431,8 @@ def run(data: bytes, opts: asr.Options | None = None, *,
     speech_seconds = speech.samples.size / SAMPLE_RATE
 
     recognition = model.transcribe(speech.samples, opts)
-    rules = state["rules"]
+    if rules is None:
+        rules = default_rules()
     text, repaired = glossary.apply(recognition.text, rules)  # type: ignore[arg-type]
 
     if recognition.segments is not None:
@@ -419,7 +474,8 @@ class Stream:
 
 
 def open_stream(data: bytes, opts: asr.Options, *, allow_resample: bool = True,
-                tuning: Tuning | None = None) -> Stream:
+                tuning: Tuning | None = None,
+                rules: list[tuple[re.Pattern[str], str]] | None = None) -> Stream:
     """Start a streaming transcription. Decoding and VAD happen up front.
 
     Only the engine that can genuinely emit before it finishes reaches here —
@@ -438,7 +494,8 @@ def open_stream(data: bytes, opts: asr.Options, *, allow_resample: bool = True,
 
     started = time.monotonic()
     speech = _speech(samples, tuning)
-    rules = state["rules"]
+    if rules is None:
+        rules = default_rules()
     stream = Stream(audio_seconds=audio_seconds, deltas=iter(()))
 
     def deltas() -> Iterator[str]:

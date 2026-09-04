@@ -1,6 +1,6 @@
 # ADR 0003 — Profiles are managed over the API, and writability follows the volume
 
-**Status:** accepted, not yet implemented
+**Status:** accepted
 **Date:** 2026-09-03
 **Refines:** [ADR 0002](0002-glossary-profiles.md)
 

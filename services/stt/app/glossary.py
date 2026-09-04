@@ -1,4 +1,4 @@
-"""Post-transcription term repair.
+"""Post-transcription term repair: the mechanism, not the vocabulary.
 
 Parakeet is a CTC/TDT model. Unlike Whisper it takes no `hotwords` and no
 `initial_prompt`, so there is no way to bias the decoder toward a vocabulary.
@@ -7,67 +7,26 @@ The repair therefore happens after decoding, on the text.
 This is cruder than decoder biasing — it cannot recover a term the acoustic
 model never got close to — but it costs nothing and it fixes the failure that
 actually matters: a correctly-heard word mapped to the wrong spelling.
+
+WHAT USED TO BE HERE AND IS NOT ANY MORE
+----------------------------------------
+A module-level `DEFAULT_GLOSSARY` dict, applied to every transcript whether or
+not a glossary file existed, holding `ghost paper = Ghost Pepper`,
+`theory dashboard = Theoria dashboard`, `clode = Claude Code` and `ghosty =
+Ghostty`. It was the same defect as the shipped glossary.txt — one person's
+vocabulary inside a public image — with the extra property that no operator
+could turn it off, because it was not in a file to delete. Its general entries
+now live in the built-in `dictation` profile and are applied only when a
+request asks for them; its project names moved to a deployment-supplied
+profile (examples/glossaries/personal.txt).
+
+Which terms exist, where they come from and how they are selected is
+profiles.py's job. This file only knows how to compile a mapping and apply it.
 """
 
 from __future__ import annotations
 
 import re
-from pathlib import Path
-
-# Matched case-insensitively against whole words only, longest first, so that
-# "text to speak" wins over a "text" rule. Replacement preserves nothing about
-# the original casing: these are proper nouns and identifiers with one correct
-# spelling each.
-DEFAULT_GLOSSARY: dict[str, str] = {
-    "cloud code": "Claude Code",
-    "todd code": "Claude Code",
-    "clode": "Claude Code",
-    "entropic": "Anthropic",
-    "ghost paper": "Ghost Pepper",
-    "comet": "commit",
-    "theory dashboard": "Theoria dashboard",
-    "ldr": "TLDR",
-    "dts": "STT",
-    "tex to speak": "text-to-speech",
-    "text to speak": "text-to-speech",
-    "open sauce": "open source",
-    "11 labs": "ElevenLabs",
-    "eleven labs": "ElevenLabs",
-    "ghosty": "Ghostty",
-}
-
-
-def load(path: str | Path | None) -> tuple[dict[str, str], list[str]]:
-    """Read the glossary file. Returns (replacements, hotwords).
-
-    Two line forms, because they are two different jobs:
-
-        catalaxy = Catallaxy    a replacement AND a hotword
-        Catallaxy               a hotword only
-
-    The bare form exists for terms whose likely mishearing is an ordinary
-    word. "Belli" is heard as "belly", but a `belly = Belli` rule would
-    corrupt any sentence that genuinely says belly. Biasing the decoder toward
-    Belli is safe; rewriting the text afterwards is not.
-
-    Lines that are blank or start with # are ignored. A missing file is not an
-    error — the defaults are a usable glossary on their own.
-    """
-    terms = dict(DEFAULT_GLOSSARY)
-    hotwords: list[str] = []
-    if path:
-        p = Path(path)
-        if p.is_file():
-            for line in p.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" in line:
-                    heard, intended = line.split("=", 1)
-                    terms[heard.strip().lower()] = intended.strip()
-                else:
-                    hotwords.append(line)
-    return terms, sorted(set(list(terms.values()) + hotwords))
 
 
 def compile_rules(terms: dict[str, str]) -> list[tuple[re.Pattern[str], str]]:

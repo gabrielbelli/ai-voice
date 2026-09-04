@@ -1,0 +1,46 @@
+# dictation — mishearings of ordinary speech that any dictating user hits.
+#
+# Two line forms, because they are two different jobs:
+#
+#   heard = intended     a replacement AND a hotword
+#   Term                 a hotword only
+#
+# Use the bare form when the likely mishearing is an ordinary word. "Belli" is
+# heard as "belly", but a `belly = Belli` rule would corrupt any sentence that
+# genuinely says belly. Biasing the decoder is safe; rewriting is not.
+#
+# NOTHING HERE IS ANYONE'S PROJECT NAME. This file ships in a public image, so
+# a term that only one person ever says would be applied to strangers' audio to
+# fix a word they have never used — and it is not free either: measured across
+# 250 conditions, a glossary whose terms do NOT occur in the audio raised WER by
+# 12% on Parakeet and 28% on Whisper. Personal vocabulary goes in a
+# deployment-supplied profile; see examples/glossaries/personal.txt.
+
+# --- replacements: no innocent reading of the left-hand side
+cloud code = Claude Code
+todd code = Claude Code
+clode = Claude Code
+entropic = Anthropic
+tex to speak = text-to-speech
+text to speak = text-to-speech
+speech to tex = speech-to-text
+open sauce = open source
+11 labs = ElevenLabs
+eleven labs = ElevenLabs
+ldr = TLDR
+dts = STT
+ghosty = Ghostty
+
+# --- hotwords only: bias the decoder, never rewrite the text
+#
+# `comet = commit` used to be a replacement and is demoted here on this file's
+# own rule: "comet" is an ordinary English word, so the rule would rewrite a
+# sentence that was right all along. Whisper still gets it right from the
+# hotword; Parakeet takes no decode-time vocabulary at all and therefore gets
+# nothing from this section, which is the honest cost of the demotion.
+commit
+Anthropic
+Claude Code
+ElevenLabs
+Ghostty
+Obsidian

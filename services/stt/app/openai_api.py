@@ -30,6 +30,11 @@ this surface used to drop eleven of them.
                              that cannot — see the streaming note below
   language, prompt,          honoured on Whisper, refused by name on Parakeet,
   keywords[], temperature    which has no mechanism for any of them
+  glossary                   an EXTENSION, allowlisted beside keywords[] and
+                             languages[]: named glossary profiles, applied to
+                             this request only. Honoured on both engines,
+                             because post-decode repair works on both; only its
+                             decode-time half is Whisper-only
   languages[], diarisation   refused by name; nothing here can do them
   unknown fields             refused by name. CreateTranscriptionRequest sets
                              additionalProperties: false, and lenience here is
@@ -45,6 +50,27 @@ repository's own README sends it — to make a point about a name. So the reques
 is answered, and every response on this surface carries `x-stt-engine` naming
 the engine that actually ran. Honesty rather than obedience; /health says the
 same thing.
+
+GLOSSARY PROFILES
+-----------------
+Two ways to reach a vocabulary, and the split is ADR 0001's rule about
+extensions rather than a preference:
+
+  prompt      the SPECIFICATION'S OWN FIELD, defined as text that guides the
+              model, which is exactly what one-off terms are. It needs no
+              extension and is what a one-off should use.
+  glossary    the extension, `glossary=tech,dictation` via extra_body. Named
+              profiles that live on the server, managed over /glossaries.
+
+Absent both, behaviour is the specification's: no glossary, no biasing. A
+request naming a profile that does not exist is a 400 NAMING IT — silently
+ignoring it would leave a caller believing their vocabulary was applied when it
+was not, which is the exact silence this module exists to remove.
+
+Selecting several profiles at once is discouraged, and for a measured reason
+rather than a tidy one: a glossary whose terms do NOT occur in the audio raised
+WER by 12% on Parakeet and 28% on Whisper across 250 conditions. Irrelevant
+terms are not inert.
 
 STREAMING
 ---------
@@ -77,7 +103,7 @@ from starlette.concurrency import run_in_threadpool
 
 from voice_common.errors import ApiError
 
-from . import asr, languages, pipeline
+from . import asr, languages, pipeline, profiles
 
 log = logging.getLogger("stt-stack.openai")
 
@@ -106,9 +132,18 @@ TRANSCRIPTION_FIELDS = frozenset({
     "response_format", "temperature", "include", "timestamp_granularities",
     "stream", "chunking_strategy", "known_speaker_names",
     "known_speaker_references",
+    # The extension, sitting beside `keywords` and `languages` because that is
+    # the pattern ADR 0001 sets for a genuinely new axis: a body field, named
+    # so it cannot collide with a specification field, reachable from an SDK
+    # with extra_body={"glossary": "tech"} and absent by default.
+    "glossary",
 })
 TRANSLATION_FIELDS = frozenset({
     "file", "model", "prompt", "response_format", "temperature",
+    # Translation runs the same pipeline and therefore the same post-decode
+    # repair. Allowlisted here too, so that a client cannot discover that one
+    # of the two routes refuses an extension the other honours.
+    "glossary",
 })
 
 # No auth dependency: the key check is voice_common's ASGI middleware, applied
@@ -287,6 +322,69 @@ def _vocabulary(form, engine) -> str | None:  # noqa: ANN001
             "which switches decode-time biasing off entirely so that a "
             "benchmark measures the model rather than the vocabulary.")
     return ", ".join([prompt, *keywords]) if prompt else ", ".join(keywords)
+
+
+def _glossary(form) -> profiles.Selection:  # noqa: ANN001
+    """`glossary=tech,dictation` — named profiles, for this request only.
+
+    The extension, per ADR 0001: a new axis that no specification field covers,
+    carried in a body field an SDK reaches with extra_body and defaulting to
+    off. Absent, a request gets the deployment default, which is empty unless
+    STT_GLOSSARY_DEFAULT names profiles.
+
+    An unknown name is a 400 NAMING IT. The alternative — ignoring it — leaves
+    a caller believing their vocabulary was applied when it was not, and that
+    silence is indistinguishable from a working glossary right up until a
+    transcript is wrong.
+
+    refresh() first, so a profile written a second ago is usable now. It is a
+    handful of stat() calls and it is the difference between per-request
+    selection and a set frozen at boot.
+    """
+    raw = _value(form, "glossary")
+    names = profiles.split_selection(raw)
+    if not names:
+        return profiles.Selection(rules=pipeline.default_rules())
+    registry = pipeline.registry()
+    registry.refresh()
+    try:
+        return registry.select(names)
+    except profiles.UnknownProfile as exc:
+        raise _bad(
+            f"Unknown glossary profile {exc.name!r}. "
+            f"This deployment has: {', '.join(exc.known) or 'none'}. "
+            "See GET /glossaries.",
+            param="glossary") from exc
+
+
+def _decode_vocabulary(engine, selection: profiles.Selection,  # noqa: ANN001
+                       requested: str | None) -> str | None:
+    """What actually reaches the decoder: the profiles' terms, then the request's.
+
+    A selected profile contributes to BOTH halves of the glossary, and only one
+    of them is engine-dependent:
+
+      post-decode repair   both engines, always. This is the half that runs on
+                           Parakeet, and it is why `glossary` is honoured there
+                           while `prompt` is refused — a profile has something
+                           to do under Parakeet and a raw prompt does not.
+      decode-time biasing  Whisper only, and only with STT_HOTWORDS on. Omitted
+                           silently under Parakeet, which is not the "accepted
+                           and ignored" failure this module exists to prevent:
+                           the field IS honoured, in the only way the engine
+                           allows, and /health reports `accepts_vocabulary`
+                           false so a client can find out without a request.
+
+    The request's own prompt/keywords come last, so a caller's one-off term is
+    never dropped in favour of a server-side profile.
+    """
+    parts: list[str] = []
+    if (selection.hotwords and engine.accepts_vocabulary
+            and pipeline.HOTWORDS_ENABLED):
+        parts.append(selection.hotwords)
+    if requested:
+        parts.append(requested)
+    return ", ".join(parts) or None
 
 
 def _granularities(form, response_format: str) -> tuple[str, ...]:  # noqa: ANN001
@@ -632,6 +730,7 @@ _TRANSCRIPTION_SCHEMA = _schema({
     "languages": {"type": "array", "items": {"type": "string"}},
     "prompt": {"type": "string"},
     "keywords": {"type": "array", "items": {"type": "string"}},
+    "glossary": {"type": "string"},
     "response_format": {"type": "string", "enum": list(FORMATS)},
     "temperature": {"type": "number", "minimum": 0, "maximum": 1},
     "include": {"type": "array", "items": {"type": "string", "enum": ["logprobs"]}},
@@ -648,6 +747,7 @@ _TRANSLATION_SCHEMA = _schema({
     "file": {"type": "string", "format": "binary"},
     "model": {"type": "string"},
     "prompt": {"type": "string"},
+    "glossary": {"type": "string"},
     "response_format": {"type": "string", "enum": list(TRANSLATION_FORMATS)},
     "temperature": {"type": "number", "minimum": 0, "maximum": 1},
 }, ["file", "model"])
@@ -695,10 +795,12 @@ async def transcriptions(request: Request,
     want_logprobs = _include(form, engine, response_format)
     tuning = _chunking(form)
 
+    selection = _glossary(form)
+
     want_segments = "segment" in granularities or response_format in {"srt", "vtt"}
     opts = asr.Options(
         language=_language(form, engine),
-        hotwords=_vocabulary(form, engine),
+        hotwords=_decode_vocabulary(engine, selection, _vocabulary(form, engine)),
         temperature=_temperature(form, engine),
         task="transcribe",
         # The engine that reports no segments of its own has them cut from its
@@ -711,9 +813,10 @@ async def transcriptions(request: Request,
     data = await _read(file)
 
     if streaming:
-        return await _stream_response(data, opts, tuning, engine)
+        return await _stream_response(data, opts, tuning, engine,
+                                      selection.rules)
     return await _run(data, opts, tuning, engine, response_format,
-                      granularities, want_logprobs)
+                      granularities, want_logprobs, selection.rules)
 
 
 @router.post("/audio/translations", openapi_extra=_TRANSLATION_SCHEMA)
@@ -744,9 +847,10 @@ async def translations(request: Request,
     _model(form)
     response_format = _response_format(form, TRANSLATION_FORMATS)
     granularities = ("segment",) if response_format == "verbose_json" else ()
+    selection = _glossary(form)
 
     opts = asr.Options(
-        hotwords=_vocabulary(form, engine),
+        hotwords=_decode_vocabulary(engine, selection, _vocabulary(form, engine)),
         temperature=_temperature(form, engine),
         task="translate",
         want_segments=response_format in {"verbose_json", "srt", "vtt"},
@@ -754,12 +858,13 @@ async def translations(request: Request,
     data = await _read(file)
     return await _run(data, opts, tuning=pipeline.Tuning(), engine=engine,
                       response_format=response_format,
-                      granularities=granularities, want_logprobs=False)
+                      granularities=granularities, want_logprobs=False,
+                      rules=selection.rules)
 
 
 async def _run(data: bytes, opts: asr.Options, tuning: pipeline.Tuning,
                engine, response_format: str, granularities: tuple[str, ...],  # noqa: ANN001
-               want_logprobs: bool) -> Response:
+               want_logprobs: bool, rules=None) -> Response:  # noqa: ANN001
     try:
         with pipeline.slot():
             # Blocking CPU work, kept off the event loop: declared inline it
@@ -767,7 +872,8 @@ async def _run(data: bytes, opts: asr.Options, tuning: pipeline.Tuning,
             # container healthcheck that times out restarts a service that is
             # working correctly.
             result = await run_in_threadpool(
-                pipeline.run, data, opts, allow_resample=True, tuning=tuning)
+                pipeline.run, data, opts, allow_resample=True, tuning=tuning,
+                rules=rules)
     except pipeline.Busy as exc:
         raise _busy() from exc
     except HTTPException as exc:
@@ -779,7 +885,7 @@ async def _run(data: bytes, opts: asr.Options, tuning: pipeline.Tuning,
 
 
 async def _stream_response(data: bytes, opts: asr.Options,
-                           tuning: pipeline.Tuning, engine) -> Response:  # noqa: ANN001
+                           tuning: pipeline.Tuning, engine, rules=None) -> Response:  # noqa: ANN001
     """Open the stream before returning, so a failure is still a real status.
 
     Decoding and the VAD pass happen here rather than inside the generator:
@@ -792,7 +898,8 @@ async def _stream_response(data: bytes, opts: asr.Options,
         raise _busy() from exc
     try:
         stream = await run_in_threadpool(
-            pipeline.open_stream, data, opts, allow_resample=True, tuning=tuning)
+            pipeline.open_stream, data, opts, allow_resample=True, tuning=tuning,
+            rules=rules)
     except HTTPException as exc:
         pipeline.release()
         raise _translate_pipeline_error(exc) from exc

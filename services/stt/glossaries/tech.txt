@@ -1,0 +1,106 @@
+# tech — GENERAL technical vocabulary. Vendor and tool names anyone in the
+# field would say.
+#
+# THIS FILE CONTAINS NO PROJECT NAMES, and that is the point of the split
+# rather than a stylistic preference: a term in `tech` is paid for by every
+# request that selects `tech`, so a name only one person ever says makes the
+# profile worse for everybody else who uses it. An unused term is not inert —
+# measured across 250 conditions it cost +12% WER on Parakeet and +28% on
+# Whisper. Put your own names in a deployment-supplied profile instead; see
+# examples/glossaries/personal.txt.
+#
+# Line forms are the same as dictation.txt: `heard = intended` rewrites the
+# text and biases the decoder, a bare term only biases the decoder.
+
+# --- replacements: only where the left-hand side has no innocent reading.
+#
+# A multi-word left-hand side is NOT automatically safe. "my sequel = MySQL"
+# and "red is = Redis" were both considered and both rejected here: "my sequel
+# to the book" and "the red is brighter" are ordinary sentences, and a
+# replacement would eat them. The rule is about whether the phrase can occur
+# innocently, not about how many words it has.
+kuber netes = Kubernetes
+cuber netes = Kubernetes
+post gres = PostgreSQL
+post gres q l = PostgreSQL
+sequel light = SQLite
+type script = TypeScript
+java script = JavaScript
+web assembly = WebAssembly
+free bsd = FreeBSD
+open bsd = OpenBSD
+net bsd = NetBSD
+zed fs = ZFS
+o auth = OAuth
+git hub = GitHub
+git lab = GitLab
+
+# --- hotwords only: bias the decoder, never rewrite the text
+Kubernetes
+kubectl
+nginx
+HAProxy
+PostgreSQL
+SQLite
+MySQL
+MariaDB
+Redis
+Valkey
+RabbitMQ
+Kafka
+ONNX
+CUDA
+PyTorch
+TensorFlow
+NumPy
+FastAPI
+uvicorn
+pydantic
+pytest
+Django
+Flask
+Node.js
+TypeScript
+JavaScript
+WebAssembly
+Rust
+Golang
+Docker
+Podman
+Containerfile
+Dockerfile
+Traefik
+Caddy
+Prometheus
+Grafana
+OpenTelemetry
+Terraform
+Ansible
+FreeBSD
+OpenBSD
+NetBSD
+Debian
+Ubuntu
+Alpine
+systemd
+ZFS
+btrfs
+NFS
+SMB
+TrueNAS
+Proxmox
+GitHub
+GitLab
+Gitea
+OAuth
+OIDC
+JWT
+TLS
+mTLS
+gRPC
+GraphQL
+WebRTC
+FFmpeg
+libav
+Opus
+FLAC

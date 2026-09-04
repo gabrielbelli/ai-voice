@@ -1,0 +1,54 @@
+# EXAMPLE ONLY — DEPLOYMENT-SUPPLIED, NOT LOADED BY DEFAULT.
+#
+# This file is not copied into the image and no request can select it until a
+# deployment installs it. It is here as a worked example of the one thing the
+# shipped profiles must never contain: one person's project names, colleagues
+# and internal systems.
+#
+# Why the split exists. `ai-voice-stt` is published to a public registry, and
+# these rules used to live in services/stt/glossary.txt, which the image copied
+# in and applied to EVERY request. Anyone who pulled the image got
+# `catalaxy = Catallaxy` applied to their audio — a rewrite naming a project
+# they have never heard of, that they could not discover without reading the
+# image, and that they did not ask for. It was not free either: measured across
+# 250 conditions, a glossary whose terms do NOT occur in the audio raised WER
+# by 12% on Parakeet and 28% on Whisper.
+#
+# Install it, on a deployment with /glossaries mounted:
+#
+#   curl -X PUT --data-binary @examples/glossaries/personal.txt \
+#        http://localhost:8000/glossaries/personal
+#
+# or drop it in the mounted directory as /glossaries/personal.txt. Then select
+# it per request:
+#
+#   curl -F file=@clip.wav -F glossary=personal http://localhost:8000/transcribe
+#
+# `PUT` refuses a single-word left-hand side unless you send `force`, because
+# that is the shape that corrupts sentences the glossary was never meant to
+# touch. `comet` below is exactly that case and needs `?force=true`; read the
+# note beside it before you send it.
+
+# --- replacements
+catalaxy = Catallaxy
+catalaxi = Catallaxy
+theory dashboard = Theoria dashboard
+ghost paper = Ghost Pepper
+ghost pepper = Ghost Pepper
+# An ordinary English word on the left. Kept here because this deployment's
+# speech is dictated software talk, where "comet" is a mishearing of "commit"
+# essentially every time — and refused by PUT without `force` for the same
+# reason it is a hotword rather than a replacement in the shipped `dictation`
+# profile.
+comet = commit
+
+# --- hotwords only: bias the decoder, never rewrite the text
+#
+# "Belli" is heard as "belly", but a `belly = Belli` rule would corrupt any
+# sentence that genuinely says belly. Biasing the decoder is safe; rewriting
+# is not.
+Catallaxy
+Theoria
+Ghost Pepper
+Belli
+Parakeet

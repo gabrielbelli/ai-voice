@@ -1,6 +1,6 @@
 # ADR 0002 — Glossaries are named profiles, chosen per request, and none ships personal terms
 
-**Status:** accepted, not yet implemented
+**Status:** accepted
 **Date:** 2026-09-03
 
 ## Decision

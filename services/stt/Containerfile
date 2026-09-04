@@ -57,10 +57,39 @@ COPY services/stt/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY services/stt/app/ ./app/
-COPY services/stt/glossary.txt /etc/stt-stack/glossary.txt
+
+# The built-in glossary profiles, read-only in the image. `dictation` and
+# `tech`, and NEITHER CONTAINS ANYONE'S PROJECT NAMES.
+#
+# This used to be one file, services/stt/glossary.txt, copied to
+# /etc/stt-stack/glossary.txt and applied to every request. It shipped
+# `catalaxy = Catallaxy`, `theory dashboard = Theoria dashboard` and
+# `ghost paper = Ghost Pepper` — one person's vocabulary inside an image
+# published to a public registry, rewriting strangers' audio to name projects
+# they have never heard of. It was not free either: measured across 250
+# conditions, a glossary whose terms do NOT occur in the audio raised WER by
+# 12% on Parakeet and 28% on Whisper.
+#
+# So the personal terms left the image entirely (see
+# services/stt/examples/glossaries/personal.txt, which is deliberately NOT
+# copied here) and what remains is opted into per request.
+COPY services/stt/glossaries/ /etc/ai-voice/glossaries/
+
+# THERE IS DELIBERATELY NO `mkdir /glossaries` HERE. That directory is where
+# custom profiles are written, and it must exist only because an operator
+# mounted a volume there. Creating it in the image would make every PUT succeed
+# into the container's writable layer and vanish on the next restart — which is
+# worse than the 503 the write routes answer when nothing is mounted, because
+# the 503 says so.
 
 # HF_HOME points at the volume so models survive container replacement.
 # Without it every restart re-downloads more than a gigabyte.
+#
+# VOICE_CHOWN_DIRS gains /glossaries: a bind mount arrives with the HOST
+# directory's ownership, which uid 1000 usually cannot write, and the write
+# routes would then answer 503 on a volume the operator did in fact mount. The
+# entrypoint skips a directory that is not there, so listing it costs nothing
+# on a deployment that mounts none.
 #
 # VOICE_* configure voice-common's entrypoint, which pip installed to
 # /usr/local/bin alongside the Python code, so the TLS logic and the auth
@@ -70,10 +99,11 @@ COPY services/stt/glossary.txt /etc/stt-stack/glossary.txt
 # reason to touch either.
 ENV HF_HOME=/models \
     VOICE_TLS_PREFIX=STT \
-    VOICE_CHOWN_DIRS=/models \
+    VOICE_CHOWN_DIRS="/models /glossaries" \
     STT_MODEL=parakeet \
     STT_QUANTISATION=int8 \
-    STT_GLOSSARY=/etc/stt-stack/glossary.txt \
+    STT_GLOSSARY_BUILTIN=/etc/ai-voice/glossaries \
+    STT_GLOSSARY_DIR=/glossaries \
     STT_THREADS=4 \
     STT_VAD=1 \
     PYTHONUNBUFFERED=1
