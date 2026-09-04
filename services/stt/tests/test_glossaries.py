@@ -16,6 +16,7 @@ import io
 import struct
 import wave
 from pathlib import Path
+from urllib.parse import unquote
 
 import numpy as np
 import pytest
@@ -561,3 +562,319 @@ def test_a_hotword_is_never_turned_into_a_replacement(builtin: Path) -> None:
     assert "PostgreSQL" in (selection.hotwords or "")
     assert all(pattern.pattern != r"\bPostgreSQL\b"
                for pattern, _ in selection.rules)
+
+
+# ── a request's own vocabulary ────────────────────────────────────────────────
+#
+# `prompt` and `keywords[]` used to be a 400 on Parakeet, which is the engine
+# this service actually deploys. Every test below is named after what that
+# refusal cost, or after the way honouring it could go wrong instead.
+
+
+def v1(client: TestClient, **data: str):  # noqa: ANN201
+    return client.post("/v1/audio/transcriptions",
+                       files={"file": ("clip.wav", wav(), "audio/wav")},
+                       data={"model": "whisper-1", **data})
+
+
+def test_a_prompt_is_honoured_on_parakeet_rather_than_refused(
+        builtin: Path) -> None:
+    """The 400 this replaces was a spec field answered with an error.
+
+    `prompt` is defined as text that guides the model and vocabulary is what it
+    carries in practice, so refusing it was less compliant than honouring it,
+    not more — ADR 0001 says exactly that and then cited this refusal as its
+    example of saying no by name. The engine takes no decode-time vocabulary
+    and still does not; the terms reach the repair stage instead.
+    """
+    client = serve(builtin, engine=FakeEngine("I opened the theoria dashboard"))
+    try:
+        response = v1(client, prompt="Theoria")
+        assert response.status_code == 200
+        assert "Theoria dashboard" in response.json()["text"]
+        # Still no decode-time vocabulary, and /health still says so.
+        assert pipeline.state["asr"].seen.hotwords is None
+    finally:
+        pipeline.state.clear()
+
+
+def test_a_prompt_term_reaches_both_halves_on_whisper(builtin: Path) -> None:
+    """Whisper must not lose the decoder half to gain the repair half."""
+    client = serve(builtin, engine=FakeWhisper("I opened the theoria dashboard"))
+    try:
+        response = v1(client, prompt="Theoria")
+        assert response.status_code == 200
+        assert pipeline.state["asr"].seen.hotwords == "Theoria"
+        assert "Theoria dashboard" in response.json()["text"]
+    finally:
+        pipeline.state.clear()
+
+
+def test_a_prompt_cannot_recover_a_word_the_model_never_approached(
+        builtin: Path) -> None:
+    """The honest limit, pinned so no comment can drift into claiming more.
+
+    A bare term names its own spelling and no wrong one, so "entropic" is not
+    reachable from a prompt saying "Anthropic". Only a `heard = intended` rule
+    in a profile, or real decoder biasing, recovers that — and this engine has
+    neither.
+    """
+    client = serve(builtin, engine=FakeEngine("entropic released a model"))
+    try:
+        response = v1(client, prompt="Anthropic")
+        assert response.status_code == 200
+        assert response.json()["text"] == "entropic released a model"
+        assert "x-glossary-repaired" not in response.headers
+    finally:
+        pipeline.state.clear()
+
+
+def test_an_all_lowercase_term_does_not_lowercase_correct_text(
+        builtin: Path) -> None:
+    """`sync` as a term would compile to a rule that BREAKS a right sentence.
+
+    Every rule matches case-insensitively, so a lower-case term rewrites a
+    correct sentence-initial capital down to lower case. The shipped profiles
+    are full of these terms — `commit`, `nginx`, `kubectl` — so this is the
+    ordinary case rather than an exotic one.
+    """
+    client = serve(builtin, engine=FakeEngine("Sync the files, then commit"))
+    try:
+        response = v1(client, prompt="sync, commit")
+        assert response.status_code == 200
+        assert response.json()["text"] == "Sync the files, then commit"
+    finally:
+        pipeline.state.clear()
+
+
+def test_a_two_letter_term_does_not_rewrite_an_ordinary_word(
+        builtin: Path) -> None:
+    """`US` would turn "he told us" into "he told US" on every request."""
+    client = serve(builtin, engine=FakeEngine("he told us the plan"))
+    try:
+        response = v1(client, prompt="US")
+        assert response.status_code == 200
+        assert response.json()["text"] == "he told us the plan"
+    finally:
+        pipeline.state.clear()
+
+
+def test_a_profile_and_a_prompt_compose_with_the_request_last(
+        builtin: Path) -> None:
+    """Both halves, both sources, and the caller's own spelling winning.
+
+    The profile rewrites "theory dashboard" to "Theoria dashboard"; the
+    request's term then normalises a term the profile never mentions. A
+    request that names one term must not displace the profile it also asked
+    for, and must not be displaced by it.
+    """
+    client = serve(builtin, engine=FakeWhisper(
+        "the theory dashboard runs on postgresql"))
+    try:
+        response = v1(client, glossary="dictation,tech", prompt="PostgreSQL")
+        assert response.status_code == 200
+        text = response.json()["text"]
+        assert "Theoria dashboard" in text
+        assert "PostgreSQL" in text
+        # The profiles' terms first, the request's own last, in the decoder
+        # half too — a one-off term is never dropped for a server-side profile.
+        assert pipeline.state["asr"].seen.hotwords.endswith("PostgreSQL")
+    finally:
+        pipeline.state.clear()
+
+
+def test_a_profiles_bare_hotword_still_never_rewrites_the_text(
+        builtin: Path) -> None:
+    """The asymmetry with a prompt is deliberate and has to stay deliberate.
+
+    Both shipped profiles promise in their own headers that a bare term
+    "biases the decoder, never rewrites the text", and deployments have read
+    that. A profile's author can write `heard = intended` when they want a
+    rewrite; a `prompt` cannot express one at all, which is the whole reason
+    its terms get the weaker repair instead of nothing.
+    """
+    client = serve(builtin, engine=FakeEngine("we deployed postgresql today"))
+    try:
+        response = v1(client, glossary="tech")
+        assert response.status_code == 200
+        assert response.json()["text"] == "we deployed postgresql today"
+    finally:
+        pipeline.state.clear()
+
+
+def test_keywords_are_read_as_the_same_list_as_a_prompt(builtin: Path) -> None:
+    """The list-shaped spelling of the same field, bracketed and bare."""
+    for key in ("keywords[]", "keywords"):
+        client = serve(builtin, engine=FakeEngine("I opened the theoria dashboard"))
+        try:
+            response = v1(client, **{key: "Theoria"})
+            assert response.status_code == 200, key
+            assert "Theoria dashboard" in response.json()["text"], key
+        finally:
+            pipeline.state.clear()
+
+
+def test_too_many_terms_are_refused_by_name(builtin: Path) -> None:
+    """Every term is a regex run over every word; a paste is not a vocabulary.
+
+    profiles.MAX_ENTRIES is the same ceiling a glossary file is held to, for
+    the same reason, rather than a second number to keep in step with it.
+    """
+    client = serve(builtin)
+    try:
+        response = v1(client, prompt=", ".join(
+            f"Term{n}" for n in range(profiles.MAX_ENTRIES + 1)))
+        assert response.status_code == 400
+        error = response.json()["error"]
+        assert error["param"] == "prompt"
+        assert str(profiles.MAX_ENTRIES) in error["message"]
+    finally:
+        pipeline.state.clear()
+
+
+def test_hotwords_off_drops_the_decoder_half_and_keeps_the_repair(
+        builtin: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """STT_HOTWORDS=0 measures the model, not the text repair.
+
+    It exists so a benchmark can separate what the vocabulary contributes from
+    what the model does, and a rewrite applied to the model's finished output
+    changes neither. Dropping the repair too would make the switch mean
+    something it has never claimed — and the /v1 route used to answer a prompt
+    with a 400 under it, which denied a client the half that was never at
+    stake.
+    """
+    monkeypatch.setattr(pipeline, "HOTWORDS_ENABLED", False)
+    client = serve(builtin, engine=FakeWhisper("I opened the theoria dashboard"))
+    try:
+        response = v1(client, prompt="Theoria", glossary="tech")
+        assert response.status_code == 200
+        assert pipeline.state["asr"].seen.hotwords is None
+        assert "Theoria dashboard" in response.json()["text"]
+    finally:
+        pipeline.state.clear()
+
+
+# ── X-Glossary-Repaired ───────────────────────────────────────────────────────
+#
+# /transcribe has always returned `repaired`, and this surface could not: a
+# client here could not tell a transcript the glossary had rewritten from one
+# it had not. A header rather than a body key, because ADR 0001 forbids an
+# extension changing the response shape and because `text`, `srt` and `vtt`
+# have nowhere to put a key at all.
+
+
+def test_the_repaired_header_names_what_was_rewritten(builtin: Path) -> None:
+    client = serve(builtin, engine=FakeEngine("I opened the theory dashboard"))
+    try:
+        response = v1(client, glossary="dictation")
+        assert response.status_code == 200
+        assert response.headers["x-glossary-repaired"] == "Theoria dashboard"
+    finally:
+        pipeline.state.clear()
+
+
+def test_the_repaired_header_is_absent_when_nothing_fired(
+        builtin: Path) -> None:
+    """Its presence has to mean something, so it is not sent empty."""
+    client = serve(builtin, engine=FakeEngine("nothing here matches"))
+    try:
+        response = v1(client, glossary="dictation")
+        assert response.status_code == 200
+        assert "x-glossary-repaired" not in response.headers
+    finally:
+        pipeline.state.clear()
+
+
+def test_a_term_the_decoder_already_spelled_right_is_not_reported(
+        builtin: Path) -> None:
+    """A match is not a change, and the header must report changes.
+
+    Rules match case-insensitively, and a term rule is built from its own
+    output — so it matches every time the decoder got the term right. Counting
+    matches would make this header name terms nothing happened to, which is
+    the same false report as a silent substitution with the sign flipped.
+    """
+    client = serve(builtin, engine=FakeEngine("Theoria shipped today"))
+    try:
+        response = v1(client, prompt="Theoria")
+        assert response.status_code == 200
+        assert response.json()["text"] == "Theoria shipped today"
+        assert "x-glossary-repaired" not in response.headers
+    finally:
+        pipeline.state.clear()
+
+
+def test_a_non_latin1_repaired_term_does_not_become_a_500(
+        builtin: Path) -> None:
+    """Starlette encodes a header value as latin-1, and terms are not latin-1.
+
+    A Cyrillic or CJK vendor name is a perfectly ordinary glossary entry, and
+    putting it in a header raw turns a working transcription into an unhandled
+    UnicodeEncodeError after the work is done. Percent-encoded UTF-8 instead.
+    """
+    client = serve(builtin, engine=FakeEngine("we index with яндекс"))
+    try:
+        response = v1(client, prompt="Яндекс")
+        assert response.status_code == 200
+        assert "Яндекс" in response.json()["text"]
+        header = response.headers["x-glossary-repaired"]
+        assert header.isascii()
+        assert unquote(header) == "Яндекс"
+    finally:
+        pipeline.state.clear()
+
+
+def test_a_comma_inside_a_term_does_not_split_the_header(
+        writable: TestClient) -> None:
+    """The header is comma-separated, so a term's own comma has to escape.
+
+    A reader splitting on ", " would otherwise see one term as two, and the
+    second half would name a rewrite that never happened.
+    """
+    (writable.custom / "legal.txt").write_text(  # type: ignore[attr-defined]
+        "acme inc = Acme, Inc.\n", encoding="utf-8")
+    pipeline.state["asr"] = FakeEngine("filed by acme inc yesterday")
+    response = v1(writable, glossary="legal")
+    assert response.status_code == 200
+    header = response.headers["x-glossary-repaired"]
+    assert "," not in header.replace("%2C", "")
+    assert unquote(header) == "Acme, Inc."
+
+
+def test_the_requests_own_spelling_wins_over_the_profiles(builtin: Path) -> None:
+    """Request rules run LAST, and that is what decides a disagreement.
+
+    The `dictation` profile produces "Theoria dashboard"; this request asks for
+    "Theoria Dashboard". Run the request's rules first and its term never
+    matches, because the profile has not produced the term yet — the caller's
+    own spelling is silently dropped in favour of a server-side profile, which
+    is the one ordering rule _decode_vocabulary has always had on the other
+    half.
+    """
+    client = serve(builtin, engine=FakeEngine("I opened the theory dashboard"))
+    try:
+        response = v1(client, glossary="dictation", prompt="Theoria Dashboard")
+        assert response.status_code == 200
+        assert "Theoria Dashboard" in response.json()["text"]
+    finally:
+        pipeline.state.clear()
+
+
+def test_the_repaired_header_reaches_the_formats_with_no_body_key(
+        builtin: Path) -> None:
+    """`text`, `srt` and `vtt` have nowhere to put a key, which is the point.
+
+    A body key would also have changed the response shape, which ADR 0001
+    forbids an extension from doing. A header does neither and works on all
+    five formats.
+    """
+    for response_format in ("json", "text", "verbose_json", "srt", "vtt"):
+        client = serve(builtin, engine=FakeEngine("I opened the theory dashboard"))
+        try:
+            response = v1(client, glossary="dictation",
+                          response_format=response_format)
+            assert response.status_code == 200, response_format
+            assert response.headers["x-glossary-repaired"] == "Theoria dashboard", (
+                response_format)
+        finally:
+            pipeline.state.clear()

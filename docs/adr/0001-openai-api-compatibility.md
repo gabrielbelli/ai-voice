@@ -25,7 +25,10 @@ Three rules follow from it, and they are the whole of the policy:
    that sets none of them gets what OpenAI would return.
 2. **An extension never changes the response *shape*.** It may change the
    content of a field; it may not add a required key, remove one, or alter a
-   type. `verbose_json` stays `verbose_json`.
+   type. `verbose_json` stays `verbose_json`. A response HEADER is how this
+   surface says something the schema has no field for — `x-stt-engine` names
+   the engine that ran, `x-glossary-repaired` names the terms rewritten — and
+   a client that ignores headers sees exactly the specified body.
 3. **No extension is ever required.** There is no operation reachable only
    through a non-standard field.
 
@@ -62,7 +65,7 @@ already exist and are the pattern to copy:
 
 | field | status | why it exists |
 |---|---|---|
-| `keywords[]` | extension | list-shaped vocabulary, reaching the same decoder argument as `prompt` |
+| `keywords[]` | extension | list-shaped vocabulary, read as the same term list as `prompt` |
 | `languages[]` | extension | a code-switching speaker; the spec's `language` is singular |
 
 Both sit in `TRANSCRIPTION_FIELDS` beside the specification's own names, and an
@@ -74,10 +77,22 @@ naming it, not a silent no-op. Leniency here is what turned every unhonoured
 field into silence in the first place.
 
 **Say no by name.** Where a backend genuinely cannot honour a spec field, the
-answer is an error that names the field and the reason — as Parakeet does today
-for `prompt` — never acceptance followed by nothing happening. A field that is
-accepted and ignored is indistinguishable, from the client's side, from a field
-that worked.
+answer is an error that names the field and the reason — as Parakeet does for
+`language` and `temperature`, which a TDT decoder has no mechanism for and
+nothing downstream can stand in for — never acceptance followed by nothing
+happening. A field that is accepted and ignored is indistinguishable, from the
+client's side, from a field that worked.
+
+**But refuse the field, not one of its halves.** `prompt` was the example here
+until services/stt was read against the paragraph above it. Parakeet's decoder
+takes no vocabulary, so `prompt` was a 400 there — and that was the wrong
+boundary: a vocabulary in this stack has a decode-time half and a post-decode
+repair half, the second runs on both engines, and refusing the whole field
+denied a client the half that worked. `prompt` is honoured on both engines now,
+in whichever halves the engine has, and the response says what happened:
+`x-glossary-repaired` lists the terms actually rewritten. The test to apply is
+whether the backend can do *anything* the field asks for, not whether it can do
+all of it.
 
 ## Consequences
 

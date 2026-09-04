@@ -28,8 +28,10 @@ or distant microphone does, cost Whisper +206% WER on CORAA and Parakeet +41%.
 
 **Whisper is worth choosing** for clean read speech, where it genuinely leads,
 and when you need decode-time vocabulary: it accepts `hotwords`, Parakeet does
-not. For Parakeet the glossary is post-decode repair only, which is weaker —
-it cannot recover a word the acoustic model never approached.
+not. A request's `prompt` and `keywords[]` are honoured on both, but under
+Parakeet they reach only the post-decode repair, which is weaker — it fixes a
+proper noun the model heard and mis-spelled, and cannot recover a word the
+acoustic model never approached.
 
 ## Status
 
@@ -143,7 +145,8 @@ seen no events and raised nothing.
 | `timestamp_granularities[]` | Honoured. `segment` is the default, `word` adds word timings |
 | `chunking_strategy` | Honoured — `server_vad`'s `threshold`, `prefix_padding_ms` and `silence_duration_ms` tune the VAD this service already runs |
 | `stream` | Honoured on Whisper, refused on Parakeet. See below |
-| `language`, `prompt`, `keywords[]`, `temperature` | Honoured on Whisper, refused on Parakeet |
+| `language`, `temperature` | Honoured on Whisper, refused on Parakeet |
+| `prompt`, `keywords[]` | Honoured on **both**, in whichever halves the engine has. See [A request's own vocabulary](#a-requests-own-vocabulary) |
 | `glossary` | **Extension.** Named profiles, `glossary=tech,dictation`. Honoured on both engines. See [Glossary profiles](#glossary-profiles) |
 | `include[]=logprobs` | Honoured on Parakeet, refused on Whisper |
 | `languages[]` | Refused: neither engine takes a candidate set |
@@ -169,7 +172,7 @@ find out without spending a request on a refusal.
 | `stream=true` | refused — batch decoder | transcript deltas, one per window |
 | `/v1/audio/translations` | refused — no translate task | `task="translate"` |
 | `language` | refused — takes no hint | honoured |
-| `prompt`, `keywords[]` | refused — no decode-time vocabulary | joined into hotwords |
+| `prompt`, `keywords[]` | honoured — post-decode repair of the terms' own spelling | joined into hotwords, *and* the same repair |
 | `glossary` | honoured — post-decode repair | honoured — repair *and* hotwords |
 | `temperature` | refused — no sampling temperature | honoured, and it disables the fallback ladder |
 | `include[]=logprobs` | per-token logprobs | refused — only a per-segment average exists |
@@ -234,15 +237,24 @@ and it returns what the OpenAI shape has no field for:
 | | `/transcribe` | `/v1/audio/transcriptions` |
 |---|---|---|
 | Transcript | yes | yes |
-| `repaired` — which glossary terms fired | yes | — |
+| Which glossary terms fired | `repaired` | `x-glossary-repaired` |
 | `raw` — the transcript before repair | yes | — |
 | `realtime_factor` and the timings behind it | yes | — |
 | Segments, words, subtitles, streaming | — | yes |
 | Works with an unmodified OpenAI client | — | yes |
 
-`repaired` is the one worth caring about. A silent substitution is worse than
-no substitution: if a glossary rule is wrong, you want to see it named, and on
-the compatible route you cannot.
+A silent substitution is worse than no substitution: if a glossary rule is
+wrong, you want to see it named. The native route puts that list in `repaired`;
+the compatible route could not, and now answers it in a header instead —
+**`x-glossary-repaired`**, present only when something was actually rewritten,
+listing the terms comma-separated and percent-encoded (a header value is
+latin-1 on the wire and a glossary term is not). A body key would have changed
+the response shape, which ADR 0001 forbids an extension from doing, and `text`,
+`srt` and `vtt` have nowhere to put one anyway.
+
+It is absent on `stream=true`: the headers go out before the first delta is
+decoded, so at that point nothing has been repaired. The deltas themselves are
+already repaired.
 
 ### Deviations
 
@@ -258,11 +270,15 @@ example above sends it — to make a point about a name. So the request is
 answered and **every `/v1` response carries `x-stt-engine`** naming the engine
 that actually ran. Honesty rather than obedience.
 
-**No streaming, translation, `language`, `prompt`, `keywords[]` or
-`temperature` under Parakeet.** All six are refusals, not silences, and all six
-are properties of a TDT decoder that has no such mechanism. Deploy with
-`STT_MODEL=whisper` if you need them, and pay the order of magnitude in
-latency.
+**No streaming, translation, `language` or `temperature` under Parakeet.** All
+four are refusals, not silences, and all four are properties of a TDT decoder
+that has no such mechanism and nothing downstream that can stand in for one.
+Deploy with `STT_MODEL=whisper` if you need them, and pay the order of
+magnitude in latency.
+
+`prompt` and `keywords[]` used to be a fifth and sixth. They are not refused
+any more, because a vocabulary has a second half that does work here — see
+below.
 
 **No diarisation.** `diarized_json`, `known_speaker_names[]` and
 `known_speaker_references[]` are refused. There is no speaker-embedding or
@@ -296,11 +312,12 @@ client that knows nothing about it behaves exactly as it would against OpenAI,
 and the four `/glossaries` routes that manage the profiles are deliberately
 native rather than `/v1`.
 
-**Glossary repair happens on strings**, when a profile was selected. It is
-applied to the whole transcript,
+**Glossary repair happens on strings**, when a profile was selected or a
+request sent terms of its own. It is applied to the whole transcript,
 and separately to each segment and each word, so a rule spanning a boundary —
 `cloud code` split across two segments — fires in `text` and cannot fire inside
-the smaller unit. `/transcribe` names every rule that fired in `repaired`.
+the smaller unit. `/transcribe` names every rule that fired in `repaired`, and
+`/v1` in `x-glossary-repaired`.
 
 **`seek` is not remapped.** With the VAD on, the recogniser sees speech runs
 concatenated, and every start and end is mapped back onto the clip you sent.
@@ -589,6 +606,60 @@ was never in the list. **Parakeet has no such mechanism**: it is CTC/TDT and
 onnx-asr exposes no biasing argument, so under it a profile is post-decode
 repair only and its hotword-only lines do nothing.
 
+### A request's own vocabulary
+
+`prompt` and `keywords[]` are one-off terms for one request. They are the
+specification's own way to guide the model — `prompt` is defined as text that
+does exactly that — so they need no extension, and `keywords[]` is the same
+list already shaped as a list. Both are read as terms, split on commas and
+newlines.
+
+```bash
+curl -H "Authorization: Bearer $STT_API_KEY" \
+  -F file=@clip.wav -F model=whisper-1 \
+  -F 'prompt=Theoria, Ghost Pepper, Catallaxy' \
+  http://localhost:8000/v1/audio/transcriptions
+```
+
+| | Parakeet | Whisper |
+|---|---|---|
+| joined into the decoder's `hotwords` | — | yes |
+| compiled into this request's repair | yes | yes |
+
+**What the repair half can and cannot do.** A bare term spells its own intended
+form and names no wrong one, so the only rule derivable from it is over its own
+letters: wherever the transcript already contains the term, spell it the way
+you wrote it. That fixes `theoria` → `Theoria` and `ghost pepper` → `Ghost
+Pepper`, which is what Parakeet actually gets wrong on a proper noun it heard
+correctly. It does **not** turn `entropic` into `Anthropic` — nothing here
+names `entropic`. Only a `heard = intended` rule in a profile does that.
+
+Two shapes are skipped, and the skips matter more than they look:
+
+- **A term that is already all lower case.** Its rule is a no-op at best and
+  harmful at worst — matching is case-insensitive, so `sync` as a term would
+  rewrite a correct sentence-initial `Sync` down to lower case. This is the
+  common case, not an exotic one: `commit`, `nginx` and `kubectl` are all
+  hotwords in the shipped profiles.
+- **A term under three characters.** `US` would turn "he told us" into "he told
+  US" on every request that named it.
+
+**A profile's own bare hotwords are still never turned into a rewrite**, and
+the asymmetry is deliberate. A profile's author can write `heard = intended`
+when they want one, and both shipped files promise in their headers that a bare
+term biases the decoder and never rewrites the text. A `prompt` cannot express
+a replacement at all, so its choice is between the weak repair and nothing —
+which is what it used to get, as a 400.
+
+**A profile and a prompt compose.** Send both and you get both, with the
+profiles' terms first and the request's own last in both halves, so a one-off
+term is never dropped in favour of a server-side profile. Whatever actually
+fired comes back in `x-glossary-repaired`.
+
+Up to 500 terms, the same ceiling a profile file is held to and for the same
+reason: every term is a compiled regex run against every word of the
+transcript. Over it is a 400 naming the count.
+
 #### What a `PUT` refuses, and why
 
 A bad rule corrupts silently, so writes are validated and **nothing is written
@@ -641,13 +712,18 @@ drops in via `STT_MODEL_ID`, with `STT_MODEL` left at `parakeet`.
 
 ### Switching biasing off
 
-`STT_HOTWORDS=0` is absolute: no glossary hotwords from any profile, and a
-`prompt` sent to `/v1/audio/transcriptions` is dropped rather than passed to
-the decoder. Half
-an off switch is worse than none — a benchmark run that sets `prompt` would
-get biasing back on exactly the requests that carried one, and measure
-something other than what it thinks. Text repair is unaffected either way, and
-`/health` reports the current setting as `hotwords`.
+`STT_HOTWORDS=0` is absolute **about the decoder**: no glossary hotwords from
+any profile, and the terms in a `prompt` or `keywords[]` are dropped rather
+than passed to it. Half an off switch is worse than none — a benchmark run that
+sets `prompt` would get biasing back on exactly the requests that carried one,
+and measure something other than what it thinks.
+
+Text repair is unaffected either way, and that includes the repair a request's
+own terms compile into. The switch exists so a benchmark can separate what the
+vocabulary contributes from what the model does, and a rewrite applied to the
+model's finished output changes neither — dropping it too would make the switch
+mean something it has never claimed. `/health` reports the current setting as
+`hotwords`.
 
 ## Language
 

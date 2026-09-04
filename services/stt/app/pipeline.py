@@ -61,7 +61,12 @@ THREADS = int(os.getenv("STT_THREADS", "4"))
 VAD_ENABLED = os.getenv("STT_VAD", "1") not in {"0", "false", "no"}
 # Off switch for decode-time biasing, so a benchmark can separate what the
 # vocabulary contributes from what the model does. Whisper only — Parakeet has
-# no such mechanism. Text repair is unaffected either way.
+# no such mechanism. Text repair is unaffected either way, and that includes
+# the repair a request's own `prompt` now compiles into: this switch is about
+# what the DECODER is told, which is the only place a vocabulary changes what
+# the model produces. A benchmark measuring the model is not contaminated by a
+# rewrite applied to the model's finished output, and would be lied to by an
+# off switch that quietly dropped it.
 HOTWORDS_ENABLED = os.getenv("STT_HOTWORDS", "1") not in {"0", "false", "no"}
 # Requests allowed inside the recogniser at once, or 0 for no limit.
 #
@@ -401,9 +406,10 @@ def run(data: bytes, opts: asr.Options | None = None, *,
     repair, which is the specification's behaviour and the measured one.
 
     `opts.hotwords` extends the glossary's decode-time vocabulary for this
-    request. Whisper honours it; Parakeet has no mechanism for a vocabulary,
-    and the /v1 route refuses the field there rather than accepting it and
-    doing nothing.
+    request. Whisper honours it. Parakeet has no mechanism for one, so the /v1
+    route leaves it None there and puts that request's terms into `rules`
+    instead — the field is honoured in the half the engine has, rather than
+    refused as it used to be. See openai_api._terms.
 
     STT_HOTWORDS=0 outranks the request: with biasing switched off, a request
     carrying a vocabulary is transcribed without it.

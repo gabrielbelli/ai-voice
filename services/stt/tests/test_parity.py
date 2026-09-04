@@ -212,17 +212,40 @@ def test_the_engine_that_ran_is_named_on_every_response(parakeet: TestClient) ->
 
 @pytest.mark.parametrize("field,value", [
     ("language", "pt"),
-    ("prompt", "Theoria"),
     ("temperature", "0.9"),
 ])
 def test_parakeet_refuses_what_it_cannot_honour(parakeet: TestClient,
                                                 field: str, value: str) -> None:
-    """Accepted-and-dropped is the defect; a refusal naming the field is the fix."""
+    """Accepted-and-dropped is the defect; a refusal naming the field is the fix.
+
+    `prompt` used to be a third row here and is deliberately not any more: it
+    has something to do on this engine now, so refusing it would be the defect
+    rather than the fix. test_glossaries.py carries the detail; the row below
+    it is the guard that the removal did not take the whole check with it. The
+    two that remain are the proof that the flag-per-capability design still
+    holds: a TDT decoder really has no language hint and no sampling
+    temperature, and nothing downstream can stand in for either.
+    """
     response = post(parakeet, **{field: value})
     assert response.status_code == 400
     error = response.json()["error"]
     assert error["param"] == field
     assert "parakeet" in error["message"]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("prompt", "Theoria"),
+    ("keywords[]", "Theoria"),
+])
+def test_parakeet_answers_a_vocabulary_rather_than_refusing_it(
+        parakeet: TestClient, field: str, value: str) -> None:
+    """The 400 these used to get was a refusal of a field with a working half.
+
+    Parakeet's decoder still takes no vocabulary and `accepts_vocabulary` is
+    still false — that flag is a claim about the decoder. The terms reach this
+    request's post-decode repair instead, which is the half that works here.
+    """
+    assert post(parakeet, **{field: value}).status_code == 200
 
 
 def test_whisper_honours_language_and_temperature(whisper: TestClient) -> None:

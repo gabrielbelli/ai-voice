@@ -13,7 +13,9 @@ cheap or distant microphone — cost Whisper +206% WER on CORAA and Parakeet
 physical limit.
 
 Whisper remains available, because it genuinely wins on clean read speech and
-it is the only one of the two that accepts a vocabulary at decode time.
+it is the only one of the two that accepts a vocabulary at DECODE time — the
+distinction matters now that a request's vocabulary reaches both engines, and
+only reaches the decoder on one.
 
 There is deliberately no second recogniser. A consensus pass was tried and
 removed: across every disagreement observed, the second model was the wrong
@@ -40,6 +42,14 @@ would have done the work.
                   decoder has no vocabulary argument at all; the glossary is
                   post-decode repair there, which cannot recover a word the
                   acoustic model never approached.
+                  `accepts_vocabulary` is a claim about the DECODER and only
+                  about the decoder. It is what decides whether a request's
+                  terms are joined into hotwords — it does NOT decide whether
+                  `prompt` and `keywords[]` are accepted, which they now are on
+                  both engines, because those terms also compile into that
+                  request's post-decode repair. openai_api._terms carries the
+                  reasoning; this flag stays false on Parakeet because it is
+                  still true.
   temperature     Whisper has one, though pinning it disables the fallback
                   ladder. A TDT decoder has no sampling temperature.
   streaming       faster-whisper yields each segment as its 30 s window is
@@ -153,9 +163,11 @@ class Recognition:
 class Parakeet:
     """Parakeet TDT via ONNX Runtime. CTC/TDT, so no decode-time vocabulary.
 
-    Terms are repaired after decoding instead (see glossary.py). That is
-    weaker than biasing — it cannot recover a word the acoustic model never
-    approached — but it is what this runtime offers. FluidAudio implements
+    Terms are repaired after decoding instead (see glossary.py), and that now
+    includes a request's own `prompt` and `keywords[]` rather than a 400. It is
+    weaker than biasing — it recovers a proper noun the model heard and
+    mis-spelled, not one it never approached — but it is what this runtime
+    offers, and it is more than the refusal it replaced. FluidAudio implements
     real CTC boosting for the same model, and is CoreML-only.
     """
 
@@ -177,9 +189,14 @@ class Parakeet:
 
     def transcribe(self, samples: np.ndarray, opts: Options) -> Recognition:
         # Parakeet v3 detects language itself and takes no hint, and its TDT
-        # decoder has no vocabulary and no temperature. The route refuses those
-        # fields by name before reaching here, so anything still set would be a
-        # routing bug rather than something to swallow quietly.
+        # decoder has no temperature. The route refuses both by name before
+        # reaching here, so either still set would be a routing bug rather than
+        # something to swallow quietly.
+        #
+        # opts.hotwords is the one that is NOT a routing bug when absent: the
+        # route honours `prompt` here, it just honours it in the repair stage
+        # downstream of this call, and leaves hotwords None because there is
+        # nothing on this decoder to hand it to. See openai_api._terms.
         if not opts.want_detail:
             # The plain adapter, for the default response_format. Asking for
             # timestamps costs about 5% on a 14.2 s clip here (5.07 s against
