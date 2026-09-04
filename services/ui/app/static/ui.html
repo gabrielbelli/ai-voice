@@ -1842,17 +1842,31 @@ function toEngineLang(iso, kind, voiceName) {
 function populateLanguages() {
   const select = $("lang");
   const previous = select.value;
+  /* LANGUAGE ONLY. NO REGION. This list said "English (US)", "English (UK)"
+     and "Portuguese (Brazil)", which put the accent in the wrong control: the
+     region is a property of the VOICE, and Kokoro already encodes it in the
+     name -- a→en-us, b→en-gb, p→pt-br. Asking for it twice meant choosing
+     "English (UK)" and then choosing a British voice, and made "English (US)"
+     with a British voice a state the page allowed and could not honour.
+
+     So the values here are ISO stems, one per language, and the region comes
+     from whichever voice is picked below. toEngineLang already did exactly
+     that for auto-detect -- `en` becomes en-gb or en-us by reading the voice's
+     first letter -- so choosing a language by hand now takes the same path
+     rather than a second one that could disagree with it.
+
+     Keyed on the stem also collapses Kokoro's "pt-br" and Chatterbox's "pt",
+     which are the same intent spelled two ways, into one Portuguese entry
+     rather than two that look like a mistake. */
   const seen = new Set();
   const merged = [];
   for (const [code, name] of [...KOKORO_LANGS, ...CHATTERBOX_LANGS]) {
-    /* Kokoro's "pt-br" and Chatterbox's "pt" are the same intent spelled two
-       ways. Keyed on the ISO stem so the union carries one Portuguese entry,
-       not two that look like a mistake; toEngineLang turns it back into
-       whichever spelling the chosen engine wants at send time. */
     const stem = code.split("-")[0];
     if (seen.has(stem)) continue;
     seen.add(stem);
-    merged.push([code, name]);
+    /* "English (US)" -> "English". The parenthetical is the region, and it is
+       the thing being moved out of this control. */
+    merged.push([stem, name.replace(/\s*\([^)]*\)\s*$/, "")]);
   }
   merged.sort((a, b) => a[1].localeCompare(b[1]));
   select.innerHTML = `<option value="auto">Auto-detect</option>` +
@@ -1868,14 +1882,12 @@ function populateLanguages() {
 function voicesForLanguage(kokoro, code) {
   const all = (kokoro && kokoro.voices) || [];
   if (!code || code === "auto") return all;
+  /* MATCHED ON THE STEM, so "English" keeps both the American and the British
+     voices and the accent stays a choice made below rather than above. The
+     name prefix is where Kokoro encodes it (a→en-us, b→en-gb, p→pt-br), and
+     PREFIX is the same map resolvedLanguage reads, so the filter and the code
+     actually sent cannot disagree. */
   const stem = code.split("-")[0];
-  /* The service groups the three it knows about; everything else is matched on
-     the name prefix, which is where Kokoro encodes language (a→en-us, b→en-gb,
-     p→pt-br, and the rest). PREFIX is the same map resolvedLanguage uses, so
-     the filter and the code actually sent cannot disagree. */
-  const grouped = { "en-us": kokoro.en_us, "en-gb": kokoro.en_gb,
-                    "pt-br": kokoro.pt_br }[code];
-  if (grouped && grouped.length) return grouped;
   return all.filter(v => (PREFIX[v[0]] || "").split("-")[0] === stem);
 }
 
@@ -1887,8 +1899,15 @@ function resolvedLanguage() {
   const fallback = voice.kind === "clone"
     ? "en" : (PREFIX[(voice.name || "a")[0]] || "en-us");
 
-  if (chosen && chosen !== "auto")
-    return { code: chosen, why: "chosen" };
+  if (chosen && chosen !== "auto") {
+    /* THROUGH toEngineLang, NOT STRAIGHT OUT. The select now holds ISO stems
+       -- "en", "pt" -- because the region belongs to the voice, so sending the
+       value verbatim would put "en" on the wire where Kokoro wants "en-gb".
+       The same call resolves it that auto-detect uses, reading the region off
+       the chosen voice, so the two paths cannot disagree. */
+    const code = toEngineLang(chosen, voice.kind, voice.name);
+    return { code: code || fallback, why: "chosen" };
+  }
 
   const iso = detectLanguage($("text").value);
   const code = toEngineLang(iso, voice.kind, voice.name);

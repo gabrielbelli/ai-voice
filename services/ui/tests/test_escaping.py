@@ -317,3 +317,60 @@ def test_the_scandinavian_lists_stay_indistinguishable_on_purpose():
     assert len(stop["da"] & stop["no"]) > 5, \
         "these were deliberately similar; a rewrite that separated them is " \
         "claiming a distinction a short sample cannot support"
+
+
+# ------------------------------------------ language without the region --
+
+
+def test_the_language_list_carries_no_region():
+    """It offered "English (US)", "English (UK)" and "Portuguese (Brazil)".
+
+    That put the accent in the wrong control: the region is a property of the
+    VOICE, and Kokoro already encodes it in the name (a->en-us, b->en-gb,
+    p->pt-br). Asking twice also made "English (US)" with a British voice a
+    state the page allowed and could not honour.
+    """
+    body = HTML[HTML.index("function populateLanguages()"):
+                HTML.index("function voicesForLanguage")]
+    assert "name.replace(" in body, "the region is not being stripped"
+    assert r"\([^)]*\)" in body, "the trailing parenthetical is not matched"
+    # And the source lists it strips from still carry the regions, so the test
+    # is asserting a transformation rather than an already-clean input.
+    assert '"English (US)"' in HTML and '"Portuguese (Brazil)"' in HTML
+
+
+def test_a_chosen_language_goes_through_toenginelang():
+    """The select holds ISO stems now, so sending the value verbatim would put
+    "en" on the wire where Kokoro wants "en-gb" -- and "en-us" where Chatterbox
+    wants "en", which is the 400 a user actually hit:
+
+        unsupported language 'en-us'; chatterbox has ar, da, de, el, en, ...
+    """
+    body = HTML[HTML.index("function resolvedLanguage()"):]
+    body = body[:body.index("\n}\n")]
+    chosen = body[body.index('chosen !== "auto"'):]
+    assert "toEngineLang(chosen" in chosen, \
+        "a hand-picked language must resolve the same way auto-detect does"
+
+
+def test_the_two_engines_disagree_about_spelling_and_that_is_handled():
+    """Kokoro wants pt-br, en-us and cmn; Chatterbox wants pt, en and zh. One
+    control, two vocabularies, and toEngineLang is the only translator."""
+    fn = HTML[HTML.index("function toEngineLang"):]
+    fn = fn[:fn.index("\n}\n")]
+    assert 'kind === "clone"' in fn, "the clone path must not take Kokoro codes"
+    assert "pt:\"pt-br\"" in fn.replace(" ", "") or 'pt:"pt-br"' in fn
+
+
+def test_the_page_and_the_backend_agree_on_chatterbox_languages():
+    """The page's list is a copy of services/tts-long's, which is itself a copy
+    of the model's, cross-checked at load. A third copy drifting means a 400
+    for a language the model would have accepted."""
+    page = set(re.findall(r'\["(\w+)","[^"]+"\]',
+                          HTML[HTML.index("const CHATTERBOX_LANGS"):
+                               HTML.index("];", HTML.index("const CHATTERBOX_LANGS"))]))
+    synth = (Path(__file__).resolve().parents[3]
+             / "services" / "tts-long" / "app" / "synth.py").read_text()
+    block = synth[synth.index("SUPPORTED_LANGUAGES = ("):]
+    backend = set(re.findall(r'"(\w+)"', block[:block.index(")")]))
+    assert page == backend, f"page-only {page - backend}, backend-only {backend - page}"
