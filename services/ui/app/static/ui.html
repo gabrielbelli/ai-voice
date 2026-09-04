@@ -201,7 +201,6 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
   <div class="bar">
     <span class="brand">ai-voice<small>speech in, speech out</small></span>
     <span class="spacer"></span>
-    <div class="pills" id="pills"></div>
     <!-- THERE WAS AN "EXPERT" CHECKBOX HERE: a global gate over the
          .expert-only class, which is to say over the three <details> panels at
          the foot of each tab. They are collapsed, they are titled "Expert —
@@ -393,11 +392,9 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
         <div>
           <label for="lang">Language</label>
           <select id="lang"></select>
-          <div class="hint" id="langhint"></div>
 <div>
           <label for="voice">Voice</label>
           <select id="voice"></select>
-          <div class="hint" id="voicehint"></div>
           <button class="small link" id="delvoice" type="button" hidden>Remove this cloned voice</button>
         </div>
         </div>
@@ -410,7 +407,6 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
                on one tab is a collision, and naming is the whole fix. -->
           <label for="speed">Synthesis speed <output id="speedout" class="num">1.00</output></label>
           <input type="range" id="speed" min="0.5" max="2" step="0.05" value="1">
-          <div class="hint" id="speedhint">0.5 – 2.0</div>
         </div>
       </div>
 
@@ -450,7 +446,7 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
           <label for="playrate">Playback speed</label>
           <select id="playrate" class="rate"></select>
         </div>
-        <span class="hint tight" id="speak-meta"></span><span class="spacer"></span>
+        <span class="spacer"></span>
         <button class="small tight" id="dl-audio" type="button">Download</button>
       </div>
       <!-- The label says "Playback speed" and the other one says "Synthesis
@@ -779,41 +775,21 @@ document.querySelectorAll('[role=tab]').forEach(button => {
   });
 });
 
-/* --------------------------------------------------------- health ----- */
-function pill(label, kind, title) {
-  return `<span class="pill ${kind}" title="${title || ""}">${label}</span>`;
-}
+/* KEPT, THOUGH THE STATUS PILLS IT USED TO DRAW ARE GONE. HEALTH is not
+   decoration: rate.clone() reads tts_long's live realtime_factor out of it,
+   and that number is what every Chatterbox estimate on this page is computed
+   from. Without this the estimates would silently fall back to the 0.138
+   constant and stop tracking the machine.
+
+   A backend being down now surfaces where it matters -- as the error on the
+   request that needed it -- rather than as a badge someone has to notice. */
 async function poll() {
-  let out = "";
   try {
     /* /health is unauthenticated everywhere in this stack and always answers
        200 even when a backend is down, so the code is not the signal — the
        body is. */
     HEALTH = await (await fetch("/ui/health")).json();
-    const g = HEALTH.gateway && HEALTH.gateway.health;
-    if (!g) throw new Error("gateway unreachable");
-    const b = g.backends || {};
-    const up = (x) => x && x.reachable ? "ok" : "bad";
-    out += pill("STT " + (up(b.stt) === "ok" ? "up" : "down"), up(b.stt),
-                b.stt && b.stt.health ? "model: " + b.stt.health.model : "");
-    const tts = b.tts && b.tts.health;
-    out += pill("Speak " + (up(b.tts) === "ok" ? "up" : "down"), up(b.tts),
-                tts ? tts.voices + " voices" : "");
-    const long = b.tts_long && b.tts_long.health;
-    if (!b.tts_long || !b.tts_long.reachable) {
-      out += pill("Clone down", "bad");
-    } else if (long && long.model_loaded === false) {
-      out += pill("Clone cold — first job pays ~60 s", "warn",
-                  "and ~3 GB downloaded on the very first run");
-    } else {
-      out += pill("Clone " + (1 / rate.clone()).toFixed(1) + "× slower than realtime", "ok",
-                  "live realtime_factor " + rate.clone().toFixed(3));
-    }
-    if (long) out += pill(`queue ${long.queued}/${long.queue_capacity}`, "");
-  } catch {
-    out = pill("gateway unreachable", "bad");
-  }
-  $("pills").innerHTML = out;
+  } catch { HEALTH = null; }
 }
 
 /* ============================================== playback speed ======== */
@@ -1923,23 +1899,10 @@ function resolvedLanguage() {
   return { code: fallback, why: iso ? "unsupported" : "undetected", iso };
 }
 
-const LANG_NAME = Object.fromEntries([...KOKORO_LANGS, ...CHATTERBOX_LANGS]);
-
-function refreshLanguage() {
-  const voice = currentVoice();
-  if (voice.kind === "new") return;
-  const { code, why, iso } = resolvedLanguage();
-  const name = LANG_NAME[code] || code;
-  const hint = {
-    chosen:      `Sending <code>${code}</code>.`,
-    detected:    `Detected <strong>${name}</strong> from the text, sending <code>${code}</code>.`,
-    unsupported: `The text looks like <strong>${iso}</strong>, which this engine
-                  does not speak. Falling back to <code>${code}</code>, from the voice.`,
-    undetected:  `Not enough text to tell yet — falling back to <code>${code}</code>,
-                  from the voice. Pick one above to be certain.`,
-  }[why];
-  $("langhint").innerHTML = hint;
-}
+/* LANG_NAME and refreshLanguage() are gone with the hint they wrote. What the
+   page SENDS is still resolvedLanguage(), which is called from the four places
+   that build a request; only the running commentary about its decision has
+   been removed. */
 
 
 async function loadVoices() {
@@ -2029,26 +1992,11 @@ function onVoiceChange() {
      or /jobs accordingly. Cloning stops being an advanced feature the moment
      it stops requiring a mode decision. */
   $("speed").disabled = clone;
-  /* The way out is named where the wall is. "Fixed at 1.0" on its own reads as
-     a dead end, and there has been a working answer under the player since
-     playback speed arrived: it is not the same thing — nothing is baked into
-     the file — but for "I want to hear this faster" it is the thing people
-     actually wanted. */
-  $("speedhint").innerHTML = clone
-    ? `Fixed at 1.0 — Chatterbox has no rate control, and anything else is a
-       400. <strong>Playback speed</strong>, under the player, works on it.`
-    : "0.5 – 2.0, sent to Kokoro and baked into the audio.";
+  /* Chatterbox takes no speed, so the slider is pinned rather than left at
+     whatever the last Kokoro voice used. Playback speed under the player is
+     the working answer for "faster", and it applies to any audio. */
   if (clone) { $("speed").value = 1; $("speedout").textContent = "1.00"; }
-  /* THE HINT NAMES THE ENGINE IN BOTH BRANCHES. It used to name Chatterbox
-     only on the slow path, so on the fast path nothing on screen said Kokoro
-     while the expert panel below was titled after it. */
   const builtin = clone && voice.name === "default";
-  $("voicehint").innerHTML = clone
-    ? `<strong>Chatterbox</strong> — about ${(1 / rate.clone()).toFixed(0)}×
-       the length of the audio in compute, queued as a job you can leave.
-       ${builtin ? "This is the model's own speaker; it needs no clip."
-                 : "Rendered from your clip."}`
-    : `<strong>Kokoro</strong> — instant.`;
   $("tts-expert-fast").hidden = clone;
   $("tts-expert-clone").hidden = !clone;
   /* Without this a bad clip is stuck in the picker for ever, and the only way
@@ -2060,10 +2008,7 @@ function onVoiceChange() {
      from the chosen voice's engine, so it had to be rebuilt whenever the voice
      changed; it is now the union of both engines and independent of the voice.
      Rebuilding a <select> the user may have open, to produce the same options
-     it already had, is work that can only lose focus or a selection.
-     refreshLanguage still runs, because the language SENT does depend on the
-     voice when the choice is auto. */
-  refreshLanguage();
+     it already had, is work that can only lose focus or a selection. */
   estimate();
 }
 $("voice").addEventListener("change", onVoiceChange);
@@ -2094,13 +2039,12 @@ $("resetclone").addEventListener("click", () => {
 /* ------------------------------------------------- the ETA, and the way out */
 $("text").addEventListener("input", estimate);
 /* Auto-detect is only auto if it keeps up with the text. */
-$("text").addEventListener("input", refreshLanguage);
 /* Choosing a language rebuilds the voices below it. loadVoices() re-reads
    /voices and /ui/clips, which is two cached requests against this same origin
    and simpler than keeping a second copy of the lists to filter locally --
    VOICES already holds them, but the grouping logic lives in loadVoices and
    duplicating it is how the two would drift. */
-$("lang").addEventListener("change", () => { loadVoices(); refreshLanguage(); });
+$("lang").addEventListener("change", loadVoices);
 
 function estimate() {
   const text = $("text").value;
@@ -2319,7 +2263,6 @@ function play(blob, meta, name) {
   lastAudio = { url, name };
   $("player").src = url; $("player").hidden = false;
   $("playrow").hidden = false;
-  $("speak-meta").textContent = meta;
 }
 $("dl-audio").addEventListener("click", () => {
   if (!lastAudio) return;

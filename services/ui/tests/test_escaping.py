@@ -202,13 +202,14 @@ def test_the_builtin_voice_offers_no_delete_button():
     assert '$("delvoice").hidden = !clone || builtin;' in body
 
 
-def test_the_engine_is_named_on_both_paths():
-    start = HTML.index("function onVoiceChange()")
-    body = HTML[start:HTML.index('$("voice").addEventListener')]
-    hint = body[body.index('$("voicehint")'):body.index('$("tts-expert-fast")')]
-    assert "<strong>Chatterbox</strong>" in hint
-    assert "<strong>Kokoro</strong>" in hint, (
-        "the fast path never said Kokoro while its expert panel was titled so")
+def test_the_engine_is_named_where_the_choice_is_made():
+    """The running hint under the picker is gone as interface clutter, so the
+    optgroup labels are now the only place the engine is named. They were
+    always the better place: the cost is visible before the click rather than
+    after it."""
+    body = _load_voices()
+    assert "Kokoro, instant" in body
+    assert "Chatterbox, slow" in body
 
 
 # ---------------------------------------------- language before voice --
@@ -242,7 +243,7 @@ def test_the_language_list_no_longer_depends_on_the_voice():
 
 def test_choosing_a_language_rebuilds_the_voice_list():
     handler = HTML[HTML.index('$("lang").addEventListener'):]
-    assert "loadVoices()" in handler[:200], \
+    assert "loadVoices" in handler[:200], \
         "a language change must re-filter the voices below it"
 
 
