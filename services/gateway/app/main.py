@@ -554,6 +554,39 @@ async def voices(request: Request) -> Response:
     return await _proxy(request, TTS, content=None)
 
 
+# ---------------------------------------------------------- glossaries --
+#
+# Native, not /v1: OpenAI has no concept of a glossary profile, so there is
+# nothing to be 1:1 with and claiming /v1/glossaries would take spec territory
+# that does not exist. See docs/adr/0003.
+#
+# The PUT streams its body and carries the query string -- _proxy appends
+# request.url.query already, which matters here more than anywhere else on this
+# service: ?force=true is what lets a single-word left-hand side through, and
+# dropping it silently would make a `belly = Belli` rule unenterable through
+# the front door while appearing to work.
+
+
+@app.get("/glossaries")
+async def list_glossaries(request: Request) -> Response:
+    return await _proxy(request, STT, content=None)
+
+
+@app.get("/glossaries/{name}")
+async def get_glossary(request: Request, name: str) -> Response:
+    return await _proxy(request, STT, content=None)
+
+
+@app.put("/glossaries/{name}")
+async def put_glossary(request: Request, name: str) -> Response:
+    return await _proxy(request, STT, content=request.stream())
+
+
+@app.delete("/glossaries/{name}")
+async def delete_glossary(request: Request, name: str) -> Response:
+    return await _proxy(request, STT, content=None)
+
+
 # ------------------------------------------------------------------- the page --
 #
 # ONE PUBLISHED PORT. voice-ui used to publish 30081 of its own, so the stack
@@ -602,6 +635,11 @@ UI_PATHS = (
     ("POST", "/ui/abandon"),
     ("GET", "/ui/progress"),
     ("POST", "/ui/fetch"),
+    # A captions download is already a transcript, so it never reaches stt.
+    # Absent here, the page 404s on it when served from the published port --
+    # which is how DELETE /jobs/{id} stayed unreachable while tts-long had
+    # implemented it all along.
+    ("POST", "/ui/captions"),
     # The prefixed mount of voice-ui's own proxy. Everything under it is
     # forwarded verbatim and voice-ui strips /ui/api before sending it back
     # here with UI_GATEWAY_API_KEY attached. A path parameter rather than a
