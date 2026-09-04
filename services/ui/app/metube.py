@@ -154,6 +154,7 @@ class MeTube:
 
     async def add(self, url: str, *, auto_start: bool,
                   download_type: str = "audio",
+                  audio_format: str | None = None,
                   clip_start: float | None = None,
                   clip_end: float | None = None) -> None:
         body: dict[str, Any] = {
@@ -162,7 +163,14 @@ class MeTube:
             # MeTube 400s on any quality but "best" for opus and the m4a-shaped
             # choices, so this is not a knob and is not exposed as one.
             "quality": "best",
-            "format": config.METUBE_FORMAT,
+            # opus for transcription, because a two-hour podcast at ~1 MB a
+            # minute is the whole reason links are affordable. A reference clip
+            # asks for wav instead: it is twenty seconds, and services/ui has
+            # no ffmpeg and no audio library, so clips.save measures duration
+            # with the stdlib `wave` module and can read nothing else. An opus
+            # file reached it once and came back "that file is not a WAV this
+            # service can read", which was true and unhelpful.
+            "format": audio_format or config.METUBE_FORMAT,
             # See config.METUBE_FOLDER: /download/ and /audio_download/ are the
             # same directory on this deployment, so without a folder our ingest
             # lands in the user's music library.

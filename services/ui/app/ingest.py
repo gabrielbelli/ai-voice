@@ -90,6 +90,11 @@ class ResolveRequest(BaseModel):
 
 class CommitRequest(BaseModel):
     token: str
+    # Asks MeTube for wav rather than opus. Set only by the clone sheet: a
+    # reference clip is twenty seconds and has to be readable by the stdlib
+    # `wave` module, and transcription keeps opus because that is what makes a
+    # two-hour download cheap.
+    for_clip: bool = False
     # Promoted out of any expert panel and onto the confirm card itself,
     # because for long media this is what turns "no, too much" into "yes, but
     # only this bit" -- and for a live stream, which has no end, it is the only
@@ -251,8 +256,16 @@ async def commit(request: Request, body: CommitRequest) -> Response:
             await client.abandon(url)
             await client.add(url, auto_start=True,
                              download_type="captions" if body.captions else "audio",
+                             audio_format="wav" if body.for_clip else None,
                              clip_start=body.clip_start,
                              clip_end=body.clip_end)
+        elif body.for_clip:
+            # A clip import always re-adds, even with no trim, because /start
+            # promotes a pending item with the options it was ADDED with and
+            # the pending one was queued as opus by /ui/resolve. There is no
+            # route that edits them.
+            await client.abandon(url)
+            await client.add(url, auto_start=True, audio_format="wav")
         else:
             await client.start(url)
     except metube.MeTubeError as exc:

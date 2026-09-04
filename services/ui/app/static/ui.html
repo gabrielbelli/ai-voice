@@ -2686,7 +2686,7 @@ $("clipimport").addEventListener("click", async () => {
     note($("cliplinkhint"), "flat", "Fetching that window…");
     await json("/ui/commit", {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token: cliplink.token,
+      body: JSON.stringify({ token: cliplink.token, for_clip: true,
                              clip_start: start, clip_end: start + take }) });
 
     /* Polls the same route the Transcribe tab does. A trimmed window is

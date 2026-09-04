@@ -336,3 +336,42 @@ def test_the_import_route_is_not_the_transcribe_route(client):
 def inspect_source(fn):
     import inspect
     return inspect.getsource(fn)
+
+
+def test_a_clip_import_asks_metube_for_wav(client):
+    """MeTube's default here is opus, which services/ui cannot read.
+
+    clips.save measures duration with the stdlib `wave` module -- this image
+    has no ffmpeg and no audio library -- so an opus file came back "that file
+    is not a WAV this service can read", which was true and unhelpful.
+    Transcription keeps opus: a two-hour podcast at ~1 MB a minute is what
+    makes link ingestion affordable, and the gateway decodes it anyway.
+    """
+    api, _, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    api.post("/ui/commit", json={"token": URL, "for_clip": True,
+                                 "clip_start": 10, "clip_end": 30})
+    adds = [body for path, body in tube.calls if path == "/add"]
+    assert adds[-1]["format"] == "wav", adds[-1]
+    assert adds[-1]["clip_start"] == 10 and adds[-1]["clip_end"] == 30
+
+
+def test_a_transcription_commit_still_asks_for_opus(client):
+    api, _, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    api.post("/ui/commit", json={"token": URL, "clip_start": 0, "clip_end": 60})
+    adds = [body for path, body in tube.calls if path == "/add"]
+    assert adds[-1]["format"] == "opus", adds[-1]
+
+
+def test_an_untrimmed_clip_import_still_re_adds(client):
+    """/start promotes a pending item with the options it was ADDED with, and
+    /ui/resolve queued it as opus. Without the re-add, a clip import with no
+    trim would quietly download the wrong format."""
+    api, _, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    api.post("/ui/commit", json={"token": URL, "for_clip": True})
+    adds = [body for path, body in tube.calls if path == "/add"]
+    assert adds[-1]["format"] == "wav"
+    assert not any(path == "/start" for path, _ in tube.calls), \
+        "a clip import must re-add rather than start the opus item"
