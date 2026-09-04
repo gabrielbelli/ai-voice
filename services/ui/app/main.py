@@ -518,8 +518,13 @@ async def add_clip(request: Request, name: str = Form(...),
             f"to thirty seconds of clean speech, which is about 1.4 MB.",
             code="clip_too_large", param="file")
     data = await file.read()
+    # The browser converts to WAV when it can decode the file at all. When it
+    # cannot -- an ogg/opus voice note with no duration in its container is the
+    # case that prompted this -- it uploads the original bytes instead, and the
+    # suffix tells this route which of the two arrived.
+    suffix = Path(file.filename or "").suffix.lower() or clips.SUFFIX
     try:
-        saved = clips.save(name, data, replace=replace)
+        saved = clips.save(name, data, replace=replace, suffix=suffix)
     except clips.ClipError as exc:
         return error_response(400, str(exc), code="invalid_clip", param="file")
     return Response(media_type="application/json", status_code=201,

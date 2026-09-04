@@ -374,3 +374,52 @@ def test_the_page_and_the_backend_agree_on_chatterbox_languages():
     block = synth[synth.index("SUPPORTED_LANGUAGES = ("):]
     backend = set(re.findall(r'"(\w+)"', block[:block.index(")")]))
     assert page == backend, f"page-only {page - backend}, backend-only {backend - page}"
+
+
+# ------------------------------------------------- the microphone, twice --
+
+
+def test_transcribe_has_its_own_recorder():
+    """The clone sheet's is a FIFTEEN SECOND one that hands its result to
+    prepareClip -- a reference clip, capped at the clone ceiling and resampled
+    to 24 kHz. Dictation is a different job with a different length, so sharing
+    it would have meant a flag deciding which of two behaviours applied."""
+    assert 'id="sttrec"' in HTML
+    assert "sttRecorder" in HTML
+    body = HTML[HTML.index("$(\"sttrec\").addEventListener"):]
+    body = body[:body.index('$("sttrecstop")')]
+    assert "prepareClip" not in body, "that is the clone path, not this one"
+    assert "await pick(" in body, \
+        "a recording should become a file like any other"
+
+
+def test_the_dictation_recorder_has_no_countdown():
+    """There is no natural length for "say the thing you wanted transcribed",
+    and cutting someone off mid-sentence is worse than a long file. The only
+    stop is the ceiling the upload has anyway."""
+    body = HTML[HTML.index("$(\"sttrec\").addEventListener"):]
+    body = body[:body.index('$("sttrecstop")')]
+    assert "secs > 3600" in body
+    assert "left -= 0.1" not in body, "that is the clone sheet's countdown"
+
+
+# ------------------------------------------ uploads the browser cannot read --
+
+
+def test_an_undecodable_upload_is_sent_as_it_arrives():
+    """decodeAudioData throws on some containers and, worse, SUCCEEDS
+    uselessly on others: a WhatsApp voice note is ogg/opus with no duration in
+    its container and came back as ONE SECOND of audio with no error -- a dead
+    reference clip that looked like a successful upload."""
+    body = HTML[HTML.index("async function prepareClip"):]
+    body = body[:body.index("\n}\n")]
+    assert "tooShortToBeReal" in body
+    assert "clipSuffix" in body, "the original format has to reach the server"
+
+
+def test_the_upload_carries_its_real_extension():
+    """clips.save reads the suffix to decide what it is storing, so opus bytes
+    named .wav would put a file in the voice directory that says one thing and
+    is another."""
+    assert 'name + clipSuffix' in HTML
+    assert 'name + ".wav"' not in HTML

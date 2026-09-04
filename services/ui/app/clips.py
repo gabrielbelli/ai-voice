@@ -61,9 +61,26 @@ from . import config
 
 log = logging.getLogger("voice-ui.clips")
 
-__all__ = ["ClipError", "SUFFIX", "slug", "listing", "save", "remove"]
+__all__ = ["ClipError", "SUFFIX", "SUFFIXES", "slug", "listing", "save", "remove"]
 
 SUFFIX = ".wav"
+
+# EVERY FORMAT tts-long CAN READ, copied from its voices.py _SUFFIXES. That
+# service loads a reference clip with librosa, which handles all of these; this
+# one only ever WROTE .wav, so a WhatsApp voice note -- ogg/opus -- had to be
+# converted in the browser before it could be stored at all.
+#
+# That made the browser a hard dependency for format support, and it is not a
+# reliable one: an ogg/opus file from a phone often carries no duration in its
+# container, and decodeAudioData handled one by returning a single second of
+# audio and no error. A 1.0 s reference clip is useless and looked like a
+# successful upload.
+#
+# So the original bytes are stored when the browser cannot make sense of them,
+# and tts-long decodes what it was always able to decode. Kept in step with
+# that list by a test; a format here that it cannot read would be a clip that
+# saves and then fails at generation time.
+SUFFIXES = (".wav", ".flac", ".mp3", ".ogg", ".m4a", ".opus")
 
 # tts-long's own built-in speaker. A clip wins over an alias in
 # Registry.resolve, which is deliberate and lets someone give `alloy` a real
@@ -116,7 +133,7 @@ def listing() -> list[dict[str, object]]:
         return []
     out: list[dict[str, object]] = []
     for entry in sorted(directory.iterdir()):
-        if not entry.is_file() or entry.suffix.lower() != SUFFIX:
+        if not entry.is_file() or entry.suffix.lower() not in SUFFIXES:
             continue
         try:
             stat = entry.stat()
@@ -185,7 +202,8 @@ def writable() -> bool:
     return directory.is_dir() and os.access(directory, os.W_OK)
 
 
-def save(name: str, data: bytes, *, replace: bool = False) -> dict[str, object]:
+def save(name: str, data: bytes, *, replace: bool = False,
+         suffix: str = SUFFIX) -> dict[str, object]:
     """Write one clip, or raise ClipError with something a person can act on."""
     directory = _dir()
     if not directory.is_dir():
@@ -205,7 +223,22 @@ def save(name: str, data: bytes, *, replace: bool = False) -> dict[str, object]:
             f"{config.MAX_CLIP_BYTES / 1024**2:.0f} MB. Ten to thirty seconds "
             "is what Chatterbox wants anyway.")
 
-    target = directory / (stem + SUFFIX)
+    suffix = suffix.lower()
+    if suffix not in SUFFIXES:
+        raise ClipError(
+            f"{suffix or 'that file'} is not a format the voice service can "
+            f"read; it takes {', '.join(SUFFIXES)}.")
+    # One voice, one file. Saving gabriel.mp3 next to an existing gabriel.wav
+    # would leave two clips claiming the name and the registry picking by
+    # directory order.
+    for existing in directory.glob(stem + ".*"):
+        if existing.suffix.lower() in SUFFIXES and existing.suffix.lower() != suffix:
+            if not replace:
+                raise ClipError(f"a voice called {stem!r} already exists")
+            with contextlib.suppress(OSError):
+                existing.unlink()
+
+    target = directory / (stem + suffix)
     if target.exists() and not replace:
         raise ClipError(f"a voice called {stem!r} already exists")
 
@@ -213,15 +246,24 @@ def save(name: str, data: bytes, *, replace: bool = False) -> dict[str, object]:
     # tts-long is reading this directory and rescans it on mtime, so a
     # half-written file under the final name is a voice it can pick up and fail
     # to decode mid-job. os.replace is atomic within a filesystem.
-    temporary = directory / f".{stem}.part"
+    temporary = directory / f".{stem}{suffix}.part"
     try:
         temporary.write_bytes(data)
         seconds = _duration(temporary)
-        if seconds is None:
+        if seconds is None and suffix == SUFFIX:
             raise ClipError(
-                "that file is not a WAV this service can read. The page "
-                "normally converts whatever you give it before uploading, so "
-                "this usually means the conversion was skipped.")
+                "that file claims to be a WAV and cannot be read as one.")
+        if seconds is None:
+            # Not measurable here: `wave` reads WAV and this image has no
+            # ffmpeg and no audio library. tts-long decodes it with librosa
+            # when it uses it. The byte ceiling above is the bound that still
+            # applies, and the page reports the duration when its own decoder
+            # managed to read the file.
+            log.info("stored %s%s without a duration check", stem, suffix)
+            os.replace(temporary, target)
+            stat = target.stat()
+            return {"name": stem, "bytes": stat.st_size,
+                    "modified": stat.st_mtime, "seconds": None}
         if seconds > config.MAX_CLIP_SECONDS:
             trimmed = _trim(temporary, config.MAX_CLIP_SECONDS)
             if trimmed is None:
@@ -254,7 +296,9 @@ def save(name: str, data: bytes, *, replace: bool = False) -> dict[str, object]:
 def remove(name: str) -> bool:
     """Delete one clip. False if it was not there."""
     stem = slug(name)
-    target = _dir() / (stem + SUFFIX)
+    matches = [p for p in _dir().glob(stem + ".*")
+               if p.suffix.lower() in SUFFIXES]
+    target = matches[0] if matches else _dir() / (stem + SUFFIX)
     try:
         target.unlink()
     except FileNotFoundError:

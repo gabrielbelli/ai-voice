@@ -229,7 +229,13 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
       <div class="drop" id="drop">
         <div class="big">Drop an audio or video file here</div>
         <div class="hint">or <button class="link" id="browse" type="button">choose a file</button>
+          or <button class="link" id="sttrec" type="button">record from the microphone</button>
           — video is fine, the audio is taken out of it</div>
+        <div class="row" id="sttrecrow" hidden style="justify-content:center;align-items:center;margin-top:8px">
+          <span class="ring tight" id="sttring">0:00</span>
+          <div style="min-width:160px"><div class="meter"><div id="sttlevel"></div></div></div>
+          <button class="primary tight" id="sttrecstop" type="button">■ Stop and transcribe</button>
+        </div>
         <input type="file" id="file" hidden
                accept="audio/*,video/*,.mkv,.mp4,.mov,.webm,.m4a,.opus,.flac">
         <div id="linkrow" style="margin-top:12px" hidden>
@@ -2646,7 +2652,7 @@ $("refresh").addEventListener("click", () => { refreshJobs(); });
   24 kHz mono WAV it is certain to read — which is what makes MediaRecorder's
   webm-on-Chrome / mp4-on-Safari split a non-problem rather than a bug report.
 */
-let clip = null, recorder = null, recTimer = null;
+let clip = null, clipSuffix = ".wav", recorder = null, recTimer = null;
 
 $("cliporfile").addEventListener("click", () => $("clipfile").click());
 
@@ -2742,7 +2748,38 @@ async function prepareClip(file, suggestedName) {
   note($("clipnote"), "flat", "Converting…");
   try {
     const from = Number($("clipstart").value) || 0;
-    const out = await toWav(file, 24000, CONFIG.max_clip_seconds, from);
+    let out = null;
+    try { out = await toWav(file, 24000, CONFIG.max_clip_seconds, from); }
+    catch { out = null; }
+
+    /* THE BROWSER IS NO LONGER REQUIRED TO UNDERSTAND THE FILE. decodeAudioData
+       throws on some containers and, worse, SUCCEEDS uselessly on others: a
+       WhatsApp voice note is ogg/opus with no duration in its container, and
+       it came back as one second of audio and no error -- a dead reference
+       clip that looked like a successful upload.
+
+       So a result under two seconds from a file that is plainly bigger than
+       two seconds of audio is treated as a failed decode, and the ORIGINAL
+       bytes are uploaded instead. tts-long reads ogg, opus, mp3, m4a and flac
+       with librosa; converting here was an optimisation that had quietly
+       become a requirement. */
+    const tooShortToBeReal = out && out.seconds < 2 && file.size > 64 * 1024;
+    if (!out || tooShortToBeReal) {
+      clip = file;
+      clipSuffix = (file.name.match(/\.[^.]+$/) || [".wav"])[0].toLowerCase();
+      $("clippreview").src = URL.createObjectURL(clip);
+      $("clippreview").hidden = false;
+      $("saveclip").disabled = false;
+      if (!$("clipname").value && suggestedName) {
+        $("clipname").value = suggestedName.toLowerCase()
+          .replace(/[^a-z0-9_-]+/g, "-").replace(/^-|-$/g, "").slice(0, 48);
+      }
+      note($("clipnote"), "ok",
+           "Sending it as it is — this browser could not decode it, and the "
+           + "voice service can.");
+      return;
+    }
+    clipSuffix = ".wav";
     clip = out.blob;
     $("clippreview").src = URL.createObjectURL(clip);
     $("clippreview").hidden = false;
@@ -2805,6 +2842,74 @@ $("rec").addEventListener("click", async () => {
   }, 100);
 });
 
+/* ------------------------------------------- recording to transcribe --- */
+/*
+  The clone sheet has had a recorder since it shipped, but it is a fifteen
+  SECOND one that hands its result to prepareClip -- a reference clip, capped
+  at the clone ceiling, resampled to 24 kHz. Dictation is a different job with
+  a different length, so this is its own recorder rather than a flag on that
+  one.
+
+  It stops at the upload ceiling rather than a timer: there is no natural
+  length for "say the thing you wanted transcribed", and a countdown that cuts
+  someone off mid-sentence is worse than a long file.
+*/
+let sttRecorder = null, sttTimer = null;
+
+$("sttrec").addEventListener("click", async () => {
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch (err) {
+    note($("stt-note"), "bad",
+         "No microphone: " + (err.message || err) + ". Drop a file instead.");
+    return;
+  }
+  const chunks = [];
+  sttRecorder = new MediaRecorder(stream);
+  sttRecorder.ondataavailable = e => chunks.push(e.data);
+  sttRecorder.onstop = async () => {
+    stream.getTracks().forEach(t => t.stop());
+    clearInterval(sttTimer);
+    $("sttrecrow").hidden = true;
+    $("sttrec").disabled = false;
+    if (!chunks.length) return;
+    /* Straight into pick(), so a recording is a file like any other: the same
+       browser-side extraction, the same size guard, the same Transcribe
+       button. MediaRecorder gives webm or mp4 depending on the browser, and
+       both decode there. */
+    const type = sttRecorder.mimeType || "audio/webm";
+    const ext = type.includes("mp4") ? "m4a" : "webm";
+    await pick(new File(chunks, `recording.${ext}`, { type }));
+  };
+
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 512;
+  ctx.createMediaStreamSource(stream).connect(analyser);
+  const data = new Uint8Array(analyser.frequencyBinCount);
+
+  sttRecorder.start();
+  $("sttrec").disabled = true;
+  $("sttrecrow").hidden = false;
+  const began = Date.now();
+  sttTimer = setInterval(() => {
+    analyser.getByteTimeDomainData(data);
+    let peak = 0;
+    for (const v of data) peak = Math.max(peak, Math.abs(v - 128) / 128);
+    $("sttlevel").style.width = Math.min(100, peak * 160).toFixed(0) + "%";
+    const secs = Math.floor((Date.now() - began) / 1000);
+    $("sttring").textContent = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
+    /* The one hard stop, and it is the ceiling the upload has anyway. Better
+       to end the recording than to record ten more minutes that will be
+       refused. */
+    if (secs > 3600) { sttRecorder.stop(); ctx.close(); }
+  }, 100);
+});
+
+$("sttrecstop").addEventListener("click", () => {
+  if (sttRecorder && sttRecorder.state === "recording") sttRecorder.stop();
+});
+
 $("cancelclip").addEventListener("click", () => {
   clip = null; $("clippreview").hidden = true; $("saveclip").disabled = true;
   note($("clipnote"), "", "");
@@ -2820,7 +2925,11 @@ $("saveclip").addEventListener("click", async () => {
   $("saveclip").disabled = true;
   const form = new FormData();
   form.append("name", name);
-  form.append("file", new File([clip], name + ".wav", { type: "audio/wav" }));
+  /* The NAME carries the format. clips.save reads the suffix to decide what
+     it is storing, so sending opus bytes called .wav would put a file in the
+     voice directory that says one thing and is another. */
+  form.append("file", new File([clip], name + clipSuffix,
+                               { type: clip.type || "audio/wav" }));
   try {
     const payload = await json("/ui/clips", { method: "POST", body: form });
     clip = null; $("clippreview").hidden = true; note($("clipnote"), "", "");
