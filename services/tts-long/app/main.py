@@ -617,8 +617,25 @@ def _public(job: dict) -> dict:
     on finishing, which is a 500 on GET /jobs/<id> at the exact moment a caller
     is most likely to be polling it.
     """
-    return {k: v for k, v in dict(job).items()
-            if k not in {"segments", "text", "stream", "reference"}}
+    out = {k: v for k, v in dict(job).items()
+           if k not in {"segments", "text", "stream", "reference"}}
+    # A PREVIEW OF WHAT WAS SAID, because a list of uuids identifies nothing.
+    # Every job in that list looked the same: the same voice name, a different
+    # random id, and no way to tell which was the one you wanted without
+    # downloading each in turn.
+    #
+    # A preview rather than the text: `text` is capped at 4096 characters and
+    # this route returns fifty jobs, so sending it whole would be a couple of
+    # hundred kilobytes on a poll that runs every few seconds. GET /jobs/{id}
+    # carries the full text -- see below -- which is what a disclosure control
+    # in a client should ask for.
+    source = job.get("text") or " ".join(
+        seg.get("text", "") for seg in (job.get("segments") or []))
+    if source:
+        source = " ".join(source.split())
+        out["text_preview"] = source[:140] + ("…" if len(source) > 140 else "")
+        out["text_length"] = len(source)
+    return out
 
 
 @app.get("/jobs")
@@ -629,10 +646,22 @@ def list_jobs() -> dict[str, object]:
 
 @app.get("/jobs/{job_id}")
 def get_job(job_id: str) -> dict:
+    """One job, with the full text this time.
+
+    The listing carries a 140-character preview so fifty of them stay small on
+    a poll; asking for one job is the moment you want all of it, and it is the
+    request a client makes when someone expands a row rather than every few
+    seconds for everything.
+    """
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(404, "no such job")
-    return _public(job)
+    out = _public(job)
+    if job.get("text"):
+        out["text"] = job["text"]
+    if job.get("segments"):
+        out["segments"] = job["segments"]
+    return out
 
 
 @app.delete("/jobs/{job_id}")

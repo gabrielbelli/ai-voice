@@ -114,6 +114,15 @@ details>summary::-webkit-details-marker{display:none}
 details>summary::before{content:"▸ ";color:var(--dim)}
 details[open]>summary::before{content:"▾ "}
 details .body{padding:0 12px 12px;border-top:1px solid var(--line);padding-top:12px}
+/* The job's text, inside a job row rather than at the bottom of a tab: lighter
+   than the Expert panels, and its summary is the preview itself rather than a
+   heading, so the row identifies itself while collapsed. Normal weight for the
+   same reason -- it is a quotation, not a label. */
+details.jobtext{margin-top:8px;background:transparent;border-color:var(--line)}
+details.jobtext>summary{font-weight:400;color:var(--dim);font-size:12px;
+  padding:6px 10px}
+details.jobtext .body{padding:8px 10px 10px;font-size:13px;white-space:pre-wrap;
+  max-height:14em;overflow:auto}
 .slider{display:grid;grid-template-columns:1fr auto;gap:6px;align-items:center}
 .slider input[type=range]{width:100%}
 .slider output{font-family:var(--mono);font-size:12px;color:var(--dim)}
@@ -2400,6 +2409,8 @@ function statusClass(status) {
        : status === "running" ? "running" : "";
 }
 
+const JOBTEXT = new Map();
+
 function renderJobs() {
   const list = [...jobs.values()].sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
   $("jobcount").textContent = list.filter(j => j.status === "queued" || j.status === "running").length
@@ -2412,6 +2423,8 @@ function renderJobs() {
     return;
   }
 
+  const openRows = new Set([...$("joblist").querySelectorAll("details.jobtext[open]")]
+    .map(d => d.querySelector("[data-text]")?.dataset.text).filter(Boolean));
   const now = Date.now() / 1000;
   let soonest = null;
   $("joblist").innerHTML = list.map(job => {
@@ -2427,6 +2440,14 @@ function renderJobs() {
        teaches people to distrust every bar you ever show them. The real fix is
        a completed-chunk counter in tts-long's worker, which is a handful of
        lines and would turn this estimate into a fact. */
+    /* The server's preview, or this browser's own memory of what it asked
+       for. The second matters for a job submitted before the preview existed,
+       and costs nothing -- adopt() already keeps the parameters for Retry. */
+    const mine = remembered().find(j => j.id === job.id);
+    const preview = job.text_preview
+      || (mine && mine.params && (mine.params.text
+          || (mine.params.segments || []).map(x => x.text).join(" ")) || "")
+         .split(/\s+/).join(" ").slice(0, 140);
     const percent = budget ? Math.min(95, elapsed / budget * 100) : 0;
     const over = budget && elapsed > budget;
     if (live && budget) {
@@ -2436,7 +2457,7 @@ function renderJobs() {
     return `<div class="job ${expired ? "expired" : ""}">
       <div class="top">
         <span class="status ${statusClass(job.status)}">${job.status}</span>
-        <strong>${esc(job.voice || "default")}</strong>
+        <strong>${esc(job.voice || (job.recovered ? "voice unknown" : "default"))}</strong>
         <span class="id">${esc(job.id)}</span>
         <span class="spacer"></span>
         <span class="hint">${job.chunks ? job.chunks + " chunks" : ""}${
@@ -2446,6 +2467,10 @@ function renderJobs() {
         <div class="hint">${over
           ? `still going — ${clock(elapsed)} in, past the ${clock(budget)} estimate`
           : `${clock(elapsed)} in, ${roughly(budget - elapsed)} left`} · estimate</div>` : ""}
+      ${preview ? `<details class="jobtext"${openRows.has(job.id) ? " open" : ""}><summary>${esc(preview)}</summary>
+        <div class="body" data-text="${esc(job.id)}">Loading…</div></details>`
+        : job.recovered ? `<div class="hint">Recovered from disk after a
+            restart — what was said, and in which voice, was not kept.</div>` : ""}
       ${job.status === "failed" ? `<div class="note bad">${esc(job.error || "no reason given")}</div>` : ""}
       ${expired ? `<div class="hint">expired — the audio was deleted after ${TTL / 3600} hours</div>` : ""}
       ${job.realtime_factor ? `<div class="hint">${job.audio_seconds.toFixed(0)} s of audio in
@@ -2477,6 +2502,39 @@ function renderJobs() {
     b.addEventListener("click", () => retryJob(b.dataset.retry)));
   $("joblist").querySelectorAll("[data-forget]").forEach(b =>
     b.addEventListener("click", () => forgetJob(b.dataset.forget)));
+
+  /* The full text is fetched when the row is OPENED, not with the listing.
+     `text` is capped at 4096 characters and this list holds fifty jobs, so
+     sending it with every poll would be a couple of hundred kilobytes every
+     few seconds for something nobody is reading. Fetched once and cached on
+     the element, because renderJobs reassigns this innerHTML on a timer and a
+     re-request per tick would be worse than the original problem. */
+  $("joblist").querySelectorAll("details.jobtext").forEach(d =>
+    d.addEventListener("toggle", async () => {
+      if (!d.open) return;
+      const body = d.querySelector("[data-text]");
+      if (!body || body.dataset.loaded) return;
+      body.dataset.loaded = "1";
+      try {
+        const full = await json(`/jobs/${encodeURIComponent(body.dataset.text)}`);
+        const said = full.text
+          || (full.segments || []).map(x => x.text).filter(Boolean).join("\n\n");
+        /* textContent, not innerHTML: this is the text somebody typed, and it
+           is the largest piece of user-supplied data on this tab. */
+        body.textContent = said || "The text was not kept for this job.";
+        JOBTEXT.set(body.dataset.text, body.textContent);
+      } catch (err) {
+        body.textContent = "Could not load it: " + err.message;
+        body.dataset.loaded = "";
+      }
+    }));
+
+  /* Re-applied after a re-render, so an open row does not blank out on the
+     next poll. */
+  $("joblist").querySelectorAll("[data-text]").forEach(body => {
+    const cached = JOBTEXT.get(body.dataset.text);
+    if (cached) { body.textContent = cached; body.dataset.loaded = "1"; }
+  });
 }
 
 let jobUrl = null;

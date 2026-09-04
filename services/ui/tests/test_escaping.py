@@ -450,3 +450,48 @@ def test_forget_treats_a_404_as_success():
     body = HTML[HTML.index("async function forgetJob(id)"):]
     body = body[:body.index("\n}\n")]
     assert "err.status !== 404" in body
+
+
+# --------------------------------------------------- telling jobs apart --
+
+
+def test_a_recovered_job_does_not_claim_the_default_voice():
+    """`default` is a REAL voice on this service -- Chatterbox's own speaker.
+
+    A recovered job's voice is unknown, not default: the record is rebuilt from
+    a filename and the voice lived only in the dict that the restart cleared.
+    Printing `job.voice || "default"` asserted a fact nobody knew, and a list
+    of jobs made with different cloned voices all read "default".
+    """
+    row = HTML[HTML.index("$(\"joblist\").innerHTML = list.map"):]
+    row = row[:row.index("}).join(\"\")")]
+    assert 'job.recovered ? "voice unknown" : "default"' in row
+
+
+def test_the_full_text_is_fetched_on_open_not_with_the_listing():
+    """`text` is capped at 4096 characters and the listing holds fifty jobs, so
+    sending it with every poll would be a couple of hundred kilobytes every few
+    seconds for something nobody is reading."""
+    body = HTML[HTML.index('details.jobtext"'):]
+    assert '"toggle"' in body[:900], "the text should load when a row opens"
+    assert "body.dataset.loaded" in body[:1400], "and be fetched once, not per tick"
+
+
+def test_the_job_text_is_rendered_as_text():
+    """It is the largest piece of user-supplied data on this tab."""
+    start = HTML.index('d.addEventListener("toggle"')
+    section = HTML[start:HTML.index("}));", start)]
+    assert "body.textContent = said" in section
+    # Comments stripped first: the line above this one in ui.html says
+    # "textContent, not innerHTML", and matching prose would make the test
+    # assert against its own documentation. Same trap as the language test.
+    code = re.sub(r"/\*.*?\*/", "", section, flags=re.S)
+    assert "innerHTML" not in code, \
+        "the job text must never be assigned as markup"
+
+
+def test_an_open_row_survives_the_two_second_re_render():
+    """renderJobs reassigns #joblist wholesale on a timer. Without this, a row
+    someone had opened to read closed itself a moment later."""
+    assert "openRows" in HTML
+    assert 'openRows.has(job.id) ? " open" : ""' in HTML
