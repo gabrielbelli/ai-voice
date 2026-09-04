@@ -48,7 +48,7 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 from voice_common.errors import error_response
 
-from . import config, guard, metube, probe
+from . import clips, config, guard, metube, probe
 
 log = logging.getLogger("voice-ui.ingest")
 
@@ -330,6 +330,88 @@ def _multipart(boundary: str, fields: dict[str, str], *, filename: str,
             yield chunk
         yield f"\r\n--{boundary}--\r\n".encode()
     return body()
+
+
+class ClipFromLink(BaseModel):
+    token: str
+    name: str
+    replace: bool = False
+
+
+@router.post("/ui/clips/from-link")
+async def clip_from_link(request: Request, body: ClipFromLink) -> Response:
+    """Turn a finished MeTube download into a reference clip for cloning.
+
+    The sibling of /ui/fetch, and deliberately NOT the same route: that one
+    streams into the gateway's transcription chain and never keeps a byte, this
+    one keeps the bytes and never transcribes. Sharing them would mean a
+    `purpose` flag deciding which of two unrelated things happens.
+
+    WHY THIS DOES NOT STREAM. A reference clip is ten to thirty seconds at
+    24 kHz -- about 1.4 MB, with a 25 MB ceiling -- and clips.save() validates
+    the duration of the whole file before writing it. There is nothing to
+    stream to; holding it is the point.
+
+    THE TRIM ALREADY HAPPENED, at the source. The page sends clip_start and
+    clip_end on /ui/commit, so yt-dlp fetched only the window asked for and a
+    two-hour interview cost twenty seconds of download. That is why cloning
+    from a link is cheap enough to be an ordinary thing to do rather than a
+    reason to go and find the file yourself.
+    """
+    client = _client(request)
+    try:
+        found = await client.find(body.token)
+    except metube.MeTubeError as exc:
+        return _unavailable(exc)
+    if found is None:
+        return error_response(404, "MeTube has no record of that link.",
+                              code="unknown_token", param="token")
+
+    where, entry = found
+    filename = entry.get("filename")
+    if where != "done" or entry.get("status") != metube.FINISHED or not filename:
+        return error_response(
+            409, f"that download is {entry.get('status') or where}, not finished",
+            code="not_ready", param="token")
+
+    source = client.audio_url(str(filename), str(entry.get("folder") or ""))
+    http: httpx.AsyncClient = request.app.state.client
+    try:
+        response = await http.get(source, timeout=120.0)
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        return error_response(
+            502, f"could not read the downloaded audio ({type(exc).__name__})",
+            type_="server_error", code="ingestion_unavailable")
+
+    # The same ceiling the upload route applies, checked before the body is
+    # handed on: a clip is small, and something this size arriving here means
+    # the trim did not happen.
+    if len(response.content) > config.MAX_CLIP_BYTES:
+        return error_response(
+            413,
+            f"that download is {len(response.content) / 1024**2:.1f} MB; a "
+            f"reference clip is capped at "
+            f"{config.MAX_CLIP_BYTES / 1024**2:.0f} MB. Trim it on the card "
+            f"before importing.",
+            code="clip_too_large", param="token")
+
+    try:
+        saved = clips.save(body.name, response.content, replace=body.replace)
+    except clips.ClipError as exc:
+        return error_response(400, str(exc), code="invalid_clip", param="name")
+
+    # Reaped either way: the page is done with the download the moment the clip
+    # is written, and leaving it in MeTube's `done` list is litter in somebody
+    # else's application.
+    try:
+        await client.abandon(body.token)
+    except metube.MeTubeError:
+        log.warning("clip imported but the MeTube record was not reaped: %s",
+                    body.token)
+
+    return Response(media_type="application/json", status_code=201,
+                    content=_json({"voice": saved, "voices": clips.listing()}))
 
 
 @router.post("/ui/fetch")

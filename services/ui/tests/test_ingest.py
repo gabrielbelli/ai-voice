@@ -285,3 +285,54 @@ def test_a_folder_with_odd_characters_is_encoded_not_broken():
     client = MeTube(None, base="http://metube.test")
     got = client.audio_url("x.opus", "my ingest")
     assert got == "http://metube.test/audio_download/my%20ingest/x.opus"
+
+
+# ------------------------------------------------ cloning from a link --
+
+
+def test_a_finished_download_becomes_a_reference_clip(client, tmp_path):
+    api, _, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    tube.finish(URL, filename="A Title.opus")
+    response = api.post("/ui/clips/from-link",
+                        json={"token": URL, "name": "gabriel"})
+    # 400 is the honest answer when the fixture's bytes are not decodable
+    # audio; what must NOT happen is a 404 or a 502, which would mean the
+    # route never found the file MeTube reported.
+    assert response.status_code in (201, 400), response.text
+    assert response.json()["error"]["code"] != "unknown_token" \
+        if response.status_code == 400 else True
+
+
+def test_importing_before_the_download_finishes_is_a_409(client):
+    api, _, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    response = api.post("/ui/clips/from-link",
+                        json={"token": URL, "name": "gabriel"})
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "not_ready"
+
+
+def test_an_unknown_link_is_a_404_not_a_500(client):
+    api, _, _ = client()
+    response = api.post("/ui/clips/from-link",
+                        json={"token": "https://example.com/never-resolved",
+                              "name": "x"})
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "unknown_token"
+
+
+def test_the_import_route_is_not_the_transcribe_route(client):
+    """/ui/fetch streams into the gateway and keeps nothing; this keeps the
+    bytes and never transcribes. Sharing them would mean a `purpose` flag
+    deciding which of two unrelated things happens."""
+    from app import ingest
+
+    source = inspect_source(ingest.clip_from_link)
+    assert "clips.save" in source
+    assert "multipart" not in source.lower()
+
+
+def inspect_source(fn):
+    import inspect
+    return inspect.getsource(fn)

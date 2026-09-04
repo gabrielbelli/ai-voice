@@ -592,6 +592,11 @@ UI_PATHS = (
     ("GET", "/ui/clips"),
     ("POST", "/ui/clips"),
     ("DELETE", "/ui/clips/{name}"),
+    # Cloning from a link. Listed before the {name} route above would match it
+    # -- Starlette takes the first match, and /ui/clips/from-link is a valid
+    # {name} -- but that one is DELETE and this is POST, so they cannot
+    # collide. Named here anyway rather than relying on that.
+    ("POST", "/ui/clips/from-link"),
     ("POST", "/ui/resolve"),
     ("POST", "/ui/commit"),
     ("POST", "/ui/abandon"),

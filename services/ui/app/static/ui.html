@@ -425,6 +425,25 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
           <button class="tight" id="cliporfile" type="button">Upload a clip instead</button>
           <input type="file" id="clipfile" hidden accept="audio/*,video/*">
         </div>
+        <!-- A LINK IS A THIRD SOURCE, and the cheap one. yt-dlp trims at the
+             source, so taking twenty seconds out of a two-hour interview
+             downloads twenty seconds. -->
+        <div class="row" style="margin-top:10px">
+          <input type="text" id="cliplink" placeholder="…or paste a link to a voice">
+          <button class="tight" id="clipresolve" type="button">Resolve</button>
+        </div>
+        <div class="row" id="cliprange" hidden style="margin-top:8px">
+          <div class="tight" style="min-width:130px">
+            <label for="clipstart">Start at (seconds)</label>
+            <input type="number" id="clipstart" min="0" step="1" value="0">
+          </div>
+          <div class="tight" style="min-width:130px">
+            <label for="cliplen">Take (seconds)</label>
+            <input type="number" id="cliplen" min="3" step="1" value="20">
+          </div>
+          <button class="primary tight" id="clipimport" type="button">Fetch this bit</button>
+        </div>
+        <div class="hint" id="cliplinkhint"></div>
         <div class="row" style="margin-top:10px">
           <div><label for="clipname">Save this voice as</label>
             <input type="text" id="clipname" placeholder="gabriel"></div>
@@ -903,20 +922,26 @@ function wav(samples, sampleRate) {
   return new Blob([buffer], { type: "audio/wav" });
 }
 
-async function toWav(file, targetRate, maxSeconds) {
+async function toWav(file, targetRate, maxSeconds, startAt) {
   const bytes = await file.arrayBuffer();
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
   let decoded;
   try { decoded = await ctx.decodeAudioData(bytes); }
   finally { ctx.close(); }
-  let seconds = decoded.duration;
+  /* startAt lets the caller take a window from the MIDDLE. Cloning wants ten
+     to thirty seconds of one speaker, and the first thirty seconds of a
+     recording are very often an intro, a jingle or someone else talking --
+     so "trim to the ceiling" from zero picked the least useful part of the
+     file surprisingly often. */
+  const from = Math.max(0, Math.min(startAt || 0, Math.max(0, decoded.duration - 1)));
+  let seconds = decoded.duration - from;
   if (maxSeconds && seconds > maxSeconds) seconds = maxSeconds;  /* trimmed, not refused */
   const frames = Math.max(1, Math.round(seconds * targetRate));
   const off = new OfflineAudioContext(1, frames, targetRate);
   const source = off.createBufferSource();
   source.buffer = decoded;
   source.connect(off.destination);
-  source.start(0);
+  source.start(0, from, seconds);
   const rendered = await off.startRendering();
   return { blob: wav(rendered.getChannelData(0), targetRate),
            seconds: rendered.duration, originalRate: decoded.sampleRate };
@@ -2607,6 +2632,90 @@ $("refresh").addEventListener("click", () => { refreshJobs(); });
 let clip = null, recorder = null, recTimer = null;
 
 $("cliporfile").addEventListener("click", () => $("clipfile").click());
+
+/* ------------------------------------------- cloning from a link ------- */
+/*
+  Reuses the ingestion the Transcribe tab already has, in the same order:
+  resolve to find out what it is, commit the WINDOW rather than the whole
+  thing, wait, then import. The only new server route is the last step --
+  /ui/clips/from-link, which keeps the bytes instead of transcribing them.
+
+  The trim is not a convenience here, it is what makes this affordable.
+  clip_start and clip_end reach yt-dlp, which fetches only that window, so
+  taking twenty seconds out of a two-hour interview downloads twenty seconds.
+*/
+let cliplink = null;
+
+$("clipresolve").addEventListener("click", async () => {
+  const url = $("cliplink").value.trim();
+  if (!url) return;
+  $("clipresolve").disabled = true;
+  note($("cliplinkhint"), "flat", "Resolving…");
+  try {
+    const facts = await json("/ui/resolve", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url }) });
+    cliplink = facts;
+    $("cliprange").hidden = false;
+    $("cliplen").max = CONFIG.max_clip_seconds;
+    if (Number($("cliplen").value) > CONFIG.max_clip_seconds)
+      $("cliplen").value = CONFIG.max_clip_seconds;
+    if (!$("clipname").value && facts.title) {
+      $("clipname").value = facts.title.toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, "-").replace(/^-|-$/g, "").slice(0, 48);
+    }
+    note($("cliplinkhint"), "ok", esc(facts.title)
+      + (facts.duration ? ` — ${clock(facts.duration)}` : ""));
+  } catch (err) {
+    cliplink = null;
+    $("cliprange").hidden = true;
+    note($("cliplinkhint"), "bad", err.message);
+  } finally { $("clipresolve").disabled = false; }
+});
+
+$("clipimport").addEventListener("click", async () => {
+  if (!cliplink) return;
+  const name = $("clipname").value.trim();
+  if (!name) { note($("cliplinkhint"), "bad", "Name it first."); return; }
+  const start = Math.max(0, Number($("clipstart").value) || 0);
+  const take = Math.min(CONFIG.max_clip_seconds,
+                        Math.max(3, Number($("cliplen").value) || 20));
+
+  $("clipimport").disabled = true;
+  try {
+    note($("cliplinkhint"), "flat", "Fetching that window…");
+    await json("/ui/commit", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: cliplink.token,
+                             clip_start: start, clip_end: start + take }) });
+
+    /* Polls the same route the Transcribe tab does. A trimmed window is
+       seconds of download, so this is a short wait rather than a job. */
+    const token = encodeURIComponent(cliplink.token);
+    for (let i = 0; i < 120; i++) {
+      const p = await json(`/ui/progress?token=${token}`);
+      if (p.ready) break;
+      if (p.status === "error") throw new Error(p.error || "the download failed");
+      note($("cliplinkhint"), "flat",
+           `Fetching… ${p.percent ? p.percent.toFixed(0) + "%" : ""}`);
+      await new Promise(r => setTimeout(r, 1000));
+    }
+
+    const out = await json("/ui/clips/from-link", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: cliplink.token, name, replace: true }) });
+    note($("cliplinkhint"), "ok", `Saved as ${esc(out.voice.name || name)}.`);
+    cliplink = null;
+    $("cliprange").hidden = true;
+    $("cliplink").value = "";
+    await loadVoices();
+    $("voice").value = "c:" + (out.voice.name || name);
+    onVoiceChange();
+    $("clone").hidden = true;
+  } catch (err) {
+    note($("cliplinkhint"), "bad", err.message);
+  } finally { $("clipimport").disabled = false; }
+});
 $("clipfile").addEventListener("change", () => {
   const file = $("clipfile").files[0];
   if (file) prepareClip(file, file.name.replace(/\.[^.]+$/, ""));
@@ -2615,7 +2724,8 @@ $("clipfile").addEventListener("change", () => {
 async function prepareClip(file, suggestedName) {
   note($("clipnote"), "flat", "Converting…");
   try {
-    const out = await toWav(file, 24000, CONFIG.max_clip_seconds);
+    const from = Number($("clipstart").value) || 0;
+    const out = await toWav(file, 24000, CONFIG.max_clip_seconds, from);
     clip = out.blob;
     $("clippreview").src = URL.createObjectURL(clip);
     $("clippreview").hidden = false;
