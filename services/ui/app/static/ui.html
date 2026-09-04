@@ -559,7 +559,7 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
             <div><label for="x-troute">route</label>
               <select id="x-troute">
                 <option value="speak">/speak — segments, per-segment voice, hard 0.5–2.0 speed</option>
-                <option value="v1">/v1/audio/speech — accepts 0.25–4.0 and silently clamps</option>
+                <option value="v1">/v1/audio/speech — no segments, no language, clamps speed</option>
               </select>
               <div class="hint"><code>/speak</code> is <code>extra="forbid"</code>:
                 an unknown field is a 422. <code>/v1</code> is
@@ -575,8 +575,8 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
           </div>
           <h3 style="margin-top:14px">Segments</h3>
           <div class="hint">Each row is one <code>/speak</code> segment with a
-            pause after it. Per-segment voice exists only on <code>/speak</code>,
-            never on tts-long, so the column disappears for a cloned voice.</div>
+            pause after it. Segments exist only on <code>/speak</code>, so this
+            editor is greyed out on the other route.</div>
           <div id="segments"></div>
           <button class="small" id="addseg" type="button" style="margin-top:8px">+ Add segment</button>
         </div>
@@ -1043,7 +1043,13 @@ $("file").addEventListener("change", () => { if ($("file").files[0]) pick($("fil
 $("drop").addEventListener("drop", ev => {
   const f = ev.dataTransfer.files[0];
   if (f) pick(f);
-  else { const text = ev.dataTransfer.getData("text"); if (text) { $("url").value = text; resolveLink(); } }
+  /* A DROPPED LINK FILLS THE BOX AND STOPS, exactly as a pasted one does.
+     Dropping a FILE prepares it and waits for Transcribe; dropping a link used
+     to spawn yt-dlp against whatever host the drag came from, so the same
+     gesture on the same target meant "get ready" for one payload and "go" for
+     the other. Resolve is one click away and is the button that says so. */
+  else { const text = ev.dataTransfer.getData("text");
+         if (text) { $("url").value = text; $("url").focus(); } }
 });
 /* PASTE A LINK ANYWHERE ON THIS TAB AND IT RESOLVES. The convenience is the
    point: the common action is copy a link, switch to this page, paste.
@@ -1080,22 +1086,24 @@ document.addEventListener("paste", ev => {
     target.isContentEditable);
   if (intoSomeOtherField) return;
 
-  if (intoUrlBox) {
-    // Let the browser paste it. setTimeout, not the value we read here,
-    // because the user may have selected part of the existing text.
-    setTimeout(() => { if ($("url").value.trim()) resolveLink(); }, 0);
-    return;
-  }
+  /* PASTING FILLS THE BOX AND STOPS. It used to call resolveLink(), which
+     spawns yt-dlp against a host the clipboard chose -- before the user had
+     clicked anything, and on a paste they might have been aiming at another
+     field. Resolve is one click away and is the button that says so. */
+  if (intoUrlBox) return;
   // Pasted with nothing focused: there is no default action worth keeping.
   ev.preventDefault();
   $("url").value = text;
-  resolveLink();
+  $("url").focus();
 });
 
 document.querySelectorAll("#fmt button").forEach(b => b.addEventListener("click", () => {
   document.querySelectorAll("#fmt button").forEach(o =>
     o.setAttribute("aria-pressed", String(o === b)));
   stt.format = b.dataset.fmt;
+  /* Asking for subtitles takes the native route off the menu, because it has
+     no timings to write them from. */
+  updateRouteAvailability();
 }));
 
 async function pick(file) {
@@ -1159,22 +1167,68 @@ async function pick(file) {
 
 /* The native route is 16 kHz only, and we know the rate because the browser
    decoded the file. Offering a path that 400s on every MP4 is worse than not
-   offering it, so it is disabled with the reason written on it. */
+   offering it, so it is disabled with the reason written on it.
+   AND IT CANNOT WRITE SUBTITLES. /transcribe answers its own JSON shape with
+   no segments and no cue timings in it, so render() is called with "text"
+   whatever the Output control says -- which meant choosing SRT and then the
+   native route quietly handed back a .txt. Same idiom, second reason. */
 function updateRouteAvailability() {
   const select = $("x-route");
   const native = select.querySelector('option[value=native]');
-  const ok = !!stt.prepared || !stt.file;
+  const sixteen = !!stt.prepared || !stt.file;
+  const wanted = chosenFormat();
+  const subtitles = wanted === "srt" || wanted === "vtt";
+  const ok = sixteen && !subtitles;
   native.disabled = !ok;
-  native.textContent = ok
-    ? "/transcribe — richer, 16 kHz only"
-    : "/transcribe — unavailable: this file is not 16 kHz and was not decoded here";
+  native.textContent =
+    ok ? "/transcribe — richer, 16 kHz only"
+    : !sixteen ? "/transcribe — unavailable: this file is not 16 kHz and was not decoded here"
+    : "/transcribe — unavailable: it has no timings, so it cannot write subtitles";
   if (!ok && select.value === "native") select.value = "v1";
+  syncTranscribeControls();
 }
+
+/* A FIELD THE CHOSEN PATH CANNOT CARRY IS DISABLED, NOT SILENTLY DROPPED.
+   Every control in this panel was read on exactly one of the three paths and
+   ignored without a word on the other two, so setting the VAD threshold for a
+   pasted link, or asking for word timestamps on the native route, looked
+   identical to setting something that mattered.
+
+     upload + /v1     the only path that builds the multipart form, and the
+                      only one where all of this reaches the recogniser
+     upload + native  /transcribe takes a file and nothing else -- no
+                      response_format, no granularities, no include[], no
+                      chunking_strategy
+     a link           /ui/fetch streams MeTube's file into /v1 with `model`
+                      and `response_format` and no other field (ingest.py
+                      fetch), so response_format is the one that survives
+
+   Disabled rather than hidden: the reason a control is unavailable is the
+   route select sitting beside it, and a control that vanishes takes its own
+   explanation with it. */
+function syncTranscribeControls() {
+  const link = !!stt.token && !stt.file;
+  const native = !link && $("x-route").value === "native";
+  const form = !link && !native;
+  $("x-route").disabled = link;
+  $("x-rf").disabled = native;
+  $("x-gran").disabled = !form;
+  $("x-logprobs").disabled = !form;
+  ["x-vad-t", "x-vad-p", "x-vad-s"].forEach(id => $(id).disabled = !form);
+}
+/* The whole rule, not only the greying: choosing the native route while an
+   expert response_format of srt is set has to bounce back off it, with the
+   reason on the option, rather than quietly disabling the control that made
+   the route impossible. */
+$("x-route").addEventListener("change", updateRouteAvailability);
 $("x-gran").addEventListener("change", () => {
   if ($("x-gran").value) $("x-rf").value = "verbose_json";
+  updateRouteAvailability();
 });
+$("x-rf").addEventListener("change", updateRouteAvailability);
 $("x-logprobs").addEventListener("change", () => {
   if ($("x-logprobs").checked) { $("x-rf").value = "json"; $("x-gran").value = ""; }
+  updateRouteAvailability();
 });
 
 /* ------------------------------------------------ resolve, confirm ---- */
@@ -1195,10 +1249,21 @@ async function resolveLink() {
       <button class="small" id="unpick" type="button">×</button></span>`;
     $("unpick").addEventListener("click", abandon);
     $("linkhint").textContent = "";
-    /* SMALL AND OBVIOUSLY SHORT MEDIA DOES NOT NAG. The server decides, from
-       the two thresholds in app/config.py, and a dialog that fires on
-       everything is a dialog people dismiss without reading. */
-    if (facts.confirm) showConfirm(facts); else startFetch({});
+    /* A link is transcribed by /ui/fetch, which carries response_format and
+       nothing else, so most of the expert panel goes grey the moment there is
+       a token. */
+    updateRouteAvailability();
+    /* RESOLVE RESOLVES. It used to call startFetch() directly whenever the
+       server said the media was short enough not to warrant a dialog -- so a
+       button labelled "Resolve" downloaded the file and transcribed it, and
+       the only way to find out what a link was cost you the transcription.
+       "Do not nag" is a reason to skip the modal, never a reason to do the
+       work unasked.
+
+       The card below is now shown for everything and carries the button that
+       starts it. For short media it is one extra click; for anything else it
+       is the difference between a page that asks and a page that acts. */
+    showConfirm(facts);
   } catch (err) {
     $("linkhint").innerHTML = `<span style="color:var(--bad)">${esc(err.message)}</span>`;
   } finally {
@@ -1213,6 +1278,7 @@ async function abandon() {
   stt.token = null; stt.facts = null; stt.captions = false;
   $("picked").hidden = true;
   $("go-stt").disabled = true;
+  updateRouteAvailability();
   if (!token) return;
   try {
     /* NOT OPTIONAL. Resolving calls MeTube's /add before probing — on purpose,
@@ -1361,8 +1427,13 @@ async function watchDownload() {
 /* ---------------------------------------------------- transcription --- */
 function chosenFormat() {
   /* Expert wins if it was set; otherwise the plain three-way control. json is
-     what the native route always answers, whatever this says. */
-  return $("x-rf").value || (stt.format === "text" ? "text" : stt.format);
+     what the native route always answers, whatever this says.
+     A DISABLED x-rf IS NOT A CHOICE. syncTranscribeControls disables it on the
+     native route, where nothing reads a response_format at all, and a value
+     left in a control the user can no longer reach must not go on deciding
+     which route is offered -- that is the same rule segments() follows. */
+  const expert = $("x-rf").disabled ? "" : $("x-rf").value;
+  return expert || (stt.format === "text" ? "text" : stt.format);
 }
 
 /* WHY AN UPLOAD ASKS FOR verbose_json WHEN THE USER ASKED FOR TEXT.
@@ -2396,6 +2467,7 @@ function onVoiceChange() {
      "default": it is the model's own speaker, there is no file behind it, and
      the delete would 404 on a voice the user cannot break. */
   $("delvoice").hidden = !clone || builtin;
+  syncSpeakControls();
   /* populateLanguages() is NOT called here any more. The list used to be built
      from the chosen voice's engine, so it had to be rebuilt whenever the voice
      changed; it is now the union of both engines and independent of the voice.
@@ -2404,6 +2476,39 @@ function onVoiceChange() {
   estimate();
 }
 $("voice").addEventListener("change", onVoiceChange);
+
+/* THE ROUTE DECIDES WHICH CONTROLS ARE REAL, and it used to decide silently.
+   speakNow() built the /v1 body from four of the seven things this tab can be
+   set to and dropped the rest without a word:
+
+     stream_format   read only inside the /v1 branch, so on /speak -- the
+                     DEFAULT route -- choosing SSE did nothing whatsoever
+     segments        computed by segments() on both branches and attached only
+                     on /speak, so rows typed into the visible editor were
+                     thrown away by /v1 along with their per-segment voice
+     language        resolvedLanguage() is called on both branches and sent on
+                     one. /v1/audio/speech has no language field at all: tts's
+                     openai_api.py infers the phonemiser from the VOICE's first
+                     letter, so on that route the Language control above -- the
+                     control that exists precisely so the voice would stop
+                     deciding the language -- is inert.
+
+   Each of those is now disabled while the route that cannot carry it is
+   chosen. Nothing is hidden: the route select is two controls away and is the
+   reason, and this reverses the moment /speak is chosen again.
+
+   Gated on the panel being the live one, because x-troute belongs to Kokoro.
+   A cloned voice goes to POST /jobs, which takes `language` and takes no
+   stream_format, and none of this applies to it. */
+function syncSpeakControls() {
+  const v1 = !$("tts-expert-fast").hidden && $("x-troute").value === "v1";
+  $("x-stream").disabled = !v1;
+  $("lang").disabled = v1;
+  $("addseg").disabled = v1;
+  $("segments").querySelectorAll("input,select,button")
+    .forEach(control => control.disabled = v1);
+}
+$("x-troute").addEventListener("change", () => { syncSpeakControls(); estimate(); });
 $("delvoice").addEventListener("click", async () => {
   const voice = currentVoice();
   if (voice.kind !== "clone") return;
@@ -2438,12 +2543,26 @@ $("text").addEventListener("input", estimate);
    duplicating it is how the two would drift. */
 $("lang").addEventListener("change", loadVoices);
 
+/* True while a request is in flight, so the rule below cannot re-enable the
+   button under a running one the moment somebody types. */
+let speaking = false;
+
 function estimate() {
   const text = $("text").value;
   $("chars").textContent = text.length;
   $("chars").style.color = text.length > 4096 ? "var(--bad)" : "";
   const voice = currentVoice();
   const audio = speechSeconds(text);
+
+  /* A BUTTON THAT WOULD DO NOTHING SAYS SO. The click handler opened with
+     `if (voice.kind === "new") return;` and `if (!text.trim() && !segments())
+     return;`, so pressing Speak with the clone sheet open, or with an empty
+     box, was a press that produced no audio, no error and no sign that
+     anything had been read at all -- the single most direct version of "the
+     buttons do nothing". Both states are visible from here, so both are on the
+     button rather than behind it. */
+  $("go-tts").disabled = speaking || voice.kind === "new"
+                       || !(text.trim() || segments());
 
   if (voice.kind !== "clone") {
     $("go-tts").textContent = "Speak";
@@ -2471,7 +2590,15 @@ function estimate() {
       if (use) use.addEventListener("click", () => {
         $("voice").value = "k:" + quick; onVoiceChange();
       });
-      $("anyway").addEventListener("click", () => note($("speak-note"), "", ""));
+      /* IT QUEUES IT. This cleared the warning and stopped, so a button that
+         said "Queue it anyway" was a Dismiss with someone else's label on it --
+         and the job it named still had to be started from the button the
+         warning was covering. Both answers to "this is 36 minutes" are now
+         answers: one switches the voice, the other goes ahead. */
+      $("anyway").addEventListener("click", () => {
+        note($("speak-note"), "", "");
+        $("go-tts").click();
+      });
     } else {
       note($("speak-note"), "", "");
     }
@@ -2483,7 +2610,14 @@ function estimate() {
    something that will pronounce the text rather than the first name in a list. */
 function nearestKokoro() {
   const wanted = (resolvedLanguage().code || "en").split("-")[0];
-  const all = (VOICES.kokoro && VOICES.kokoro.voices) || [];
+  /* THE PICKER'S OWN OPTIONS, not the full list from /voices. The picker is
+     filtered by the Language control above, so a name taken from the
+     unfiltered set could be missing from the select -- and assigning a value a
+     <select> does not have leaves it holding "", which is how "Use af_heart
+     instead" cleared the voice and sent voice:"" to /speak. */
+  const all = [...$("voice").options]
+    .filter(option => option.value.slice(0, 2) === "k:")
+    .map(option => option.value.slice(2));
   const want = wanted === "pt" ? "p" : wanted === "en" ? "b" : wanted[0];
   return all.find(v => v[0] === want) || all.find(v => v[0] === "b") || all[0] || null;
 }
@@ -2496,7 +2630,12 @@ function nearestKokoro() {
 function codeSwitchNote(text) {
   const pt = /\b(que|não|você|para|com|uma|mais|muito|então|porque|obrigado|coisa|fazer|agora)\b|ção\b|ções\b|[ãõçáéíóúâêô]/i.test(text);
   const en = /\b(the|and|with|that|this|about|would|there|because|something|really|actually)\b/i.test(text);
-  if (pt && en && !store.get("dismissed.codeswitch", false)) {
+  /* ONLY WHERE THE REMEDY EXISTS. The note sends the reader to the segments
+     editor, which is inside the Kokoro panel and is greyed out on /v1 -- so
+     for a cloned voice, and on that route, this was advice pointing at a
+     control that is not on the screen. Same test the request builder uses. */
+  const editor = !$("tts-expert-fast").hidden && !$("addseg").disabled;
+  if (pt && en && editor && !store.get("dismissed.codeswitch", false)) {
     $("codeswitch").innerHTML = `<div class="note flat">Mixed English and
       Portuguese — one language is sent for all of it. Use the
       <strong>segments editor</strong> to switch voice mid-text.
@@ -2504,7 +2643,7 @@ function codeSwitchNote(text) {
     $("dismisscs").addEventListener("click", () => {
       store.set("dismissed.codeswitch", true); $("codeswitch").innerHTML = "";
     });
-  } else if (!pt || !en) {
+  } else if (!pt || !en || !editor) {
     $("codeswitch").innerHTML = "";
   }
 }
@@ -2522,12 +2661,31 @@ function addSegment(text) {
         ((VOICES.kokoro && VOICES.kokoro.voices) || [])
           .map(v => `<option>${v}</option>`).join("")}</select></div>
     <button class="small tight seg-del" type="button">×</button>`;
-  el(".seg-del", row).addEventListener("click", () => row.remove());
+  el(".seg-del", row).addEventListener("click", () => { row.remove(); estimate(); });
   $("segments").appendChild(row);
+  /* A new row inherits the state of the editor it joins, and the button that
+     says whether there is anything to speak is re-read. */
+  syncSpeakControls();
+  estimate();
 }
 $("addseg").addEventListener("click", () => addSegment(""));
+/* Delegated, so it covers rows that do not exist yet. */
+$("segments").addEventListener("input", estimate);
 
 function segments() {
+  /* A HIDDEN CONTROL MUST NOT APPLY. The segments editor lives inside the
+     Kokoro expert panel, and onVoiceChange hides that panel when a Chatterbox
+     voice is chosen -- but this read the rows regardless, so segments someone
+     added on the fast path were silently sent to a clone job from a panel they
+     could not see and had no way to clear.
+
+     Reading visibility rather than the voice, deliberately: whatever decides
+     which panel is shown stays the single source of truth, and this cannot
+     drift from it. Same for the route: /v1/audio/speech has no segments, so
+     syncSpeakControls greys the editor out and this reads that greying rather
+     than the route -- one decision, in one place, seen by the user and by the
+     request builder alike. */
+  if ($("tts-expert-fast").hidden || $("addseg").disabled) return null;
   const rows = [...$("segments").children];
   if (!rows.length) return null;
   const out = rows.map(row => {
@@ -2547,6 +2705,7 @@ $("go-tts").addEventListener("click", async () => {
   if (voice.kind === "new") return;
   const text = $("text").value;
   if (!text.trim() && !segments()) return;
+  speaking = true;
   $("go-tts").disabled = true;
   try {
     if (voice.kind === "clone") await queueJob(voice.name, text);
@@ -2554,16 +2713,22 @@ $("go-tts").addEventListener("click", async () => {
   } catch (err) {
     note($("speak-note"), "bad", err.message || String(err));
   } finally {
-    $("go-tts").disabled = false;
+    /* Through estimate(), so the button comes back only if there is still
+       something to say -- and comes back with the right label on it. */
+    speaking = false;
+    estimate();
   }
 });
 
 async function speakNow(voice, text) {
   const useV1 = $("x-troute").value === "v1";
   const format = $("x-tfmt").value || (useV1 ? "mp3" : "wav");
-  const language = resolvedLanguage().code;
   const speed = Number($("speed").value);
-  const parts = segments();
+  /* Both read INSIDE the branch that sends them. They used to be read here and
+     used on one branch, which is how the Language control and the segments
+     editor came to be settable on a route that has neither -- see
+     syncSpeakControls, which is what now says so on the screen. */
+  const parts = useV1 ? null : segments();
 
   let path, body;
   if (useV1) {
@@ -2578,7 +2743,7 @@ async function speakNow(voice, text) {
     /* /speak is extra="forbid": an unknown field is a 422, so nothing
        speculative is sent. The field is `format`, not `response_format`. */
     path = "/speak";
-    body = { voice, language, speed, format };
+    body = { voice, language: resolvedLanguage().code, speed, format };
     if (parts) body.segments = parts; else body.text = text;
   }
 
@@ -3128,10 +3293,31 @@ $("cliporfile").addEventListener("click", () => $("clipfile").click());
 */
 let cliplink = null;
 
+/* NOT OPTIONAL, for the same reason abandon() is not on the other tab:
+   /ui/resolve calls MeTube's /add before it probes -- so its url_guard is what
+   decides whether a URL may be fetched at all -- and every link resolved and
+   then dropped has left a pending record behind. Cancel used to close the
+   sheet and leave the token, the record and the filled-in box exactly where
+   they were, so "Cancel" cancelled the part the user could see and none of the
+   part they could not. */
+async function forgetClipLink() {
+  const token = cliplink && cliplink.token;
+  cliplink = null;
+  $("cliprange").hidden = true;
+  if (!token) return;
+  try {
+    await json("/ui/abandon", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token }) });
+  } catch { /* the sheet is closing either way; MeTube's queue is on 30097 */ }
+}
+
 $("clipresolve").addEventListener("click", async () => {
   const url = $("cliplink").value.trim();
   if (!url) return;
   $("clipresolve").disabled = true;
+  /* A second Resolve drops the first link rather than orphaning its record. */
+  if (cliplink) await forgetClipLink();
   note($("cliplinkhint"), "flat", "Resolving…");
   try {
     const facts = await json("/ui/resolve", {
@@ -3206,7 +3392,14 @@ $("clipfile").addEventListener("change", () => {
 async function prepareClip(file, suggestedName) {
   note($("clipnote"), "flat", "Converting…");
   try {
-    const from = Number($("clipstart").value) || 0;
+    /* ONLY WHEN THE ROW IS ON SCREEN. #clipstart lives in #cliprange, which is
+       hidden until a link has been resolved -- so for a recording or an
+       uploaded file this read a start offset from a control the user could not
+       see. Resolve a link, set "start at 90", then change your mind and upload
+       a file instead, and the file was silently trimmed from 90 seconds in.
+       The same rule segments() follows: a control that is not on the screen
+       does not get a say. */
+    const from = $("cliprange").hidden ? 0 : Number($("clipstart").value) || 0;
     let out = null;
     try { out = await toWav(file, 24000, CONFIG.max_clip_seconds, from); }
     catch { out = null; }
@@ -3372,6 +3565,12 @@ $("sttrecstop").addEventListener("click", () => {
 $("cancelclip").addEventListener("click", () => {
   clip = null; $("clippreview").hidden = true; $("saveclip").disabled = true;
   note($("clipnote"), "", "");
+  /* Everything the sheet was holding, including the resolved link -- see
+     forgetClipLink. The box is cleared here rather than in there because
+     Resolve calls it too and must not delete what was just typed. */
+  $("cliplink").value = "";
+  note($("cliplinkhint"), "", "");
+  forgetClipLink();
   $("voice").value = VOICES.kokoro && VOICES.kokoro.voices
     && VOICES.kokoro.voices.includes("bm_george") ? "k:bm_george" : $("voice").options[0].value;
   onVoiceChange();
@@ -3426,6 +3625,9 @@ $("saveclip").addEventListener("click", async () => {
      voice, which happens to be right for auto-detect and would be wrong the
      moment the default changed. */
   populateLanguages();
+  /* The expert panels start out matching the empty page rather than matching
+     their markup: nothing is picked, so nothing is ruled out yet. */
+  updateRouteAvailability();
   await loadVoices();
   if (!CONFIG.cloning) {
     /* Said once, plainly, rather than letting a saved voice vanish on the next

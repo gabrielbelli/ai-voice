@@ -137,8 +137,19 @@ def test_the_url_box_path_lets_the_browser_do_the_paste():
     head = branch[:branch.index("return;")]
     assert '$("url").value =' not in head, (
         "the url-box branch must not set the value; the browser is doing it")
-    assert "setTimeout" in head, (
-        "the value must be read after the default action, not before it")
+
+
+def test_pasting_a_link_does_not_resolve_it():
+    """It used to. resolveLink spawns yt-dlp against a host the CLIPBOARD
+    chose, before the user had clicked anything -- and on a paste they may
+    have been aiming at another field entirely. Resolve is one click away and
+    is the button that says so.
+    """
+    body = _paste_handler()
+    code = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+    code = re.sub(r"//[^\n]*", "", code)
+    assert "resolveLink()" not in code, \
+        "pasting must fill the box and stop"
 
 
 def test_a_paste_into_another_field_is_left_alone():
@@ -495,3 +506,212 @@ def test_an_open_row_survives_the_two_second_re_render():
     someone had opened to read closed itself a moment later."""
     assert "openRows" in HTML
     assert 'openRows.has(job.id) ? " open" : ""' in HTML
+
+
+# ------------------------------------ a control does what its label says --
+
+
+def test_resolve_only_resolves():
+    """It called startFetch() whenever the server said the media was short
+    enough not to warrant a dialog, so a button labelled "Resolve" downloaded
+    the file and transcribed it -- and finding out what a link WAS cost you the
+    transcription. "Do not nag" is a reason to skip the modal, never a reason
+    to do the work unasked.
+    """
+    body = HTML[HTML.index("async function resolveLink"):]
+    body = body[:body.index("\n}\n")]
+    code = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+    assert "startFetch(" not in code, \
+        "resolve must not start the download itself"
+    assert "showConfirm(facts)" in code, "it should offer the choice instead"
+
+
+def test_a_hidden_segments_editor_does_not_apply():
+    """It lives in the Kokoro expert panel, which onVoiceChange hides when a
+    Chatterbox voice is chosen -- but segments() read the rows regardless, so
+    segments added on the fast path were sent to a clone job from a panel the
+    user could not see and had no way to clear.
+    """
+    body = HTML[HTML.index("function segments()"):]
+    body = body[:body.index("\n}\n")]
+    assert '$("tts-expert-fast").hidden' in body
+
+
+def test_visibility_is_read_rather_than_the_voice():
+    """Whatever decides which panel is shown stays the single source of truth,
+    so this cannot drift from it."""
+    body = HTML[HTML.index("function segments()"):]
+    body = body[:body.index("\n}\n")]
+    assert "currentVoice()" not in body
+
+
+# ------------------------------------------------------------------------
+# THE SECOND PASS OVER THE SAME QUESTION. Three controls above were found to
+# act without being asked, or to be read where they could not be seen. These
+# are the rest of that sweep: every interactive element on the three tabs and
+# the clone sheet was walked against the code that builds each request, and
+# each test below is named after the thing the user saw.
+
+
+def _fn(name: str) -> str:
+    """A top-level function's body, comments and all."""
+    start = HTML.index(name)
+    return HTML[start:HTML.index("\n}\n", start)]
+
+
+def _code(text: str) -> str:
+    """The same, with the comments taken out -- this file's comments quote the
+    very code they are about, so a naive `in` check passes on the prose."""
+    return re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", text, flags=re.S))
+
+
+def test_a_dropped_link_is_not_resolved_by_the_drop():
+    """Dropping a FILE prepared it and waited for Transcribe; dropping a link
+    spawned yt-dlp against whatever host the drag came from. The same gesture
+    on the same target meant "get ready" for one payload and "go" for the
+    other, which is the paste bug wearing a different hat.
+    """
+    start = HTML.index('$("drop").addEventListener("drop"')
+    body = _code(HTML[start:HTML.index("});", start)])
+    assert "resolveLink()" not in body, "a drop must fill the box and stop"
+    assert '$("url").value = text' in body
+
+
+def test_a_start_offset_from_a_hidden_row_does_not_trim_an_upload():
+    """#clipstart lives in #cliprange, which is hidden until a link resolves.
+    prepareClip read it anyway, so resolving a link, setting "start at 90" and
+    then changing your mind and uploading a file instead trimmed that file from
+    ninety seconds in, from a control that was no longer on the screen.
+    """
+    body = _fn("async function prepareClip(")
+    assert '$("cliprange").hidden ? 0 :' in body
+
+
+def test_the_native_route_greys_out_the_fields_it_cannot_carry():
+    """/transcribe takes a file and nothing else -- no response_format, no
+    timestamp_granularities, no include[], no chunking_strategy -- but every
+    one of those controls stayed live in the panel beside it, and the request
+    builder simply never looked at them.
+    """
+    body = _code(_fn("function syncTranscribeControls()"))
+    assert '$("x-rf").disabled = native;' in body
+    assert '$("x-gran").disabled = !form;' in body
+    assert '$("x-logprobs").disabled = !form;' in body
+    assert 'x-vad-t' in body and 'disabled = !form' in body
+
+
+def test_a_link_greys_out_what_ui_fetch_cannot_carry():
+    """/ui/fetch streams MeTube's file into /v1 with `model` and
+    `response_format` and no other field (ingest.py), so on that path the route
+    select and everything under it was decoration.
+    """
+    body = _code(_fn("function syncTranscribeControls()"))
+    assert "const link = !!stt.token && !stt.file;" in body
+    assert '$("x-route").disabled = link;' in body
+
+
+def test_a_disabled_response_format_is_not_a_choice():
+    """It is greyed out on the native route, and a value left in a control the
+    user can no longer reach must not go on deciding which route is offered."""
+    assert '$("x-rf").disabled ? "" : $("x-rf").value' in _fn("function chosenFormat()")
+
+
+def test_the_native_route_is_not_offered_for_subtitles():
+    """It answers its own JSON shape with no cue timings in it, so render() is
+    called with "text" whatever the Output control says -- choosing SRT and
+    then the native route quietly handed back a .txt."""
+    body = _code(_fn("function updateRouteAvailability()"))
+    assert 'const subtitles = wanted === "srt" || wanted === "vtt";' in body
+    assert "const ok = sixteen && !subtitles;" in body
+    assert "cannot write subtitles" in body
+
+
+def test_stream_format_is_off_on_the_route_that_has_none():
+    """It was read inside the /v1 branch only, so on /speak -- the DEFAULT
+    route -- choosing SSE did nothing whatsoever."""
+    assert '$("x-stream").disabled = !v1;' in _fn("function syncSpeakControls()")
+
+
+def test_segments_are_off_on_the_route_that_has_none():
+    """segments() ran on both branches and was attached on one, so rows typed
+    into the visible editor were thrown away by /v1 along with their
+    per-segment voice."""
+    body = _code(_fn("function syncSpeakControls()"))
+    assert '$("addseg").disabled = v1;' in body
+    assert '$("segments").querySelectorAll' in body
+    # And the request builder reads the same greying rather than the route.
+    assert '$("addseg").disabled' in _fn("function segments()")
+
+
+def test_the_language_control_is_off_where_it_is_not_sent():
+    """/v1/audio/speech has no language field: tts's openai_api.py infers the
+    phonemiser from the VOICE's first letter. So on that route the Language
+    control -- which exists precisely so the voice would stop deciding the
+    language -- was inert, and said nothing about it.
+    """
+    assert '$("lang").disabled = v1;' in _fn("function syncSpeakControls()")
+    assert "no segments, no language" in HTML, \
+        "the route option should name what it drops"
+
+
+def test_the_speak_route_is_the_one_that_reads_the_segments():
+    """Read inside the branch that sends them, so this cannot come back."""
+    body = _code(_fn("async function speakNow("))
+    assert "const parts = useV1 ? null : segments();" in body
+    assert "language: resolvedLanguage().code" in body
+
+
+def test_queue_it_anyway_queues_it():
+    """It cleared the warning and stopped, so a button that said "Queue it
+    anyway" was a Dismiss with someone else's label on it -- and the job it
+    named still had to be started from the button the warning was covering.
+    """
+    start = HTML.index('$("anyway").addEventListener')
+    body = _code(HTML[start:start + 400])
+    assert '$("go-tts").click();' in body
+
+
+def test_the_quick_voice_offered_is_one_the_picker_actually_has():
+    """nearestKokoro read the unfiltered list from /voices while the picker is
+    filtered by the Language control, so "Use af_heart instead" could assign a
+    value the <select> does not have -- which leaves it holding "" and sent
+    voice:"" to /speak.
+    """
+    body = _code(_fn("function nearestKokoro()"))
+    assert '$("voice").options' in body
+    assert "VOICES.kokoro" not in body
+
+
+def test_the_speak_button_is_off_when_it_would_do_nothing():
+    """The click handler opened with `if (voice.kind === "new") return;` and
+    `if (!text.trim() && !segments()) return;`, so pressing Speak with the
+    clone sheet open, or with an empty box, produced no audio, no error and no
+    sign that anything had been read at all.
+    """
+    body = _code(_fn("function estimate()"))
+    assert 'voice.kind === "new"' in body
+    assert "!(text.trim() || segments())" in body
+    # Not re-enabled under a request that is still running.
+    assert "speaking ||" in body
+
+
+def test_the_code_switch_note_points_at_a_control_that_is_there():
+    """It sends the reader to the segments editor, which is inside the Kokoro
+    panel and greyed out on /v1 -- so for a cloned voice, and on that route, it
+    was advice pointing at a control that is not on the screen."""
+    body = _code(_fn("function codeSwitchNote(text)"))
+    assert 'const editor = !$("tts-expert-fast").hidden && !$("addseg").disabled;' in body
+    assert "pt && en && editor" in body
+
+
+def test_cancelling_the_clone_sheet_drops_the_resolved_link():
+    """/ui/resolve calls MeTube's /add before it probes, so every link resolved
+    and then dropped leaves a pending record behind -- which is why the
+    transcribe tab has abandon(). Cancel closed the sheet and left the token,
+    the record and the filled-in box exactly where they were.
+    """
+    start = HTML.index('$("cancelclip").addEventListener')
+    body = _code(HTML[start:HTML.index("});", start)])
+    assert "forgetClipLink()" in body
+    assert '$("cliplink").value = "";' in body
+    assert '"/ui/abandon"' in _fn("async function forgetClipLink()")
