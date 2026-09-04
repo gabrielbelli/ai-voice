@@ -240,6 +240,28 @@ class Synth:
         contributes its pause and no audio, and a request of nothing but
         pauses returns zeros(0) rather than raising, exactly as this did.
         """
-        return splice([(self.speak(text, voice, language, speed)
-                        if text.strip() else None, pause_after)
-                       for text, pause_after, voice in segments])
+        pieces = [splice([(self.speak(text, voice, language, speed)
+                           if text.strip() else None, pause_after)])
+                  for text, pause_after, voice in segments]
+        return (np.concatenate(pieces) if pieces
+                else np.zeros(0, dtype=np.float32)), _offsets(pieces)
+
+
+def _offsets(pieces: list[np.ndarray]) -> list[float]:
+    """Where each segment STARTS, in seconds, from the samples it produced.
+
+    Exact, not estimated. Each segment is synthesised and spliced on its own
+    above, so its length is known at the moment it is made -- the running total
+    is the boundary. This is the number a client needs to follow the text as it
+    plays, and it was being computed and thrown away.
+
+    duration x (characters so far / characters total) is the alternative and it
+    is wrong from the first sentence: the inserted pause after a segment is a
+    fixed number of seconds regardless of its length, and speech rate moves
+    with punctuation.
+    """
+    out, running = [], 0
+    for piece in pieces:
+        out.append(round(running / SAMPLE_RATE, 3))
+        running += piece.size
+    return out

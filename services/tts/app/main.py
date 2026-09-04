@@ -423,9 +423,10 @@ def speak(req: SpeakRequest) -> Response:
         segments.append((segment.text, segment.pause_after, seg_voice))
 
     started = time.monotonic()
+    offsets: list[float] = []
     try:
         if segments:
-            audio = synth.speak_segments(segments, language, req.speed)  # type: ignore[attr-defined]
+            audio, offsets = synth.speak_segments(segments, language, req.speed)  # type: ignore[attr-defined]
         else:
             audio = synth.speak(req.text or "", voice, language, req.speed)  # type: ignore[attr-defined]
     except Exception as exc:  # noqa: BLE001 - the client needs the reason
@@ -444,7 +445,19 @@ def speak(req: SpeakRequest) -> Response:
     log.info("%.1fs audio in %.2fs (%.1fx) voice=%s",
              duration, compute, duration / compute if compute else 0.0, voice)
 
-    return Response(content=data, media_type=mime, headers=_headers(duration, compute))
+    headers = _headers(duration, compute)
+    if offsets:
+        # WHERE EACH SEGMENT STARTS, so a client can follow the text as it
+        # plays. In a header because the body is audio and there is nowhere
+        # else to put it without inventing a second response shape for a
+        # route that has clients.
+        #
+        # Offsets only, not the text: the caller sent the segments and knows
+        # them in order, so repeating them would be the request echoed back.
+        # Three decimals is a millisecond, and ~7 bytes a segment keeps a
+        # hundred-segment reading well inside any header limit.
+        headers["X-Segment-Offsets"] = ",".join(f"{o:.3f}" for o in offsets)
+    return Response(content=data, media_type=mime, headers=headers)
 
 
 def _usage(input_tokens: int, samples: int) -> dict[str, int]:

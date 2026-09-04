@@ -474,6 +474,10 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
         <span class="spacer"></span>
         <button class="primary tight" id="go-tts" type="button">Speak</button>
       </div>
+      <!-- The spoken text, rendered so it can be highlighted. A <textarea>
+           cannot carry spans, so this is a read-only copy that appears with
+           the audio and follows it. -->
+      <div class="out karaoke" id="speaktext" hidden style="margin-top:12px"></div>
       <audio id="player" controls style="width:100%;margin-top:12px" hidden></audio>
       <div class="row" id="playrow" hidden style="margin-top:8px;align-items:center">
         <div class="tight">
@@ -1569,12 +1573,16 @@ function stopKaraoke() {
   karaoke.cues = null; karaoke.spans = []; karaoke.index = -1;
 }
 
-$("sttplayer").addEventListener("play", () => {
-  if (!karaoke.frame) karaoke.frame = requestAnimationFrame(tickKaraoke);
+/* BOTH PLAYERS DRIVE THE SAME ENGINE. karaoke.player is set when the cues are
+   built, so nothing here needs to know which tab is playing. */
+["sttplayer", "player"].forEach(id => {
+  $(id).addEventListener("play", () => {
+    if (!karaoke.frame) karaoke.frame = requestAnimationFrame(tickKaraoke);
+  });
+  /* Paused and seeked both move currentTime with no frame loop running. */
+  ["pause", "seeked", "ended", "timeupdate"].forEach(name =>
+    $(id).addEventListener(name, follow));
 });
-/* Paused and seeked both move currentTime with no frame loop running. */
-["pause", "seeked", "ended", "timeupdate"].forEach(name =>
-  $("sttplayer").addEventListener(name, follow));
 
 /* CLICK A WORD TO JUMP TO IT. Delegated, and bound once rather than per span:
    a transcript is thousands of spans and thousands of listeners is a real
@@ -2276,6 +2284,13 @@ async function speakNow(voice, text) {
     blob = await response.blob();
   }
 
+  /* FOLLOW THE TEXT AS IT PLAYS. X-Segment-Offsets carries where each segment
+     starts, in seconds -- exact, because tts-stack synthesises and splices one
+     segment at a time and knows each one's length as it makes it. Offsets
+     only: this page sent the segments and has them in order, so returning the
+     text too would be the request echoed back. */
+  speakCues(parts, text, response.headers.get("x-segment-offsets"));
+
   const meta = [];
   const rtf = response.headers.get("x-realtime-factor");
   if (rtf) meta.push(Number(rtf).toFixed(1) + "× realtime");
@@ -2313,6 +2328,42 @@ async function collectSSE(response, format) {
     }
   }
   return new Blob(chunks, { type: "audio/" + (format === "mp3" ? "mpeg" : format) });
+}
+
+/* Builds the highlight for the Speak tab, from the segments this page sent and
+   the offsets the service returned.
+
+   NOT word level, and that is not a shortcut. A segment boundary is a fact the
+   synthesiser knows -- it made that piece of audio and measured it. A word
+   boundary inside a segment is not: it would need forced alignment, and
+   dividing a segment's duration by its word count is the drifting estimate
+   this feature exists to avoid. Following sentences and paragraphs is what was
+   asked for and what is honest. */
+function speakCues(parts, plain, header) {
+  stopKaraoke();
+  $("speaktext").hidden = true;
+  if (!header) return;
+  const offsets = header.split(",").map(Number).filter(n => !Number.isNaN(n));
+  const texts = parts && parts.length ? parts.map(p => p.text || "") : [plain || ""];
+  if (offsets.length !== texts.length) return;
+
+  /* Joined the way it reads, not the way it was sent: a blank line between
+     segments preserves the paragraphs someone typed instead of running them
+     into one block. */
+  const sep = "\n\n";
+  const cues = [];
+  let at = 0;
+  texts.forEach((t, i) => {
+    cues.push({ at, length: t.length,
+                start: offsets[i],
+                end: i + 1 < offsets.length ? offsets[i + 1] : Infinity });
+    at += t.length + sep.length;
+  });
+  const display = texts.join(sep);
+  karaoke.cues = cues;
+  karaoke.player = $("player");
+  karaoke.spans = paint($("speaktext"), display, cues);
+  $("speaktext").hidden = false;
 }
 
 let lastAudio = null;

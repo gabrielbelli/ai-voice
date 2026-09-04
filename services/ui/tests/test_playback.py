@@ -367,3 +367,49 @@ def test_a_file_the_browser_cannot_decode_does_not_look_like_a_failure():
     handler = handler[:handler.index("\nlet lastTranscript")]
     assert "The transcript above is unaffected" in handler
     assert '$("sttplay").hidden = true' in handler
+
+
+# ------------------------------------- following the text on the Speak tab --
+
+
+def test_the_speak_tab_follows_the_text_now_that_offsets_exist():
+    """This was refused when the feature was built, and correctly: neither
+    engine returned timings, and duration x (chars so far / chars total) drifts
+    from the first sentence.
+
+    That is no longer true. Both synthesisers make one segment at a time and
+    know each one's length as they splice it, so the boundaries are exact --
+    they were simply computed and thrown away. tts-stack returns them in
+    X-Segment-Offsets and tts-long records them on the job.
+    """
+    assert "function speakCues(" in HTML
+    body = HTML[HTML.index("function speakCues("):]
+    body = body[:body.index("\n}\n")]
+    assert "x-segment-offsets" in HTML.lower()
+    assert 'karaoke.player = $("player")' in body
+
+
+def test_the_speak_highlight_is_segment_level_and_says_so():
+    """A segment boundary is a fact the synthesiser measured. A word boundary
+    inside one is not -- it would need forced alignment, and dividing a
+    segment's duration by its word count is the drifting estimate this avoids.
+    """
+    body = HTML[HTML.index("function speakCues("):]
+    head = HTML[:HTML.index("function speakCues(")]
+    comment = head[head.rindex("/*"):]
+    assert "forced alignment" in comment or "NOT word level" in comment
+
+
+def test_paragraphs_survive_into_the_highlight():
+    """Segments are joined the way they read, not the way they were sent."""
+    body = HTML[HTML.index("function speakCues("):]
+    body = body[:body.index("\n}\n")]
+    assert 'const sep = "\\n\\n"' in body
+
+
+def test_a_mismatched_offset_count_is_ignored_rather_than_guessed():
+    """Fewer offsets than segments would silently misalign every highlight
+    after the gap, which is worse than showing none."""
+    body = HTML[HTML.index("function speakCues("):]
+    body = body[:body.index("\n}\n")]
+    assert "offsets.length !== texts.length" in body

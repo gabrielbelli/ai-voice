@@ -268,18 +268,38 @@ def _run(synth: Synth, job: dict) -> None:
             # waits ten minutes in the queue.
             encoder = make_encoder(job["format"])
 
+        # WHERE EACH SEGMENT STARTS, accumulated as it is made. speak_segments
+        # synthesises and splices one segment at a time and hands each piece
+        # here, so its length is known at that moment and the running total is
+        # an EXACT boundary -- not duration x (chars so far / chars total),
+        # which is wrong from the first sentence because the pause after a
+        # segment is a fixed number of seconds regardless of its length.
+        #
+        # These were being computed and discarded. Recording them is what lets
+        # a client follow the text as the audio plays.
+        offsets: list[float] = []
+        samples = 0
+
         def on_chunk(piece) -> None:  # noqa: ANN001 - numpy array
+            nonlocal samples
+            offsets.append(round(samples / SAMPLE_RATE, 3))
+            samples += piece.size
             if encoder is None or stream is None:
                 return
             data = encoder.write(piece)
             if data:
                 stream.put("delta", data)
 
+        # ALWAYS passed now, not only when streaming. It used to be handed over
+        # `if stream is not None`, so a job collected from /jobs -- which is
+        # most of them, since Chatterbox is minutes of compute -- produced no
+        # boundaries at all.
         spoken = synth.speak_segments(
             job["segments"], job["language"], job["exaggeration"],
             job["cfg_weight"], job["temperature"], job["reference"],
-            on_chunk=on_chunk if stream is not None else None,
+            on_chunk=on_chunk,
             cancelled=lambda: bool(job["cancelled"]))
+        job["offsets"] = offsets
         compute = time.monotonic() - started
 
         if encoder is not None and stream is not None:

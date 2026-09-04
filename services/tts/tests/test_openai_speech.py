@@ -68,6 +68,29 @@ class FakeSynth:
     def token_count(self, chunks: list[str]) -> int:
         return sum(len(chunk) for chunk in chunks)
 
+    def speak(self, text: str, voice: str, language: str, speed: float):
+        """The unsegmented path. The fake had only speak_chunk, so a plain
+        `text` request 500'd with "no attribute 'speak'" -- invisible until a
+        test asked for one."""
+        return self.speak_chunk(text, voice, language, speed)
+
+    def speak_segments(self, segments, language: str, speed: float):
+        """Mirrors the real one's shape: audio, and where each segment starts.
+
+        The route reads the second value into the X-Segment-Offsets header, so
+        a fake that returned only audio would make that header untestable."""
+        from app.synth import _offsets
+
+        pieces = []
+        for text, pause_after, voice in segments:
+            audio = (self.speak_chunk(text, voice, language, speed)
+                     if text.strip() else np.zeros(0, dtype=np.float32))
+            pad = np.zeros(int(pause_after * 24_000), dtype=np.float32)
+            pieces.append(np.concatenate([audio, pad]))
+        joined = (np.concatenate(pieces) if pieces
+                  else np.zeros(0, dtype=np.float32))
+        return joined, _offsets(pieces)
+
     def speak_chunk(self, phonemes: str, voice: str, language: str,
                     speed: float) -> np.ndarray:
         self.calls.append(phonemes)
@@ -584,3 +607,60 @@ def test_the_response_closes_its_generator_when_the_client_hangs_up() -> None:
         "the generator was left suspended, so the encoder it owns lives until "
         "the cyclic collector runs — which on an idle service can be minutes, "
         "or never")
+
+
+# ---------------------------------------------- following the text ------
+
+
+def test_segment_offsets_are_exact_not_estimated():
+    """Each segment is synthesised and spliced on its own, so its length is
+    known at the moment it is made and the running total is a real boundary.
+
+    The alternative -- duration x (characters so far / characters total) -- is
+    wrong from the first sentence: the pause after a segment is a fixed number
+    of seconds regardless of its length, and speech rate moves with
+    punctuation. A highlight built on that drifts away from the audio.
+    """
+    import numpy as np
+
+    from app.synth import _offsets
+    from voice_common.audio import SAMPLE_RATE
+
+    pieces = [np.zeros(2 * SAMPLE_RATE), np.zeros(SAMPLE_RATE // 2),
+              np.zeros(3 * SAMPLE_RATE)]
+    assert _offsets(pieces) == [0.0, 2.0, 2.5]
+
+
+def test_a_pause_only_segment_still_advances_the_clock():
+    """An empty segment contributes its silence and no speech. The next
+    segment starts after that silence, not at the same moment."""
+    import numpy as np
+
+    from app.synth import _offsets
+    from voice_common.audio import SAMPLE_RATE
+
+    assert _offsets([np.zeros(SAMPLE_RATE), np.zeros(3 * SAMPLE_RATE // 4)]) \
+        == [0.0, 1.0]
+
+
+def test_speak_returns_the_offsets_in_a_header(client):
+    """The body is audio, so there is nowhere else to put them without
+    inventing a second response shape for a route that has clients."""
+    response = client.post("/speak", json={
+        "segments": [{"text": "One."}, {"text": "Two."}], "format": "wav"})
+    assert response.status_code == 200, response.text
+    header = response.headers.get("x-segment-offsets")
+    assert header, "no offsets returned"
+    offsets = [float(x) for x in header.split(",")]
+    assert len(offsets) == 2
+    assert offsets[0] == 0.0
+    assert offsets[1] > 0, "the second segment cannot start at zero"
+
+
+def test_a_plain_text_request_gets_no_offsets(client):
+    """One segment is one highlight covering everything, which is worse than
+    none: it says the page knows where the words are when it does not."""
+    response = client.post("/speak", json={"text": "Just a sentence.",
+                                           "format": "wav"})
+    assert response.status_code == 200, response.text
+    assert "x-segment-offsets" not in response.headers
