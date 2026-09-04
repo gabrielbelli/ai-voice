@@ -450,6 +450,17 @@ async def page() -> Response:
     the syscall.
     """
     return HTMLResponse(PAGE.read_text(encoding="utf-8"), headers={
+        # NEVER CACHED. The page carried no Cache-Control at all, so browsers
+        # applied their own heuristic and served a stale copy -- a control
+        # added and deployed was reported as missing, and the diagnosis went
+        # through the markup, the boot order and the route table before
+        # reaching the cache.
+        #
+        # There is nothing to gain by caching it. It is one file from a local
+        # disk on a LAN, re-read per request by design (see above), and its
+        # whole content changes on every deploy. must-revalidate rather than
+        # no-store so a reload can still be a 304 if that is ever added.
+        "cache-control": "no-cache, must-revalidate",
         # The page makes requests to its own origin and nowhere else -- no CDN,
         # no external font, no analytics -- so the policy can say exactly that,
         # and it keeps working on a NAS with no internet.

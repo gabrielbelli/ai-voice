@@ -356,3 +356,21 @@ def test_the_page_may_load_media_from_its_own_origin(client):
     directive = [d.strip() for d in policy.split(";") if d.strip().startswith("media-src")]
     assert directive, "there is no media-src at all, so default-src decides"
     assert "'self'" in directive[0], directive
+
+
+def test_the_page_is_never_cached(client):
+    """It carried no Cache-Control at all, so browsers applied their own
+    heuristic and served a stale copy. A control that had been added and
+    deployed was reported as missing, and the diagnosis went through the
+    markup, the boot order and the route table before reaching the cache.
+
+    There is nothing to gain by caching it: one file from a local disk on a
+    LAN, re-read per request by design, and its whole content changes on every
+    deploy.
+    """
+    api, _, _ = client()
+    for path in ("/ui", "/"):
+        response = api.get(path, follow_redirects=True)
+        assert response.status_code == 200
+        cache = response.headers.get("cache-control", "")
+        assert "no-cache" in cache, f"{path} served with cache-control={cache!r}"
