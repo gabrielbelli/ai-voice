@@ -375,3 +375,141 @@ def test_an_untrimmed_clip_import_still_re_adds(client):
     assert adds[-1]["format"] == "wav"
     assert not any(path == "/start" for path, _ in tube.calls), \
         "a clip import must re-add rather than start the opus item"
+
+
+# ------------------------------------------------------------ captions --
+#
+# "This has real subtitles already" on the confirm card asks MeTube for
+# download_type "captions", which sets yt-dlp's skip_download and produces a
+# .vtt or .srt and no media at all. Every test below exists because that file
+# used to be streamed into /v1/audio/transcriptions, where stt-stack was handed
+# a text file and asked to decode it as media.
+
+VTT = ("WEBVTT\n\n"
+       "00:00:01.000 --> 00:00:03.500\n"
+       "The first line.\n\n"
+       "00:00:03.500 --> 00:00:06.000\n"
+       "And the second.\n")
+
+
+def finished_captions(tube, url, filename="A Title.en.vtt", body=VTT):
+    tube.finish(url, filename=filename)
+    tube.content = body.encode()
+
+
+def test_a_captions_download_is_never_handed_to_the_transcriber(client):
+    """THE BUG. /ui/fetch took whatever `filename` MeTube reported and streamed
+    it into /v1/audio/transcriptions, so a subtitle file reached a service whose
+    next move is to hand the bytes to libav. The button on the confirm card
+    could not work, and the failure surfaced two services away as a decode
+    error about a file the user never saw.
+    """
+    api, gateway, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    api.post("/ui/commit", json={"token": URL, "captions": True})
+    finished_captions(tube, URL)
+
+    before = len(gateway.seen)
+    response = api.post("/ui/fetch", json={"token": URL})
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "not_media"
+    assert len(gateway.seen) == before, \
+        "a subtitle file reached the gateway; that is the whole bug"
+
+
+def test_captions_come_back_as_text_and_nothing_is_transcribed(client):
+    """The point of the button: about two seconds and no compute at all.
+
+    A video with human-written subtitles already has a transcript attached to
+    it. Transcribing it would be paying minutes of Parakeet to reproduce, less
+    accurately, a file we are already holding.
+    """
+    api, gateway, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    api.post("/ui/commit", json={"token": URL, "captions": True})
+    finished_captions(tube, URL)
+
+    before = len(gateway.seen)
+    body = api.post("/ui/captions", json={"token": URL}).json()
+    assert body["format"] == "vtt"
+    assert body["text"] == VTT
+    assert not [r for r in gateway.seen[before:]
+                if r.url.path == "/v1/audio/transcriptions"]
+
+
+def test_subrip_is_reported_as_subrip(client):
+    """The two suffixes are the only thing in the /history entry that tells a
+    captions download from an audio one, and the page needs it for the
+    extension the Download button writes."""
+    api, _, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    finished_captions(tube, URL, filename="A Title.en.srt", body="1\n")
+    assert api.post("/ui/captions", json={"token": URL}).json()["format"] == "srt"
+
+
+def test_captions_refuses_a_media_download(client):
+    """The mirror of the guard in fetch(). Returning a few megabytes of opus as
+    if it were text is a worse answer than saying which route to use."""
+    api, _, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    api.post("/ui/commit", json={"token": URL})
+    tube.finish(URL, filename="A Title.opus")
+    response = api.post("/ui/captions", json={"token": URL})
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "not_captions"
+
+
+def test_a_subtitle_file_beside_the_video_is_still_found(client):
+    """AUDIO_DOWNLOAD_DIR defaults to "%%DOWNLOAD_DIR" and is unset here, so
+    /download/ and /audio_download/ are one directory and everything is found
+    first time. A deployment that sets them apart puts the .vtt beside the
+    VIDEO -- skip_download writes it there -- and the first URL 404s.
+
+    Without the fallback that is a 502 whose cause is a setting in somebody
+    else's application, which is the same shape as the missing folder segment
+    that 404'd every download this service ever started.
+    """
+    api, _, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    finished_captions(tube, URL)
+    tube.served_from = "video"
+    body = api.post("/ui/captions", json={"token": URL}).json()
+    assert body["text"] == VTT
+
+
+def test_captions_missing_from_both_directories_is_a_502_not_an_empty_pane(client):
+    api, _, tube = client()
+    api.post("/ui/resolve", json={"url": URL})
+    finished_captions(tube, URL)
+    tube.served_from = "nowhere"
+    response = api.post("/ui/captions", json={"token": URL})
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "ingestion_unavailable"
+
+
+def test_something_the_size_of_media_is_refused_however_it_is_named(client):
+    """A name ending .vtt is not a promise about the size behind it, and this
+    route buffers rather than streams. compose.yaml gives this service
+    mem_limit: 384m, so the unbounded version fails as an OOM kill rather than
+    as a message -- the same trap as the clip route's, documented at
+    config.MAX_CLIP_BYTES."""
+    api, _, tube = client(UI_MAX_CAPTION_BYTES="1024")
+    api.post("/ui/resolve", json={"url": URL})
+    finished_captions(tube, URL, body="x" * 4096)
+    response = api.post("/ui/captions", json={"token": URL})
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "captions_too_large"
+
+
+def test_captions_on_an_unfinished_download_is_a_409(client):
+    api, _, _ = client()
+    api.post("/ui/resolve", json={"url": URL})
+    assert api.post("/ui/captions", json={"token": URL}).status_code == 409
+
+
+def test_the_video_route_is_the_other_static_directory(client):
+    from app.metube import MeTube
+
+    tube = MeTube(None, base="http://metube.test")
+    assert tube.video_url("A Title.en.vtt", "stt-ingest") == (
+        "http://metube.test/download/stt-ingest/A%20Title.en.vtt")

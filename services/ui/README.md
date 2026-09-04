@@ -11,7 +11,7 @@ itself.
   voice-ui:8090  ──── + Authorization: Bearer <UI_GATEWAY_API_KEY> ────►
                                        voice-gateway:8080 ──► stt-stack / tts-stack / tts-long
         │
-        ├─ /ui/resolve /commit /abandon /progress /fetch ──► MeTube (by host address)
+        ├─ /ui/resolve /commit /abandon /progress /fetch /captions ──► MeTube (by host address)
         └─ /ui/clips                                     ──► the shared `voices` volume
 ```
 
@@ -217,6 +217,7 @@ blocked fetch.
 | A *rejected* add still creates a record, in `done` | Abandon clears both queues |
 | `DELETE_FILE_ON_TRASHCAN` defaults false and is unset here | `/delete where=done` clears the record and **leaves the file** — see cleanup below |
 | `AUDIO_DOWNLOAD_DIR` defaults to `%%DOWNLOAD_DIR`, unset here | `/download/` and `/audio_download/` are the same directory, which is why `UI_METUBE_FOLDER` is mandatory in effect |
+| `download_type:"captions"` sets yt-dlp's `skip_download` | What finishes is a `.vtt` or `.srt` and **no media**. The `/history` entry differs from an audio one in the filename and nothing else, which is why the suffix is what tells them apart |
 | `CORS_ALLOWED_ORIGINS` is empty | A browser **cannot** call MeTube at all. Every call is server-side from this container, which is the right shape anyway |
 
 **Cleanup is the one thing delegation does not solve.** Files accumulate in
@@ -226,6 +227,54 @@ the user's own trashcan button delete their music. Start with a TrueNAS cron
 pruning that directory by mtime. Move to a second, dedicated MeTube instance
 with its own dataset if ingest volume ever gets real. Do not silently pick the
 global flag.
+
+---
+
+## Subtitles instead of a transcription
+
+A video with **real, human-written subtitles already has a transcript**. The
+confirm card offers to take it, and `POST /ui/commit {captions:true}` asks
+MeTube for `download_type:"captions"` — yt-dlp then sets `skip_download`,
+fetches the subtitle track alone and writes a `.vtt` or `.srt`. About two
+seconds, no media, no Parakeet, and a better transcript than this stack would
+produce from the audio.
+
+**That path was broken, and this is what was wrong with it.** `/ui/fetch`
+streams whatever `filename` MeTube reported into
+`/v1/audio/transcriptions`, and there was no branch for a subtitle file. So the
+`.vtt` was handed to `stt-stack`, which passes its bytes to libav, which was
+being asked to decode a text file as media. The button on the card could not
+work as written, and the failure arrived two services away as a decode error
+about a file the user never saw.
+
+`POST /ui/captions` is the fix and the sibling of `/ui/fetch`: that route moves
+media it must never keep, this one returns a file that is already the answer,
+and it **calls nothing**. Both ends now refuse the other's input — `/ui/fetch`
+answers `409 not_media` for a `.vtt`/`.srt` filename and `/ui/captions` answers
+`409 not_captions` for media — so a page regression cannot put a subtitle file
+back on the wire to the transcriber.
+
+Three details worth having written down:
+
+- **The parsing happens in the browser.** The page already has a SubRip/WebVTT
+  parser for the karaoke highlight (`CUE_LINE`, `parseSubtitles`), and a second
+  one in Python would be two implementations that must agree about what a cue
+  is, in two languages, with only one of them tested. The route reads bytes and
+  decides nothing about them.
+- **Two static directories, and only accidentally one.** MeTube serves
+  `DOWNLOAD_DIR` at `/download/` and `AUDIO_DOWNLOAD_DIR` at
+  `/audio_download/`; the latter defaults to `%%DOWNLOAD_DIR` and is unset
+  here, so today both resolve to the same place. A captions download is the one
+  file that would not follow if they were ever set apart — `skip_download`
+  writes it beside the *video* — so `/ui/captions` tries the audio route first
+  and falls back to the video one, one extra request only on the path that has
+  already 404'd.
+- **The format asked for is the format written.** yt-dlp writes WebVTT unless
+  told otherwise, so someone who chose SubRip would otherwise get a file named
+  `.srt` with WebVTT inside it, and someone who chose Text — the default, and
+  why most people press that button — would get timecodes. The pane, the
+  Download button and the two sidecar buttons are all rendered from one parse,
+  so they cannot disagree about a cue.
 
 ---
 
@@ -393,7 +442,8 @@ on this path.
 | Transcribe — **file upload** | Yes: the `File`, or the 16 kHz WAV the page decoded from it | `verbose_json` `words[]`, falling back to `segments[]` | **Word by word** |
 | Transcribe — upload, **SRT/VTT** output | Yes | The cue times in the file itself | **Cue by cue** |
 | Transcribe — **link** | No | *(available, unused)* | None, and the page says why |
-| Transcribe — **captions** | No | — | None |
+| Transcribe — **captions** | No | The cue times in the subtitle file | None to follow, but the sidecar writes them |
+| Transcribe — **video upload** | Yes, the file itself | `words[]` for the pane, `segments[]` for the band | **Word by word, and a caption over the picture** |
 | Speak — Kokoro | Yes | **None exist** | None |
 | Jobs — Chatterbox | Yes | **None exist** | None |
 
@@ -464,6 +514,60 @@ effect. Clicking a word seeks to it; words are deliberately not focusable,
 because several thousand tab stops between the player and the Download button
 is a worse keyboard experience than not having the shortcut, and the audio
 element's own controls already reach any point in the file.
+
+### The video player, and the sidecar that stands in for burn-in
+
+A file dropped in with a picture in it plays in a `<video>` rather than an
+`<audio>`, with the transcript over it. Two scales of one cue list:
+
+| | Source | Where it is drawn |
+|---|---|---|
+| **Highlight** | `verbose_json` `words[]` | Word by word in the transcript pane |
+| **Caption band** | the same response's `segments[]` | A line over the bottom of the picture |
+
+They are two scales rather than two sources, so the band costs **nothing extra
+on the wire** — the upload path already asks for both granularities, because
+`segment` is the fallback when a glossary rule spanning two words means the
+words stop reconstructing the line. One word at a time over a picture is
+unreadable and a subtitle is the unit a viewer's eye is trained on, which is
+the whole reason the band is not simply the highlight moved upwards.
+
+The element is given the **original file, never `prepared`** — that is the
+16 kHz mono WAV the page decoded for the upload and it has no picture in it.
+The timings still line up because `toWav` is called from `pick()` with no
+`maxSeconds` and no `startAt`, so both are a whole-file decode on one timeline.
+`canPlayType` decides, not the MIME prefix: `decodeAudioData` reads Matroska
+that the same browser will not render, and when it is wrong anyway the video's
+error handler falls back to the audio element and keeps the transcript, the
+highlight and the sound. Only the picture and the band are lost, and they are
+what could not work.
+
+The band's colours are **fixed white-on-black in both themes**, which is the one
+place on this page that ignores the tokens. It sits over a picture, so the
+page's background says nothing about what it needs to be readable against; the
+plate is opaque for the same reason.
+
+**Nothing is burnt in, and that was chosen rather than deferred.** Burn-in
+means ffmpeg in this image — the Containerfile says twice that there is none —
+and a full re-encode of the media to produce a caption track every player
+already reads, plus a second copy of the file. The **`.srt` and `.vtt` buttons
+beside Download** are the other half of that trade: a sidecar is loaded by VLC,
+mpv, QuickTime, every television and every upload form, it stays editable, and
+it costs about thirty lines. They are hidden rather than disabled when the
+response carried no timings, because on the native route and on a plain `json`
+response there are none and there is nothing the user could do about it.
+
+The sidecar and the parser are the two halves of one round trip — a file this
+page writes and could not read back would break the highlight for anyone who
+saved a transcript and dropped it in again — and `tests/test_playback.py`
+asserts a written cue line still matches `CUE_LINE`.
+
+**Links still get no player**, and the result card still says so. `/ui/fetch`
+streams MeTube's file into the gateway server-side and the browser never
+receives a byte; a player for a link would mean a route serving media down to
+the laptop, which is the one thing that architecture exists to avoid. The
+sidecar buttons work there anyway, which is most of what a player was wanted
+for: drop the `.srt` next to your own copy of the video.
 
 ---
 
@@ -572,6 +676,7 @@ Every variable is optional and every default degrades rather than fails.
 | `UI_PROBE` | on | `0` removes yt-dlp from the running system; the card degrades to a title |
 | `UI_PROBE_TIMEOUT` | `20` | Hard kill, not a suggestion |
 | `UI_MAX_UPLOAD_BYTES` | 2 GiB | Checked on `Content-Length` before a byte is forwarded |
+| `UI_MAX_CAPTION_BYTES` | 8 MiB | `/ui/captions` buffers rather than streams. An hour of dialogue is ~100 KB; this catches a file that is not subtitles |
 | `UI_CONFIRM_SECONDS` | `600` | Below this **and** the size threshold, no dialog |
 | `UI_CONFIRM_BYTES` | 50 MiB | The second gate, not an alternative |
 | `UI_STT_RTF` | `8.5` | The conservative seed. The page measures its own |

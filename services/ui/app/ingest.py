@@ -5,6 +5,7 @@
     POST /ui/abandon   MeTube /delete from BOTH queues, then verify
     GET  /ui/progress  MeTube /history, as percent / speed / eta
     POST /ui/fetch     MeTube's file -> multipart -> gateway -> stt-stack
+    POST /ui/captions  MeTube's .vtt/.srt -> the page. NO stt CALL AT ALL
 
 NOTHING IS DOWNLOADED BEFORE THE USER SAYS SO, which is the requirement the
 user pressed hardest on. `auto_start:false` on /add resolves the URL and parks
@@ -57,6 +58,14 @@ log = logging.getLogger("voice-ui.ingest")
 # and kept as a set rather than a regex because the whole vocabulary is five
 # words -- see the interpolation guard in fetch() for why it is checked at all.
 RESPONSE_FORMATS = frozenset({"json", "text", "srt", "vtt", "verbose_json"})
+
+# What a captions download leaves behind. yt-dlp writes WebVTT by default and
+# SubRip when it is asked for one, and MeTube passes the choice through -- so
+# these two suffixes are how a finished record is told apart from a media one
+# WITHOUT asking MeTube what it was, which it does not record: the /history
+# entry for a captions download and for an audio download differ in the
+# filename and in nothing else. That is why the check below is on the suffix.
+CAPTION_SUFFIXES = (".vtt", ".srt")
 
 router = APIRouter()
 
@@ -427,6 +436,108 @@ async def clip_from_link(request: Request, body: ClipFromLink) -> Response:
                     content=_json({"voice": saved, "voices": clips.listing()}))
 
 
+@router.post("/ui/captions")
+async def captions(request: Request, body: TokenRequest) -> Response:
+    """Hand a finished captions download to the page as text.
+
+    THE SIBLING OF /ui/fetch, AND IT CALLS NOTHING. That route exists to move
+    media it must never keep; this one returns a file that is already the
+    answer. A video with real, human-written subtitles has a transcript
+    attached to it, MeTube's captions type fetches only that track -- yt-dlp
+    sets skip_download, so no media stream is pulled -- and it costs about two
+    seconds and no transcription at all. Sending it on to stt would be paying
+    minutes of compute to reproduce, worse, a file we already hold.
+
+    IT IS RETURNED VERBATIM AND PARSED IN THE BROWSER. The page already has a
+    SubRip/WebVTT parser for the karaoke highlight -- CUE_LINE and
+    parseSubtitles in ui.html -- and a second one here would be two parsers
+    that must agree about a cue, in two languages, with only one of them
+    tested. So this route reads bytes and decides nothing about them.
+    """
+    client = _client(request)
+    try:
+        found = await client.find(body.token)
+    except metube.MeTubeError as exc:
+        return _unavailable(exc)
+    if found is None:
+        return error_response(404, "MeTube has no record of that link.",
+                              code="unknown_token", param="token")
+
+    where, entry = found
+    filename = entry.get("filename")
+    if where != "done" or entry.get("status") != metube.FINISHED or not filename:
+        return error_response(
+            409, f"that download is {entry.get('status') or where}, not finished",
+            code="not_ready", param="token")
+
+    # The mirror of the guard in fetch(): media here would mean the page asked
+    # the wrong route, and returning a few megabytes of opus as if it were text
+    # is a worse answer than saying so.
+    name = str(filename)
+    if not name.lower().endswith(CAPTION_SUFFIXES):
+        return error_response(
+            409,
+            "That download is media, not subtitles. Transcribe it with POST "
+            "/ui/fetch.",
+            code="not_captions", param="token")
+
+    http: httpx.AsyncClient = request.app.state.client
+    folder = str(entry.get("folder") or "")
+    # /audio_download/ first because that is where everything lands on this
+    # deployment, then /download/ -- see MeTube.video_url for why a subtitle
+    # file is the one thing that can be in the other directory. The second
+    # request only ever happens after the first has 404'd.
+    last = ""
+    body_bytes: bytes | None = None
+    for source in (client.audio_url(name, folder), client.video_url(name, folder)):
+        try:
+            response = await http.get(source, timeout=30.0)
+        except httpx.HTTPError as exc:
+            return error_response(
+                502, f"could not read the subtitle file ({type(exc).__name__})",
+                type_="server_error", code="ingestion_unavailable")
+        if response.status_code == 404:
+            last = source
+            continue
+        if response.status_code >= 400:
+            return error_response(
+                502, f"MeTube answered {response.status_code} for the subtitle "
+                     f"file it reported",
+                type_="server_error", code="ingestion_unavailable")
+        # Bounded because this one is buffered rather than streamed: a subtitle
+        # track is on the order of 100 KB and there is nothing to stream it to,
+        # but a name ending .vtt is not a promise about the size behind it. See
+        # config.MAX_CAPTION_BYTES.
+        if len(response.content) > config.MAX_CAPTION_BYTES:
+            return error_response(
+                413,
+                f"that subtitle file is "
+                f"{len(response.content) / 1024**2:.1f} MB, which is not a "
+                f"subtitle file.",
+                code="captions_too_large", param="token")
+        body_bytes = response.content
+        break
+    if body_bytes is None:
+        return error_response(
+            502, f"MeTube reported {name} and then served it from neither "
+                 f"directory (last tried {last}).",
+            type_="server_error", code="ingestion_unavailable")
+
+    return Response(media_type="application/json", content=_json({
+        "token": body.token,
+        "filename": name,
+        # Which of the two the page is holding. It decides the extension the
+        # Download button writes; the parser reads both from one pattern,
+        # because stt's own _clock() writes both from one function.
+        "format": "srt" if name.lower().endswith(".srt") else "vtt",
+        # errors="replace", not "strict". yt-dlp writes UTF-8, but one bad byte
+        # in a forty-minute subtitle track would otherwise be a 500 for a file
+        # that is 99.99% readable, and a lozenge in one word is the better
+        # failure by a wide margin.
+        "text": body_bytes.decode("utf-8", "replace"),
+    }))
+
+
 @router.post("/ui/fetch")
 async def fetch(request: Request, body: TokenRequest) -> Response:
     """Stream MeTube's finished file into the gateway's transcription route.
@@ -453,6 +564,25 @@ async def fetch(request: Request, body: TokenRequest) -> Response:
         return error_response(
             409, f"that download is {entry.get('status') or where}, not finished",
             code="not_ready", param="token")
+
+    # THE BUG THIS ROUTE SHIPPED WITH, and the reason the guard is here rather
+    # than only in the page. POST /ui/commit {captions:true} asks MeTube for
+    # download_type "captions", which sets yt-dlp's skip_download and produces
+    # a .vtt or .srt and no media. This route then took whatever `filename`
+    # came back and streamed it into /v1/audio/transcriptions, so stt-stack was
+    # handed a text file and asked to decode it as media. The confirm card's
+    # "This has real subtitles already" button could not work, and the failure
+    # arrived as a decode error from two services away.
+    #
+    # A captions download is ALREADY a transcript. It is read by /ui/captions
+    # below and never transcribed, which is the entire point of offering it:
+    # about two seconds and no compute at all.
+    if str(filename).lower().endswith(CAPTION_SUFFIXES):
+        return error_response(
+            409,
+            "That download is subtitles, not media. Read it with POST "
+            "/ui/captions -- it is already a transcript.",
+            code="not_media", param="token")
 
     # NEVER PREDICTED. `filename` is OUTPUT_TEMPLATE sanitised and byte-trimmed
     # by MeTube; reconstructing it from the title is wrong for every title with

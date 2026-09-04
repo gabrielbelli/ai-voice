@@ -79,6 +79,16 @@ class FakeMeTube:
         # What finish() last wrote, so the static route can serve exactly it.
         self.filename: str = ""
         self.folder: str = ""
+        # What the static route hands back, so a test can serve a real WebVTT
+        # body rather than the audio placeholder.
+        self.content: bytes = b"RIFFfake-audio-bytes"
+        # WHICH OF MeTube'S TWO STATIC ROUTES HOLDS THE FILE. Both resolve to
+        # one directory on this deployment -- AUDIO_DOWNLOAD_DIR defaults to
+        # "%%DOWNLOAD_DIR" and is unset -- so the default is "both", which is
+        # the deployed shape. "video" stands in for a deployment that does set
+        # them apart, where a captions download is written beside the video and
+        # /audio_download/ 404s for it.
+        self.served_from: str = "both"
         # An OUTAGE rather than a refusal: MeTube unreachable, which must stay
         # a 502 now that a refusal is a 400. See
         # test_an_unreachable_metube_is_still_a_502.
@@ -95,7 +105,10 @@ class FakeMeTube:
                     "pending": list(self.pending.values()),
                     "queue": list(self.queue.values()),
                     "done": list(self.done.values())})
-            if path.startswith("/audio_download/"):
+            for route, offered in (("audio_download", ("both", "audio")),
+                                   ("download", ("both", "video"))):
+                if not path.startswith(f"/{route}/"):
+                    continue
                 # SERVES ONE EXACT PATH, and 404s on anything else, because the
                 # real one does. This used to answer 200 to any path under
                 # /audio_download/, which meant the suite could not tell a
@@ -103,10 +116,10 @@ class FakeMeTube:
                 # is exactly the bug that shipped: every real download 404'd
                 # while 82 tests passed. A fixture more permissive than the
                 # thing it stands in for tests nothing.
-                want = "/audio_download/" + "/".join(
+                want = f"/{route}/" + "/".join(
                     part for part in (self.folder, self.filename) if part)
-                if unquote(path) == want:
-                    return httpx.Response(200, content=b"RIFFfake-audio-bytes")
+                if unquote(path) == want and self.served_from in offered:
+                    return httpx.Response(200, content=self.content)
                 return httpx.Response(404, text=f"not here; the file is at {want}")
             return httpx.Response(404)
 

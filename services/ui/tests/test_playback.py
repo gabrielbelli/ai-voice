@@ -81,7 +81,10 @@ def test_every_player_on_the_page_gets_a_speed_control():
     playing that back at 1.5x tells you nothing about whether Chatterbox can
     use it.
     """
-    ids = set(re.findall(r'<audio id="([a-z]+)"', HTML))
+    # <video> as well as <audio>, since the transcribe tab now has one. A
+    # video element that silently shipped without a rate control is the same
+    # gap this test was written for, wearing a different tag.
+    ids = set(re.findall(r'<(?:audio|video) id="([a-z]+)"', HTML))
     wired = set(re.findall(r'wirePlayer\(\$\("[a-z]+"\), \$\("([a-z]+)"\)\)', HTML))
     assert ids - wired == {"clippreview"}, (
         f"these players have no speed control: {sorted(ids - wired - {'clippreview'})}")
@@ -354,7 +357,8 @@ def test_the_link_path_says_why_there_is_nothing_to_play():
     two-hour podcast cost this laptop a transcript rather than 131 MB -- so the
     absence is explained rather than worked around.
     """
-    playback = body_of("function sttPlayback(display, cues)", "/* A file the browser")
+    playback = body_of("function sttPlayback(display, cues, lines)",
+                       "/* A file the browser")
     assert "$(\"sttwhy\").textContent = stt.token" in playback
     assert "never reaches this browser" in playback
 
@@ -413,3 +417,270 @@ def test_a_mismatched_offset_count_is_ignored_rather_than_guessed():
     body = HTML[HTML.index("function speakCues("):]
     body = body[:body.index("\n}\n")]
     assert "offsets.length !== texts.length" in body
+
+
+# ================================================ subtitles as transcript ==
+#
+# "This has real subtitles already" on the confirm card asks MeTube for
+# download_type "captions", which sets yt-dlp's skip_download and produces a
+# .vtt or .srt and no media. The page then sent that file to /ui/fetch, which
+# streams into /v1/audio/transcriptions -- so stt-stack was handed a text file
+# and asked to decode it as media. The button could not work as written, and
+# the failure surfaced two services away as a decode error.
+
+
+def test_a_captions_download_is_never_sent_to_the_transcriber():
+    """THE BUG, on the page side. watchDownload() called transcribeToken() for
+    every finished download, including the one that is already a transcript."""
+    watch = body_of("async function watchDownload()", "/* ------------------")
+    ready = watch[watch.index("if (state.ready)"):]
+    branch = ready[:ready.index("transcribeToken()")]
+    assert "if (stt.captions)" in branch, "there is no captions branch at all"
+    assert "captionsToken()" in branch, (
+        "the captions branch does not reach the route that reads subtitles")
+
+
+def test_the_captions_route_transcribes_nothing():
+    """The whole value of the button is that it costs about two seconds and no
+    compute. A captions path that still called stt would be slower than the
+    ordinary one, for a worse transcript."""
+    fn = code(body_of("async function captionsToken()", "\nfunction renderCaptions"))
+    assert '"/ui/captions"' in fn
+    for transcriber in ("/ui/fetch", "/v1/audio/transcriptions", "/transcribe"):
+        assert transcriber not in fn, f"the captions path reaches {transcriber}"
+
+
+def test_the_captions_flag_is_cleared_wherever_the_token_is():
+    """A stale `true` sends the NEXT link to /ui/captions, which answers 409
+    not_captions about a download that is perfectly fine."""
+    resets = HTML.count("stt.captions = false")
+    assert resets >= 3, (
+        f"only {resets} places clear it; pick(), abandon() and resolveLink() "
+        f"each set or clear the token and must each clear this")
+
+
+def test_text_was_asked_for_so_timecodes_are_not_what_comes_back():
+    """Text is the default and it is why most people press that button.
+
+    Handing back a WebVTT file with its cue numbers and arrows in it, because
+    that happens to be what yt-dlp wrote, is the page showing its plumbing.
+    """
+    fn = body_of("function renderCaptions(payload)", "\n$(\"go-stt\")")
+    assert 'lines.map(line => line.text).join("\\n")' in fn, (
+        "the prose branch is missing; the raw subtitle file reaches the pane")
+    assert 'const kind = !lines.length ? payload.format : verbatim ? wanted : "txt";' in fn
+
+
+def test_a_subtitle_format_that_was_asked_for_is_the_one_written():
+    """yt-dlp writes WebVTT unless told otherwise, so someone who chose SubRip
+    would otherwise get a file named .srt with WebVTT inside it."""
+    fn = body_of("function renderCaptions(payload)", "\n$(\"go-stt\")")
+    assert 'toSubtitles(lines, wanted === "vtt")' in fn
+
+
+def test_an_unparsable_caption_file_is_shown_rather_than_swallowed():
+    """A format this page's one pattern does not read is not a reason to draw
+    an empty pane over a file that plainly has words in it."""
+    fn = body_of("function renderCaptions(payload)", "\n$(\"go-stt\")")
+    assert "!lines.length ? payload.text" in fn
+
+
+def test_there_is_exactly_one_subtitle_parser():
+    """Three callers now want cues -- the highlight, the band and the sidecar.
+
+    A second implementation would be two parsers that must agree about what a
+    cue is, in the same file, with only one of them read by these tests.
+    """
+    uses = [n for n, line in enumerate(HTML.splitlines(), 1) if "CUE_LINE" in line]
+    # One declaration, one use inside parseSubtitles.
+    assert len(uses) == 2, f"CUE_LINE is read in {len(uses)} places: {uses}"
+    assert "CUE_LINE.exec" in body_of("function parseSubtitles(raw)",
+                                      "\nfunction timedFromSubtitles")
+
+
+# =========================================================== the overlay ==
+
+
+def test_a_video_upload_gets_a_video_element_and_not_only_sound():
+    """The ask was a player for the video with the transcript over it. An
+    <audio> cannot become a <video>, so both exist and one is shown."""
+    assert '<video id="sttvideo"' in HTML
+    playback = body_of("function sttPlayback(display, cues, lines)",
+                       "/* A file the browser")
+    assert 'const video = sttVideo();' in playback
+    assert '$("sttstage").hidden = !video;' in playback
+    assert '$("sttplayer").hidden = !!video;' in playback
+
+
+def test_the_video_plays_the_original_file_and_not_the_decoded_wav():
+    """`prepared` is the 16 kHz mono WAV this page made for the upload and it
+    has no picture in it. The timings still line up because toWav is called
+    from pick() with no maxSeconds and no startAt, so both are a whole-file
+    decode on one timeline -- which is what makes drawing one over the other
+    correct rather than approximately correct."""
+    fn = body_of("function sttVideo()", "\nlet sttUrl")
+    assert "const file = stt.file;" in fn
+    assert "stt.prepared" not in fn, "the video element is being given the WAV"
+    assert "canPlayType" in fn, (
+        "decodeAudioData reads containers the browser will not render, so the "
+        "MIME prefix alone is not the question being asked")
+
+
+def test_the_band_is_segment_level_and_the_highlight_stays_word_level():
+    """One word at a time over a picture is unreadable, and a subtitle is the
+    unit a viewer's eye is trained on. They are two scales of one cue list, not
+    two sources -- linesFromJson reads the segments verbose_json already
+    carries, so the band costs nothing extra on the wire."""
+    follow = code(body_of("function follow()", "/* requestAnimationFrame, not"))
+    assert "band(karaoke.player.currentTime);" in follow
+    assert "cueAt(karaoke.player.currentTime, karaoke.cues, 2)" in follow
+    band = code(body_of("function band(seconds)", "\nfunction follow()"))
+    assert "cueAt(seconds, karaoke.lines, 0.3)" in band, (
+        "the band uses the word-level tolerance, so a caption hangs into "
+        "silence over a picture that shows nothing is being said")
+
+
+def test_the_band_is_written_only_when_it_changes():
+    """follow() runs once a frame. Assigning textContent sixty times a second
+    for a line that turns over about once a sentence is a layout the browser
+    does not need to do."""
+    band = code(body_of("function band(seconds)", "\nfunction follow()"))
+    assert "if (index === karaoke.line) return;" in band
+
+
+def test_the_band_is_text_and_never_markup():
+    """It carries the transcript, which is the largest piece of remote data on
+    the page and the one with a real XSS in its history."""
+    band = code(body_of("function band(seconds)", "\nfunction follow()"))
+    assert '$("sttbandtext").textContent =' in band
+    assert "innerHTML" not in band
+
+
+def test_the_band_is_drawn_only_over_a_picture():
+    """Over an audio element it is a caption floating on nothing, saying what
+    the highlighted word three centimetres below it already says."""
+    playback = body_of("function sttPlayback(display, cues, lines)",
+                       "/* A file the browser")
+    assert "karaoke.lines = video && lines && lines.length ? lines : null;" in playback
+
+
+def test_stopping_the_highlight_also_clears_the_band():
+    """Otherwise the last caption of the previous file sits over the next one."""
+    stop = body_of("function stopKaraoke()", "/* BOTH PLAYERS DRIVE")
+    assert "karaoke.lines = null" in stop
+    assert '$("sttband").hidden = true;' in stop
+
+
+def test_the_video_element_drives_the_same_highlight_as_the_audio_one():
+    """karaoke.player is whichever element got the src, so nothing downstream
+    needs to know which of the two is playing."""
+    assert '["sttplayer", "sttvideo", "player"].forEach(id => {' in HTML
+    playback = body_of("function sttPlayback(display, cues, lines)",
+                       "/* A file the browser")
+    assert "karaoke.player = player;" in playback
+
+
+def test_a_video_the_browser_will_not_render_keeps_the_audio_and_the_words():
+    """canPlayType answers "maybe" for a great deal it then declines. Losing
+    the transcript and the follow-along as well as the picture would be three
+    things broken by one missing decoder."""
+    handler = body_of('$("sttvideo").addEventListener("error"', "\nlet lastTranscript")
+    assert "stt.noVideo = true;" in handler, "the fallback can loop"
+    assert "sttPlayback(lastPlayback.display" in handler
+
+
+def test_the_overlay_has_its_own_contrast_and_does_not_borrow_the_page_tokens():
+    """It sits over a picture, so the page's background token says nothing
+    about what it needs to be readable against. The plate is opaque for the
+    same reason."""
+    rule = HTML[HTML.index(".band span{"):]
+    rule = rule[:rule.index("}")]
+    assert "background:rgba(0,0,0,.74)" in rule and "color:#fff" in rule
+    assert "var(--" not in rule, "the caption is following the page theme"
+
+
+# ============================================================ the sidecar ==
+#
+# Burn-in was decided against: it means ffmpeg in this image and a full
+# re-encode to produce a caption track every player already reads. A .srt or
+# .vtt beside the file is what makes that decision livable.
+
+
+def _cue_pattern() -> re.Pattern:
+    found = re.search(r"const CUE_LINE = /\^(.*?)/;\n", HTML)
+    assert found, "ui.html has no CUE_LINE pattern"
+    return re.compile(found.group(1))
+
+
+def _stamp(seconds: float, comma: bool) -> str:
+    """The page's stamp(), transcribed. Kept in step by the test below."""
+    ms = round(max(0.0, seconds) * 1000)
+    return (f"{ms // 3600000:02d}:{ms // 60000 % 60:02d}:{ms // 1000 % 60:02d}"
+            f"{',' if comma else '.'}{ms % 1000:03d}")
+
+
+def test_the_page_stamp_matches_the_one_this_file_asserts_with():
+    """If ui.html's stamp() is changed, the parity check below must stop
+    agreeing with it rather than quietly testing a copy of the old one."""
+    fn = body_of("function stamp(seconds, comma)", "\nfunction toSubtitles")
+    assert "Math.round(Math.max(0, Number(seconds) || 0) * 1000)" in fn
+    assert 'comma ? "," : "."' in fn
+    for part in ("ms / 3600000, 2", "ms / 60000 % 60, 2",
+                 "ms / 1000 % 60, 2", "ms % 1000, 3"):
+        assert part in fn, f"stamp() no longer builds {part}"
+
+
+def test_a_written_cue_line_is_one_this_page_can_read_back():
+    """The sidecar and the parser are the two halves of one round trip: a file
+    this page writes and cannot then parse would break the karaoke highlight
+    for anyone who saved a transcript and dropped it back in."""
+    pattern = _cue_pattern()
+    for comma in (True, False):
+        line = f"{_stamp(3661.5, comma)} --> {_stamp(3663.25, comma)}"
+        assert pattern.match(line), f"{line!r} does not match CUE_LINE"
+    assert _stamp(3661.5, True).startswith("01:01:01,500")
+
+
+def test_subrip_is_numbered_and_webvtt_carries_its_header():
+    """A .vtt without WEBVTT on the first line is rejected outright by every
+    browser that loads it, and a .srt without cue numbers by several players."""
+    fn = body_of("function toSubtitles(lines, vtt)", "\nfunction saveText")
+    assert '(vtt ? "" : (i + 1) + "\\n")' in fn
+    assert '(vtt ? "WEBVTT\\n\\n" : "")' in fn
+
+
+def test_the_sidecar_is_hidden_rather_than_disabled_when_there_are_no_timings():
+    """On the native route and on a plain json response there are no timings at
+    all, and there is nothing the user could do about it -- so a disabled
+    button would be a promise the page cannot keep."""
+    fn = body_of("function offerSidecar(lines)", "\nfunction sidecarName")
+    assert '$("dl-srt").hidden = $("dl-vtt").hidden = !lastLines.length;' in fn
+    assert '<button class="small tight" id="dl-srt" type="button" hidden>' in HTML
+
+
+def test_every_path_that_draws_a_transcript_also_offers_the_sidecar():
+    """A transcript with timings and no way to save them as subtitles is the
+    feature half-built."""
+    for fn, ends in (("async function render(response, format, wanted)", '$("copy")'),
+                     ("function renderCaptions(payload)", '\n$("go-stt")')):
+        assert "offerSidecar(" in body_of(fn, ends), f"{fn} does not offer it"
+
+
+def test_the_sidecar_and_the_download_button_write_through_one_helper():
+    """Two object-URL lifetimes to get right rather than one is how the second
+    one leaks."""
+    assert HTML.count("function saveText(text, name, type)") == 1
+    assert HTML.count("URL.revokeObjectURL(url), 5000") == 1
+
+
+def test_no_burn_in_arrived_by_the_back_door():
+    """The overlay exists BECAUSE burn-in was rejected: it would mean ffmpeg in
+    this image and a re-encode of the whole file. The Containerfile says so in
+    two places and the requirements in one."""
+    root = Path(__file__).resolve().parents[1]
+    assert "ffmpeg" not in (root / "requirements.txt").read_text().replace(
+        "no ffmpeg", "").replace("its own ffmpeg", "")
+    container = (root / "Containerfile").read_text()
+    assert "install -y --no-install-recommends util-linux" in container, (
+        "the image installs something new; if it is a codec library the "
+        "no-burn-in decision has been undone")

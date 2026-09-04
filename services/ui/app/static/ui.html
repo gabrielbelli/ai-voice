@@ -202,6 +202,36 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
    under reduced-motion would remove the feature rather than calm it. The
    scroll that follows the highlight is separately made instant, in follow(). */
 @media (prefers-reduced-motion:reduce){ .cue.on{transition:none} }
+
+/* ---------------------------------------------------- video overlay -- */
+/* WHY THE TRANSCRIPT IS DRAWN OVER THE VIDEO AND NOT BURNT INTO IT. Burn-in
+   means ffmpeg in this image and a full re-encode of the file to add a caption
+   track every player already knows how to read -- minutes of CPU and a second
+   copy of the media, to produce something a .srt beside the file gives for
+   free. That was decided against explicitly, which is why the sidecar buttons
+   next to Download exist: they are the other half of this trade.
+
+   Not a <track> element either. A <track> wants a WebVTT URL, it cannot follow
+   the WORD-level highlight the pane below draws, and its rendering is the
+   browser's to style. This band and that pane are the same cue list seen at
+   two scales. */
+.stage{position:relative;background:#000;border-radius:8px;overflow:hidden;
+  line-height:0}
+.stage video{display:block;width:100%;max-height:58vh;background:#000}
+/* Clear of the native controls, which sit at the bottom of the element and are
+   about 40px tall everywhere. A caption the play button covers is a caption
+   nobody reads. */
+.band{position:absolute;left:0;right:0;bottom:48px;padding:0 6%;
+  text-align:center;pointer-events:none;line-height:1.35}
+/* WHITE ON BLACK IN BOTH THEMES, and that is not an oversight. This text sits
+   over a picture rather than over the page, so the page's tokens say nothing
+   useful about what it needs to be readable against -- the contrast partner is
+   whatever frame is behind it, which is why the plate is opaque rather than
+   the text merely coloured. box-decoration-break keeps the plate around each
+   wrapped line instead of one rectangle behind the whole block. */
+.band span{background:rgba(0,0,0,.74);color:#fff;font-size:15px;
+  padding:2px 8px;border-radius:4px;
+  -webkit-box-decoration-break:clone;box-decoration-break:clone}
 </style>
 </head>
 <body>
@@ -363,6 +393,13 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
         <span class="hint tight" id="result-meta"></span>
         <button class="small tight" id="copy" type="button">Copy</button>
         <button class="small tight" id="download" type="button">Download</button>
+        <!-- THE SIDECAR, and the reason no burn-in is livable. Every player
+             and every upload form takes a subtitle file next to the video, so
+             a .srt or a .vtt does the job a re-encode would have done, for
+             nothing. Hidden until the response carried timings, because
+             without them there is nothing to write. -->
+        <button class="small tight" id="dl-srt" type="button" hidden>.srt</button>
+        <button class="small tight" id="dl-vtt" type="button" hidden>.vtt</button>
       </div>
       <div class="note ok" id="repaired" hidden></div>
       <!-- PLAY-ALONG, and it is here rather than on the drop zone because it
@@ -370,6 +407,16 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
            entirely when the audio never reached this browser, which is every
            link and every set of captions -- see #sttwhy. -->
       <div id="sttplay" hidden style="margin-top:10px">
+        <!-- TWO ELEMENTS, ONE VISIBLE AT A TIME. A <video> cannot be an
+             <audio>, and the picture is the whole point when the file has
+             one: a dropped-in video plays here with the transcript over it,
+             and everything else falls through to the audio element exactly as
+             before. The band is a sibling rather than a child of <video>,
+             because nothing may be a child of <video>. -->
+        <div class="stage" id="sttstage" hidden>
+          <video id="sttvideo" controls playsinline></video>
+          <div class="band" id="sttband" hidden><span id="sttbandtext"></span></div>
+        </div>
         <audio id="sttplayer" controls style="width:100%"></audio>
         <div class="row" style="margin-top:6px;align-items:center">
           <div class="tight">
@@ -892,6 +939,13 @@ function wirePlayer(select, player) {
 }
 
 wirePlayer($("sttrate"), $("sttplayer"));
+/* ONE SELECT, TWO ELEMENTS, and deliberately not a second control. #sttplayer
+   and #sttvideo are the same slot on the same tab -- only one of them is ever
+   visible -- so a second speed picker would be a control that appears and
+   disappears depending on whether the file someone dropped had a picture in
+   it. setPlaybackRate walks `players` and sets both, which is what keeps the
+   rate from resetting when a video is swapped for an audio-only fallback. */
+wirePlayer($("sttrate"), $("sttvideo"));
 wirePlayer($("playrate"), $("player"));
 wirePlayer($("jobrate"), $("jobplayer"));
 
@@ -968,7 +1022,17 @@ async function toWav(file, targetRate, maxSeconds, startAt) {
 
 /* ==================================================== transcribe tab === */
 const stt = { file:null, prepared:null, rate:null, seconds:null, token:null,
-              facts:null, format:"text" };
+              facts:null, format:"text",
+              /* This link was committed as a captions download, so what
+                 finishes is a subtitle file and NOT media -- it is read with
+                 /ui/captions and never transcribed. Reset wherever token is,
+                 because a stale true would send the next link to the wrong
+                 route and get a 409 about a file that is fine. */
+              captions:false,
+              /* Set once the <video> has raised an error, so the fallback to
+                 the audio element cannot loop back into the element that just
+                 failed. */
+              noVideo:false };
 
 $("browse").addEventListener("click", () => $("file").click());
 $("file").addEventListener("change", () => { if ($("file").files[0]) pick($("file").files[0]); });
@@ -1036,6 +1100,7 @@ document.querySelectorAll("#fmt button").forEach(b => b.addEventListener("click"
 
 async function pick(file) {
   stt.file = file; stt.token = null; stt.prepared = null; stt.facts = null;
+  stt.captions = false; stt.noVideo = false;
   $("picked").hidden = false;
   $("picked").innerHTML = `<span class="filechip">${esc(file.name)}
     <span class="hint">${human(file.size)}</span>
@@ -1123,6 +1188,7 @@ async function resolveLink() {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ url }) });
     stt.facts = facts; stt.token = facts.token; stt.file = null; stt.prepared = null;
+    stt.captions = false;
     $("picked").hidden = false;
     $("picked").innerHTML = `<span class="filechip">${esc(facts.title)}
       <span class="hint">${facts.duration ? clock(facts.duration) : "duration unknown"}</span>
@@ -1144,7 +1210,8 @@ $("url").addEventListener("keydown", e => { if (e.key === "Enter") resolveLink()
 
 async function abandon() {
   const token = stt.token;
-  stt.token = null; stt.facts = null; $("picked").hidden = true;
+  stt.token = null; stt.facts = null; stt.captions = false;
+  $("picked").hidden = true;
   $("go-stt").disabled = true;
   if (!token) return;
   try {
@@ -1232,6 +1299,13 @@ $("c-go").addEventListener("click", () => {
 });
 
 async function startFetch(options) {
+  /* WHICH ROUTE READS THE FINISHED FILE. A captions commit asks MeTube for
+     download_type "captions", which sets yt-dlp's skip_download and produces a
+     .vtt or .srt and no media at all -- so what finishes is a transcript, not
+     something to transcribe. This flag is how watchDownload knows, and getting
+     it wrong is the bug this path shipped with: the subtitle file went to
+     /ui/fetch and was streamed into stt as if it were audio. */
+  stt.captions = !!(options && options.captions);
   note($("stt-note"), "flat", "Queued with MeTube…");
   try {
     await json("/ui/commit", {
@@ -1256,6 +1330,11 @@ async function watchDownload() {
       return;
     }
     if (state.ready) {
+      if (stt.captions) {
+        note(host, "ok", "Reading the subtitles…");
+        captionsToken();
+        return;
+      }
       note(host, "ok", "Downloaded. Transcribing…");
       transcribeToken();
       return;
@@ -1326,8 +1405,68 @@ async function transcribeToken() {
   }
 }
 
+/* THE CAPTIONS PATH, WHICH CALLS NOTHING THAT TRANSCRIBES.
+
+   "This has real subtitles already" on the confirm card commits the link as
+   download_type "captions". yt-dlp then sets skip_download, fetches the
+   subtitle track alone and writes a .vtt or .srt -- about two seconds, no
+   media, no Parakeet. What comes back IS the transcript, written by a person,
+   which is better than anything this stack would produce from the audio.
+
+   IT USED TO GO TO /ui/fetch, and that route streams MeTube's file into
+   /v1/audio/transcriptions. So the subtitle file was handed to stt-stack and
+   libav was asked to decode a text file as media: the button could not work at
+   all, and the failure arrived as a decode error from two services away. */
+async function captionsToken() {
+  try {
+    const body = await json("/ui/captions", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: stt.token }) });
+    renderCaptions(body);
+    note($("stt-note"), "", "");
+  } catch (err) {
+    note($("stt-note"), "bad", "Could not read the subtitles: " + err.message);
+  } finally {
+    $("go-stt").disabled = false;
+  }
+}
+
+function renderCaptions(payload) {
+  const lines = parseSubtitles(payload.text);
+  const wanted = chosenFormat();
+  const verbatim = wanted === "srt" || wanted === "vtt";
+  /* WRITTEN INTO THE FORMAT THAT WAS ASKED FOR rather than handed over as it
+     arrived. yt-dlp writes WebVTT unless told otherwise, so someone who chose
+     SubRip and took the subtitles would otherwise get a file named .srt with
+     WebVTT inside it. And someone who chose Text must not be handed timecodes:
+     "Text" is the default and the reason most people press that button.
+
+     Every one of those comes off the same parse, so the pane, the Download
+     button and the two sidecar buttons cannot disagree about a cue. When the
+     parse finds nothing -- a format this page does not read -- the file is
+     shown exactly as it arrived rather than as an empty pane. */
+  const display = !lines.length ? payload.text
+                : verbatim ? toSubtitles(lines, wanted === "vtt")
+                : lines.map(line => line.text).join("\n");
+  const kind = !lines.length ? payload.format : verbatim ? wanted : "txt";
+  const cues = lines.length ? locate(display, lines) : null;
+
+  lastTranscript = { text: display, name: "transcript." + kind };
+  $("result").hidden = false;
+  $("transcript").textContent = display;
+  $("result-meta").textContent = lines.length
+    ? `subtitles · ${lines.length} cues · nothing transcribed`
+    : "subtitles · no cues this page can read";
+  /* The glossary field belongs to a transcription and there was not one. The
+     note render() leaves here would otherwise still be on screen from the
+     previous run, attached to a transcript it has nothing to do with. */
+  $("repaired").hidden = true;
+  offerSidecar(lines);
+  sttPlayback(display, cues, lines);
+}
+
 $("go-stt").addEventListener("click", async () => {
-  if (stt.token && !stt.file) return transcribeToken();
+  if (stt.token && !stt.file) return stt.captions ? captionsToken() : transcribeToken();
   const file = stt.prepared || stt.file;
   if (!file) return;
   $("go-stt").disabled = true;
@@ -1414,7 +1553,11 @@ $("go-stt").addEventListener("click", async () => {
   about the audio, and it teaches people to stop trusting the ones that are
   right.
 */
-const karaoke = { cues: null, spans: [], player: null, index: -1, frame: 0 };
+const karaoke = { cues: null, spans: [], player: null, index: -1, frame: 0,
+                  /* Segment-level cues for the band over the video, and the
+                     index currently written into it. Null on every path that
+                     has no video, which includes the whole Speak tab. */
+                  lines: null, line: -1 };
 
 /* Every cue is a RANGE OF THE DISPLAYED STRING -- an offset and a length --
    and never a copy of the text. That is what makes it impossible for the
@@ -1455,8 +1598,14 @@ function timedFromJson(body, display) {
    the rest would be guessing about a file this page did not write. */
 const CUE_LINE = /^(\d{2}):(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[.,](\d{3})/;
 
-function timedFromSubtitles(display) {
-  const lines = display.split("\n");
+/* SPLIT FROM timedFromSubtitles BECAUSE THERE ARE NOW THREE CALLERS and only
+   one of them wants offsets: the karaoke highlight wants ranges of the
+   displayed string, the caption band over the video wants the text itself, and
+   the .srt/.vtt buttons want cues to write back out. A second parser for the
+   other two would be two implementations that have to agree about a cue, and
+   only one of them would be the one the tests read. */
+function parseSubtitles(raw) {
+  const lines = String(raw || "").split("\n");
   const pieces = [];
   for (let i = 0; i < lines.length; i++) {
     const found = CUE_LINE.exec(lines[i]);
@@ -1470,7 +1619,28 @@ function timedFromSubtitles(display) {
                     end: at(found[5], found[6], found[7], found[8]) });
     }
   }
+  return pieces;
+}
+
+function timedFromSubtitles(display) {
+  const pieces = parseSubtitles(display);
   return pieces.length ? locate(display, pieces) : null;
+}
+
+/* THE OTHER SCALE. The highlight follows WORDS, because that is what makes it
+   possible to see which one is being said; a caption over a picture cannot,
+   because one word at a time is unreadable and a viewer's eye is trained on a
+   line of subtitle. So both are kept: `cues` are ranges of the transcript for
+   the pane, `lines` are whole segments for the band and for the sidecar files.
+
+   Segments are what verbose_json already carries -- the upload path asks for
+   both granularities, see the form below -- so this costs nothing extra on the
+   wire. A response with no segments has no band and no sidecar, which is the
+   honest outcome rather than words glued back into invented sentences. */
+function linesFromJson(body) {
+  return (body.segments || [])
+    .map(s => ({ start: s.start, end: s.end, text: (s.text || "").trim() }))
+    .filter(s => s.text && isFinite(s.start) && isFinite(s.end));
 }
 
 /* No innerHTML on this path, and no template literal either: the transcript is
@@ -1510,8 +1680,7 @@ function paint(host, display, cues) {
    than a cursor walked forward: playback is monotonic but seeking is not, and
    a scrub backwards through a five-thousand-word transcript is exactly when
    somebody is looking at the highlight. */
-function cueAt(seconds) {
-  const cues = karaoke.cues;
+function cueAt(seconds, cues, grace) {
   let low = 0, high = cues.length - 1, found = -1;
   while (low <= high) {
     const mid = (low + high) >> 1;
@@ -1523,14 +1692,38 @@ function cueAt(seconds) {
      is a flicker. Two seconds past the end is no longer a gap between words,
      it is silence the VAD cut out or a pause between subtitle cues, and
      leaving a word lit through it is the page asserting something false about
-     what is being spoken. */
-  if (found >= 0 && seconds > cues[found].end + 2) return -1;
+     what is being spoken.
+
+     `grace` is that tolerance, and it is the caller's because the two scales
+     want different answers. Two seconds is right for a word: the gap to the
+     next one is milliseconds and clearing there is a flicker. It is wrong for
+     the band, where a caption that hangs two seconds into silence is read as
+     "this is still being said" over a picture that shows it is not -- so that
+     caller passes a third of a second and the plate goes when the line does. */
+  if (found >= 0 && seconds > cues[found].end + grace) return -1;
   return found;
+}
+
+/* The line under the picture. Written only when it CHANGES, because follow()
+   runs once a frame and assigning textContent every frame is a layout the
+   browser does not need to do sixty times a second for a caption that turns
+   over about once a sentence. */
+function band(seconds) {
+  if (!karaoke.lines) return;
+  const index = cueAt(seconds, karaoke.lines, 0.3);
+  if (index === karaoke.line) return;
+  karaoke.line = index;
+  /* textContent, not innerHTML: this is the transcript, which is the largest
+     piece of remote data on the page, and there is no string here for an
+     injection to live in. Same property paint() has and the same reason. */
+  $("sttbandtext").textContent = index < 0 ? "" : karaoke.lines[index].text;
+  $("sttband").hidden = index < 0;
 }
 
 function follow() {
   if (!karaoke.cues) return;
-  const index = cueAt(karaoke.player.currentTime);
+  band(karaoke.player.currentTime);
+  const index = cueAt(karaoke.player.currentTime, karaoke.cues, 2);
   if (index === karaoke.index) return;
   if (karaoke.spans[karaoke.index]) karaoke.spans[karaoke.index].classList.remove("on");
   karaoke.index = index;
@@ -1571,11 +1764,14 @@ function stopKaraoke() {
   karaoke.frame = 0;
   if (karaoke.spans[karaoke.index]) karaoke.spans[karaoke.index].classList.remove("on");
   karaoke.cues = null; karaoke.spans = []; karaoke.index = -1;
+  karaoke.lines = null; karaoke.line = -1;
+  $("sttband").hidden = true;
+  $("sttbandtext").textContent = "";
 }
 
 /* BOTH PLAYERS DRIVE THE SAME ENGINE. karaoke.player is set when the cues are
    built, so nothing here needs to know which tab is playing. */
-["sttplayer", "player"].forEach(id => {
+["sttplayer", "sttvideo", "player"].forEach(id => {
   $(id).addEventListener("play", () => {
     if (!karaoke.frame) karaoke.frame = requestAnimationFrame(tickKaraoke);
   });
@@ -1607,24 +1803,56 @@ $("transcript").addEventListener("click", ev => {
    oversight -- see sttPlayback(). */
 function sttAudio() { return stt.prepared || stt.file; }
 
+/* THE ORIGINAL FILE, NEVER `prepared`, and only when it has a picture.
+   `prepared` is the 16 kHz mono WAV this page decoded to upload, so it has no
+   video stream at all -- but the two are on the SAME TIMELINE, because toWav
+   is called from pick() with no maxSeconds and no startAt and therefore
+   decodes the whole file from zero. That is what makes it correct to draw
+   timings measured on the WAV over the video they came from.
+
+   canPlayType and not just the MIME prefix: "this browser can decode the
+   AUDIO" and "this browser can render the CONTAINER" are different questions,
+   and decodeAudioData happily reads Matroska that Chrome will not play. An
+   empty string is a definite no; "maybe" is worth attempting, and the
+   element's error handler below is what catches it being wrong. */
+function sttVideo() {
+  const file = stt.file;
+  if (!file || stt.noVideo) return null;
+  if (!/^video\//.test(file.type || "")) return null;
+  return $("sttvideo").canPlayType(file.type) ? file : null;
+}
+
 let sttUrl = null;
 
 /* Sets up the player and the highlight for what render() just drew, and says
-   plainly why there is nothing to play when there is not. */
-function sttPlayback(display, cues) {
+   plainly why there is nothing to play when there is not.
+
+   `lines` are the segment-level cues for the band over the video. They are
+   separate from `cues` because they are a different scale, not a different
+   source -- see linesFromJson. */
+let lastPlayback = null;
+
+function sttPlayback(display, cues, lines) {
+  /* Kept so the video error handler can rebuild the same view against the
+     audio element without asking the server for anything again. */
+  lastPlayback = { display, cues, lines };
   stopKaraoke();
   $("transcript").className = "out";
   if (sttUrl) {
     /* The src goes before the revoke, not after. A media element told to
        reload a revoked blob raises its own error event, and the one thing this
-       path must not do is put a red box under a transcript that is fine. */
-    $("sttplayer").removeAttribute("src");
-    $("sttplayer").load();
+       path must not do is put a red box under a transcript that is fine.
+       BOTH elements, because either could be the one holding the last URL. */
+    ["sttplayer", "sttvideo"].forEach(id => {
+      $(id).removeAttribute("src");
+      $(id).load();
+    });
     URL.revokeObjectURL(sttUrl);
     sttUrl = null;
   }
 
-  const source = sttAudio();
+  const video = sttVideo();
+  const source = video || sttAudio();
   if (!source) {
     $("sttplay").hidden = true;
     /* THE HONEST ANSWER, NOT A DISABLED BUTTON. /ui/fetch streams MeTube's
@@ -1633,17 +1861,27 @@ function sttPlayback(display, cues) {
        podcast cost this laptop a transcript rather than 131 MB. Playing along
        would mean a new route serving the media down here, which is the one
        thing that architecture exists to avoid. */
+    /* The captions branch is a DIFFERENT FACT, not a shorter way of saying the
+       same one: on that path nothing was transcribed and no media was fetched
+       at all -- skip_download means the audio stream was never pulled -- so
+       the sentence about the server transcribing it would be untrue about the
+       one case where the page is fastest. */
     $("sttwhy").textContent = stt.token
-      ? "No player: a link is downloaded and transcribed on the server and the "
-        + "audio never reaches this browser, which is what keeps a two-hour "
-        + "podcast off your connection. Drop the file in to follow along."
+      ? (stt.captions
+         ? "No player: the subtitles were taken and no media was downloaded."
+         : "No player: a link is downloaded and transcribed on the server and the "
+           + "audio never reaches this browser, which is what keeps a two-hour "
+           + "podcast off your connection. Drop the file in to follow along.")
       : "";
     $("sttwhy").hidden = !$("sttwhy").textContent;
     return;
   }
 
   sttUrl = URL.createObjectURL(source);
-  $("sttplayer").src = sttUrl;
+  const player = video ? $("sttvideo") : $("sttplayer");
+  player.src = sttUrl;
+  $("sttstage").hidden = !video;
+  $("sttplayer").hidden = !!video;
   $("sttplay").hidden = false;
   $("sttwhy").hidden = true;
 
@@ -1652,7 +1890,11 @@ function sttPlayback(display, cues) {
     return;
   }
   karaoke.cues = cues;
-  karaoke.player = $("sttplayer");
+  karaoke.player = player;
+  /* The band is drawn only over a picture. Over an audio element it would be a
+     caption floating on nothing, saying the same thing as the highlighted word
+     three centimetres below it. */
+  karaoke.lines = video && lines && lines.length ? lines : null;
   karaoke.spans = paint($("transcript"), display, cues);
   $("transcript").className = "out karaoke";
   $("sttplayhint").textContent = "Click a word to jump there.";
@@ -1671,7 +1913,85 @@ $("sttplayer").addEventListener("error", () => {
     + "the server decodes with libav and handles far more than a browser does.";
 });
 
+/* A CONTAINER THE BROWSER WILL NOT RENDER COSTS THE PICTURE, NOT THE FEATURE.
+   canPlayType answers "maybe" for a great deal it then declines -- Matroska
+   carrying a codec it has no decoder for is the ordinary case -- while the
+   16 kHz WAV this page already made for the upload plays anywhere. Falling
+   back to it keeps the transcript, the highlight and the audio; only the band
+   and the picture go, and they are what could not work. */
+$("sttvideo").addEventListener("error", () => {
+  if (stt.noVideo || !lastPlayback) return;
+  stt.noVideo = true;
+  sttPlayback(lastPlayback.display, lastPlayback.cues, lastPlayback.lines);
+  $("sttplayhint").textContent = "That video will not play here; audio only.";
+});
+
 let lastTranscript = { text: "", name: "transcript.txt" };
+/* The segment cues behind the .srt and .vtt buttons, and behind the band. */
+let lastLines = [];
+
+/* ---------------------------------------------------------- sidecar --- */
+/*
+  A SUBTITLE FILE INSTEAD OF A BURNT-IN ONE, WHICH WAS A DELIBERATE CHOICE.
+
+  Burning captions into the video means ffmpeg in this image and a full
+  re-encode of the media to produce a picture the file already had, plus a
+  second copy of it on disk. A .srt or .vtt beside the video is loaded by VLC,
+  mpv, QuickTime, every television, every upload form and YouTube itself, it is
+  editable afterwards, and it costs the few lines below. The overlay on this
+  page is the preview; this is the thing you keep.
+
+  Written from the SAME cue list the band reads, so a file that disagrees with
+  what was on screen is not a state this page has.
+*/
+function pad(value, width) {
+  return String(Math.floor(value)).padStart(width, "0");
+}
+
+/* HH:MM:SS,mmm for SubRip and HH:MM:SS.mmm for WebVTT -- the one difference
+   between the two formats that matters here, and the same one services/stt's
+   _clock() writes from a single function. Milliseconds are rounded once, at
+   the top, so the parts cannot disagree about which second they are in. */
+function stamp(seconds, comma) {
+  const ms = Math.round(Math.max(0, Number(seconds) || 0) * 1000);
+  return pad(ms / 3600000, 2) + ":" + pad(ms / 60000 % 60, 2) + ":"
+       + pad(ms / 1000 % 60, 2) + (comma ? "," : ".") + pad(ms % 1000, 3);
+}
+
+function toSubtitles(lines, vtt) {
+  const blocks = lines.map((cue, i) => {
+    const range = stamp(cue.start, !vtt) + " --> " + stamp(cue.end, !vtt);
+    /* SubRip numbers its cues from 1 and WebVTT does not need to, so the
+       index is written for one and omitted for the other rather than emitting
+       one file with the other's header swapped. */
+    return (vtt ? "" : (i + 1) + "\n") + range + "\n" + cue.text.trim();
+  });
+  return (vtt ? "WEBVTT\n\n" : "") + blocks.join("\n\n") + "\n";
+}
+
+function saveText(text, name, type) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement("a");
+  a.href = url; a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+/* The two buttons are hidden rather than disabled when there is nothing to
+   write. A disabled control is a promise that something would happen if only
+   you did the right thing; on the native route and on a plain json response
+   there are no timings at all and nothing the user can do about it. */
+function offerSidecar(lines) {
+  lastLines = lines || [];
+  $("dl-srt").hidden = $("dl-vtt").hidden = !lastLines.length;
+}
+
+function sidecarName(extension) {
+  return lastTranscript.name.replace(/\.[^.]+$/, "") + "." + extension;
+}
+$("dl-srt").addEventListener("click", () =>
+  saveText(toSubtitles(lastLines, false), sidecarName("srt"), "text/plain"));
+$("dl-vtt").addEventListener("click", () =>
+  saveText(toSubtitles(lastLines, true), sidecarName("vtt"), "text/vtt"));
 
 async function render(response, format, wanted) {
   const type = response.headers.get("content-type") || "";
@@ -1681,7 +2001,7 @@ async function render(response, format, wanted) {
     throw new Error(reason(payload, response.status + " " + response.statusText));
   }
   const engine = response.headers.get("x-stt-engine");
-  let text = "", meta = [], repaired = null, timed = null;
+  let text = "", meta = [], repaired = null, timed = null, lines = [];
 
   if (type.includes("json")) {
     const body = await response.json();
@@ -1699,10 +2019,18 @@ async function render(response, format, wanted) {
       if (body.duration) meta.push(clock(body.duration) + " of audio");
       if (body.usage && body.usage.seconds) meta.push(body.usage.seconds + " s billed");
       timed = timedFromJson(body, text);
+      lines = linesFromJson(body);
     }
   } else {
     text = await response.text();
-    if (format === "srt" || format === "vtt") timed = timedFromSubtitles(text);
+    if (format === "srt" || format === "vtt") {
+      timed = timedFromSubtitles(text);
+      /* Already a cue list. Parsed rather than passed through so the sidecar
+         buttons write the same shape whichever route produced the transcript,
+         and so a .srt asked for as srt and one built from verbose_json cannot
+         come out looking like two different features. */
+      lines = parseSubtitles(text);
+    }
   }
   if (engine) meta.push("engine: " + engine);
 
@@ -1718,7 +2046,8 @@ async function render(response, format, wanted) {
   $("result").hidden = false;
   $("transcript").textContent = text;
   $("result-meta").textContent = meta.join(" · ");
-  sttPlayback(text, timed);
+  offerSidecar(lines);
+  sttPlayback(text, timed, lines);
 
   /* THE GLOSSARY SUBSTITUTIONS, SURFACED. A silent rewrite is worse than no
      rewrite, and this field is the only thing in the stack that says one
@@ -1747,12 +2076,8 @@ $("copy").addEventListener("click", async () => {
         $("copy").textContent = "Copied"; setTimeout(() => $("copy").textContent = "Copy", 1200); }
   catch { /* clipboard is permissioned; the transcript is selectable anyway */ }
 });
-$("download").addEventListener("click", () => {
-  const url = URL.createObjectURL(new Blob([lastTranscript.text], { type: "text/plain" }));
-  const a = document.createElement("a");
-  a.href = url; a.download = lastTranscript.name; a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 5000);
-});
+$("download").addEventListener("click", () =>
+  saveText(lastTranscript.text, lastTranscript.name, "text/plain"));
 
 /* ======================================================== speak tab === */
 /* The published prefix map, tts/app/openai_api.py:60-70. This is the single

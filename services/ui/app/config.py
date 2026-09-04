@@ -20,9 +20,10 @@ import os
 __all__ = [
     "GATEWAY_URL", "GATEWAY_VERIFY", "GATEWAY_API_KEY", "gateway_authorization",
     "METUBE_URL", "METUBE_FOLDER", "METUBE_FORMAT",
-    "PROBE", "PROBE_TIMEOUT", "MAX_UPLOAD_BYTES", "CONFIRM_SECONDS",
-    "CONFIRM_BYTES", "STT_RTF_SEED", "STT_BUDGET_SECONDS", "VOICE_DIR",
-    "MAX_CLIP_BYTES", "MAX_CLIP_SECONDS", "RESOLVE_PER_MINUTE", "flag",
+    "PROBE", "PROBE_TIMEOUT", "MAX_UPLOAD_BYTES", "MAX_CAPTION_BYTES",
+    "CONFIRM_SECONDS", "CONFIRM_BYTES", "STT_RTF_SEED", "STT_BUDGET_SECONDS",
+    "VOICE_DIR", "MAX_CLIP_BYTES", "MAX_CLIP_SECONDS", "RESOLVE_PER_MINUTE",
+    "flag",
 ]
 
 
@@ -136,6 +137,18 @@ PROBE_TIMEOUT = float(os.getenv("UI_PROBE_TIMEOUT", "20"))
 # is the real fix; this is the boundary behind it, because a client-side check
 # is a courtesy and not a boundary.
 MAX_UPLOAD_BYTES = int(os.getenv("UI_MAX_UPLOAD_BYTES", str(2 * 1024**3)))
+
+# 8 MiB, and it is a sanity bound rather than a real limit. A captions download
+# is a subtitle track and nothing else -- yt-dlp sets skip_download, so no media
+# stream is fetched at all -- and an hour of dense dialogue is on the order of
+# 100 KB of WebVTT. /ui/captions reads the whole file into memory to parse it,
+# which is the right call for something that size and the wrong one for
+# anything that is not, so the ceiling exists to catch the case where MeTube
+# hands back something that is NOT a subtitle file. Without it, a filename that
+# got past the suffix check would be buffered whole into a container with
+# mem_limit: 384m -- the same shape of bug as the clip route's, which is
+# documented at MAX_CLIP_BYTES and was an OOM kill rather than a message.
+MAX_CAPTION_BYTES = int(os.getenv("UI_MAX_CAPTION_BYTES", str(8 * 1024**2)))
 
 # WHEN TO NAG, and why these two numbers.
 #
