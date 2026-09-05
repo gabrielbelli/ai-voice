@@ -1191,7 +1191,7 @@ document.querySelectorAll("#fmt button").forEach(b => b.addEventListener("click"
 
 async function pick(file) {
   stt.file = file; stt.token = null; stt.prepared = null; stt.facts = null;
-  stt.captions = false; stt.noVideo = false;
+  stt.captions = false; stt.noVideo = false; syncActionLabel();
   /* The previous run's link, if there was one. Cleared with the token rather
      than left behind: sttSource() prefers a dropped file, so a stale one would
      not be played -- but a state that is only harmless because of the order
@@ -1337,6 +1337,7 @@ async function resolveLink() {
       body: JSON.stringify({ url }) });
     stt.facts = facts; stt.token = facts.token; stt.file = null; stt.prepared = null;
     stt.captions = false; stt.media = null; stt.noVideo = false;
+    syncActionLabel();
     $("picked").hidden = false;
     $("picked").innerHTML = `<span class="filechip">${esc(facts.title)}
       <span class="hint">${facts.duration ? clock(facts.duration) : "duration unknown"}</span>
@@ -1370,6 +1371,7 @@ $("url").addEventListener("keydown", e => { if (e.key === "Enter") resolveLink()
 async function abandon() {
   const token = stt.token;
   stt.token = null; stt.facts = null; stt.captions = false; stt.media = null;
+  syncActionLabel();
   $("picked").hidden = true;
   $("go-stt").disabled = true;
   updateRouteAvailability();
@@ -1498,6 +1500,7 @@ async function startFetch(options) {
      it wrong is the bug this path shipped with: the subtitle file went to
      /ui/fetch and was streamed into stt as if it were audio. */
   stt.captions = !!(options && options.captions);
+  syncActionLabel();
   /* Cleared here, not only on resolve: committing the same token a second time
      -- the captions button after a look at the card -- would otherwise leave
      the previous run's player pointed at a file that is about to be replaced. */
@@ -1670,6 +1673,25 @@ async function transcribeToken() {
   }
 }
 
+/* WHAT THE BUTTON WILL ACTUALLY DO, ON THE BUTTON.
+
+   The action below was already right -- a captions commit reads /ui/captions
+   and nothing on this page transcribes anything -- but the button went on
+   saying "Transcribe" through all of it. It is the one label that has to be
+   true: someone who took a link's existing subtitles, saw "Transcribe" and
+   pressed it had every reason to believe the audio was about to be run through
+   Parakeet, which is minutes of GPU time they did not ask for and a second,
+   worse transcript of something a person had already written. What the press
+   does is re-read the subtitle file, which is instant.
+
+   Re-reading it is worth keeping and is why this is a relabel rather than a
+   disabled button: renderCaptions writes the file into whichever of Text, SRT
+   or VTT is selected, so pressing it again after changing that control is how
+   the same cues come back in the other format. */
+function syncActionLabel() {
+  $("go-stt").textContent = stt.captions ? "Read the subtitles" : "Transcribe";
+}
+
 /* THE CAPTIONS PATH, WHICH CALLS NOTHING THAT TRANSCRIBES.
 
    "This has real subtitles already" on the confirm card commits the link as
@@ -1683,6 +1705,11 @@ async function transcribeToken() {
    libav was asked to decode a text file as media: the button could not work at
    all, and the failure arrived as a decode error from two services away. */
 async function captionsToken() {
+  /* Both set here rather than only in watchDownload, because this is also what
+     a press of the button runs -- and a press that says nothing and leaves the
+     button live reads as a click that missed. */
+  $("go-stt").disabled = true;
+  note($("stt-note"), "flat", "Reading the subtitles…");
   try {
     const body = await json("/ui/captions", {
       method: "POST", headers: { "content-type": "application/json" },
@@ -3252,6 +3279,21 @@ async function queueJob(voice, text) {
   return payload;
 }
 
+/* WHETHER THIS ROW STILL HAS AUDIO ON THE SERVER TO LOSE.
+
+   One predicate, used by the Play and Download buttons (which need something
+   to fetch), by the label on the destructive button and by the confirmation in
+   forgetJob. It was written out twice before, and the two copies disagreeing
+   is precisely how a button offers to download a file that is not there or
+   quietly deletes one it said nothing about.
+
+   A cancelled job counts: "stop and keep what's done" keeps the partial audio,
+   and /jobs/{id}/audio serves it. */
+function hasAudio(job) {
+  if (job.status !== "done" && job.status !== "cancelled") return false;
+  return !(job.finished_at && Date.now() / 1000 - job.finished_at > TTL);
+}
+
 function statusClass(status) {
   return status === "done" ? "done"
        : status === "failed" ? "failed"
@@ -3297,6 +3339,15 @@ function renderJobs() {
       || (mine && mine.params && (mine.params.text
           || (mine.params.segments || []).map(x => x.text).join(" ")) || "")
          .split(/\s+/).join(" ").slice(0, 140);
+    /* WHAT THE LAST BUTTON DELETES, ON THE BUTTON. It said "Forget" and sat
+       next to "Download the audio", so it read as "take this row off my
+       list" -- and it is a DELETE that removes the file from the server for
+       good, from every device. Half of that label was true, and that half is
+       kept: a row with no audio left to lose (failed, expired, already swept)
+       really is only forgotten. A JS comment rather than an HTML one because
+       this string is innerHTML, and a comment inside it ships into the DOM
+       once per row. */
+    const audio = hasAudio(job);
     const percent = budget ? Math.min(95, elapsed / budget * 100) : 0;
     const over = budget && elapsed > budget;
     if (live && budget) {
@@ -3325,12 +3376,13 @@ function renderJobs() {
       ${job.realtime_factor ? `<div class="hint">${job.audio_seconds.toFixed(0)} s of audio in
         ${job.compute_seconds.toFixed(0)} s · ${job.realtime_factor.toFixed(3)}× realtime</div>` : ""}
       <div class="acts">
-        ${(job.status === "done" || job.status === "cancelled") && !expired
+        ${audio
           ? `<button class="small" data-play="${esc(job.id)}" type="button">Play</button>
              <button class="small" data-get="${esc(job.id)}" type="button">Download the audio</button>` : ""}
         ${live ? `<button class="small" data-stop="${esc(job.id)}" type="button">Stop and keep what's done</button>` : ""}
         ${job.status === "failed" ? `<button class="small" data-retry="${esc(job.id)}" type="button">Retry</button>` : ""}
-        <button class="small" data-forget="${esc(job.id)}" type="button">Forget</button>
+        <button class="small" data-forget="${esc(job.id)}" type="button">${
+          audio ? "Delete the audio" : "Forget"}</button>
       </div>
       ${live ? `<div class="hint">You can close this page. The job runs on the
         server; come back to Jobs.</div>` : ""}
@@ -3442,7 +3494,21 @@ async function forgetJob(id) {
 
      A 404 is success. It means the service does not have it either -- an
      already-swept job, or one lost to a restart that this page still
-     remembers -- and the local cleanup below is the whole job in that case. */
+     remembers -- and the local cleanup below is the whole job in that case.
+
+     ASKED FIRST WHILE THERE IS STILL AUDIO TO LOSE, and only then. The button
+     sat beside "Download the audio" saying "Forget", which reads as tidying a
+     list, and one press deleted a file that took forty minutes of CPU to make
+     -- gone from the server, so gone from every other device too, with no undo
+     anywhere in this stack. The label now says "Delete the audio" (see
+     renderJobs) and this is the second half of the same fix: a mistaken press
+     costs a dialog, not the recording. A row with nothing left to lose is not
+     worth a dialog and does not get one. */
+  const job = jobs.get(id);
+  if (job && hasAudio(job) && !confirm(
+      `Delete the audio for job ${id.slice(0, 8)}?\n\nIt is deleted on the `
+      + `server, so it goes from every device, and it cannot be recovered. `
+      + `Download it first if you want to keep it.`)) return;
   try {
     await json(`/jobs/${encodeURIComponent(id)}`, { method: "DELETE" });
   } catch (err) {

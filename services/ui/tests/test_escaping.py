@@ -463,6 +463,60 @@ def test_forget_treats_a_404_as_success():
     assert "err.status !== 404" in body
 
 
+
+def test_the_button_that_deletes_the_audio_says_so():
+    """It said "Forget", sitting next to "Download the audio".
+
+    That reads as "take this row off my list", and it is a DELETE that removes
+    the file from the server -- so it goes from every other device too, and
+    nothing in this stack can bring back forty minutes of CPU. The label now
+    names the consequence wherever there is one. A row with nothing left to
+    lose -- failed, or expired, or already swept -- really is only forgotten,
+    and is still called Forget.
+    """
+    row = HTML[HTML.index("$(\"joblist\").innerHTML = list.map"):]
+    row = row[:row.index("}).join(\"\")")]
+    assert 'audio ? "Delete the audio" : "Forget"' in row
+    assert ">Forget</button>" not in row, "an unconditional label is back"
+
+
+def test_one_predicate_decides_whether_a_row_still_has_audio():
+    """Play, Download, the destructive label and the confirmation all have to
+    agree about it. Written out twice, the two copies drift -- and a button
+    that offers to download a file that is gone is the same defect as one that
+    silently deletes a file it never mentioned."""
+    row = HTML[HTML.index("$(\"joblist\").innerHTML = list.map"):]
+    row = row[:row.index("}).join(\"\")")]
+    assert "const audio = hasAudio(job);" in row
+    assert '(job.status === "done" || job.status === "cancelled") && !expired' \
+        not in row, "the predicate is spelled out again instead of shared"
+    assert "function hasAudio(job)" in HTML
+
+
+def test_forget_asks_first_while_there_is_still_audio_to_lose():
+    """One press deleted the recording, from the server, with no undo anywhere.
+    The dialog is the second half of the relabel: a mistaken press costs a
+    click, not the audio. It has to come BEFORE the DELETE, and it has to say
+    that the file goes from the server rather than from this page."""
+    body = HTML[HTML.index("async function forgetJob(id)"):]
+    body = body[:body.index("\n}\n")]
+    stripped = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+    assert "confirm(" in stripped
+    assert stripped.index("confirm(") < stripped.index('method: "DELETE"'), \
+        "it asks after it has already deleted the file"
+    assert "server" in stripped, "the dialog must say where the file goes from"
+
+
+def test_a_row_with_no_audio_left_is_not_worth_a_dialog():
+    """A failed, expired or already-swept job has nothing to lose, and a
+    confirmation for a free action teaches people to click through the one that
+    is not free."""
+    body = HTML[HTML.index("async function forgetJob(id)"):]
+    body = body[:body.index("\n}\n")]
+    stripped = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+    assert "hasAudio(job)" in stripped, "the dialog is not gated on anything"
+
+
 # --------------------------------------------------- telling jobs apart --
 
 
@@ -524,6 +578,40 @@ def test_resolve_only_resolves():
     assert "startFetch(" not in code, \
         "resolve must not start the download itself"
     assert "showConfirm(facts)" in code, "it should offer the choice instead"
+
+
+def test_the_button_stops_saying_transcribe_once_the_subtitles_were_taken():
+    """Taking a link's existing subtitles left the button reading "Transcribe",
+    and pressing it re-read the subtitle file.
+
+    The ACTION was already honest -- a captions commit goes to /ui/captions and
+    nothing on this page transcribes anything -- but the label was not, and it
+    is the label that is read. Someone who saw "Transcribe" had every reason to
+    believe the audio was about to go through Parakeet: minutes of compute they
+    did not ask for, producing a second and worse transcript of something a
+    person had already written.
+
+    The press is kept, because renderCaptions writes the cues into whichever of
+    Text, SRT or VTT is selected -- pressing it again is how the same subtitles
+    come back in the other format.
+    """
+    body = _fn("function syncActionLabel()")
+    assert '"Read the subtitles"' in body
+    assert '"Transcribe"' in body
+    assert "stt.captions" in body, "the label has to follow the mode"
+
+
+def test_every_path_that_changes_the_mode_changes_the_label():
+    """Four places set stt.captions -- a file, a link, abandoning one, and the
+    commit itself. One of them forgetting to relabel is exactly the bug above,
+    coming back in a state nobody tests by hand."""
+    lines = HTML.splitlines()
+    for number, line in enumerate(lines):
+        if not re.search(r"\bstt\.captions\s*=(?!=)", line):
+            continue
+        window = "\n".join(lines[number:number + 3])
+        assert "syncActionLabel()" in window, (
+            f"line {number + 1} changes the mode and not the label: {line.strip()}")
 
 
 def test_a_hidden_segments_editor_does_not_apply():
