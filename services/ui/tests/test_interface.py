@@ -756,3 +756,28 @@ def test_the_page_does_not_pretend_to_learn_a_rate_it_cannot_learn():
     assert 'store.get("rtf.stt"' not in live
     assert 'store.set("rtf.stt"' not in live
     assert "stt: () => CONFIG.stt_rtf_seed," in HTML
+
+
+def test_auto_detect_says_what_it_detected():
+    """resolvedLanguage() has always returned `why` beside the code, and until
+    now nothing read it.
+
+    The running commentary that used to sit under the picker was cut as slop,
+    and rightly: it was a sentence restating a control. The answer is not a
+    sentence somewhere else, it is the control reporting what it resolved to,
+    the way a translator does. Only the Auto-detect option is rewritten, and
+    only while it is selected.
+    """
+    assert "function showDetected()" in HTML
+    assert '`Auto-detect (${name})`' in HTML
+    # Fed from the same list the options are built from, so the name in the
+    # label and the name in the list cannot drift apart.
+    assert "LANG_NAMES = Object.fromEntries(merged);" in HTML
+    # Only a real reading is named. `unsupported` recognised a language this
+    # stack cannot speak and `undetected` could not tell; naming the fallback
+    # for either would report a guess as a reading.
+    assert 'resolved.why === "detected"' in HTML
+    # Driven from estimate(), which is already wired to every input, segment
+    # edit and voice change -- a second listener is a second chance to
+    # disagree with the code actually sent.
+    assert "  showDetected();" in HTML

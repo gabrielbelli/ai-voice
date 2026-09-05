@@ -3102,6 +3102,9 @@ function populateLanguages() {
     merged.push([stem, name.replace(/\s*\([^)]*\)\s*$/, "")]);
   }
   merged.sort((a, b) => a[1].localeCompare(b[1]));
+  /* THE SAME LIST THE OPTIONS ARE BUILT FROM, kept so the name in the
+     Auto-detect label and the name in the list below it cannot disagree. */
+  LANG_NAMES = Object.fromEntries(merged);
   select.innerHTML = `<option value="auto">Auto-detect</option>` +
     merged.map(([c, name]) => `<option value="${c}">${esc(name)}</option>`).join("");
   select.value = previous && [...select.options].some(o => o.value === previous)
@@ -3151,10 +3154,37 @@ function resolvedLanguage() {
   return { code: fallback, why: iso ? "unsupported" : "undetected", iso };
 }
 
-/* LANG_NAME and refreshLanguage() are gone with the hint they wrote. What the
-   page SENDS is still resolvedLanguage(), which is called from the four places
-   that build a request; only the running commentary about its decision has
-   been removed. */
+/* Filled by the function that builds the options, from the same list. */
+let LANG_NAMES = {};
+
+/* WHAT AUTO-DETECT DECIDED, ON THE CONTROL THAT DECIDED IT.
+
+   resolvedLanguage() has always returned `why` alongside the code, and until
+   now nothing read it: the running commentary that used to sit under the
+   picker was cut as slop, and it deserved to be -- it was a sentence that
+   restated the control. The answer is not a sentence somewhere else, it is
+   the control saying what it resolved to, the way a translator does:
+
+     Auto-detect              nothing typed yet, or too little to judge
+     Auto-detect (Portuguese) it read the text and this is the answer
+
+   Only the Auto-detect option is rewritten, and only while it is the one
+   selected. Choosing a language by hand is already its own answer, and the
+   other options keep their names so the list a person opens is the list they
+   left. */
+function showDetected() {
+  const select = $("lang");
+  const auto = select && select.querySelector('option[value="auto"]');
+  if (!auto) return;
+  if (select.value !== "auto") { auto.textContent = "Auto-detect"; return; }
+  const resolved = resolvedLanguage();
+  /* "detected" only. `unsupported` means it recognised a language this stack
+     cannot speak, and `undetected` means it could not tell -- naming the
+     fallback in either case would report a guess as a reading. */
+  const name = resolved.why === "detected"
+    && LANG_NAMES[(resolved.iso || "").split("-")[0]];
+  auto.textContent = name ? `Auto-detect (${name})` : "Auto-detect";
+}
 
 
 async function loadVoices() {
@@ -3334,7 +3364,7 @@ $("text").addEventListener("input", estimate);
    and simpler than keeping a second copy of the lists to filter locally --
    VOICES already holds them, but the grouping logic lives in loadVoices and
    duplicating it is how the two would drift. */
-$("lang").addEventListener("change", loadVoices);
+$("lang").addEventListener("change", () => loadVoices().then(showDetected));
 
 /* True while a request is in flight, so the rule below cannot re-enable the
    button under a running one the moment somebody types. */
@@ -3342,6 +3372,11 @@ let speaking = false;
 
 function estimate() {
   const text = $("text").value;
+  /* HERE rather than on its own listener: this function is already wired to
+     every input, every segment edit and every voice change, which is exactly
+     the set of things that can move the detection. A second listener would be
+     a second chance to disagree with the number sent. */
+  showDetected();
   $("chars").textContent = text.length;
   $("chars").style.color = text.length > 4096 ? "var(--bad)" : "";
   const voice = currentVoice();
