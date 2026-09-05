@@ -460,8 +460,8 @@ the entire reason this section exists. **It is off by default and unset means
 local-only**: with no `TTS_RUNNER_HOST`, every job runs on this CPU and
 `app/remote.py` is imported and never used.
 
-The other end is an [`idlegpu`](https://github.com/) agent: a small program on a
-machine with a spare GPU, most likely somebody's gaming PC, that runs work while
+The other end is an `idlegpu` agent (its own repository, not yet published): a
+small program on a machine with a spare GPU, most likely somebody's gaming PC, that runs work while
 nobody is using the card and hands it straight back when they are. There is no
 broker and no cluster. This service talks to that machine directly over TLS.
 
