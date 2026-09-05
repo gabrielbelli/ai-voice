@@ -36,6 +36,43 @@ def bare(source: str) -> str:
 BARE_CSS = bare(CSS)
 
 
+def visible(html: str = HTML) -> str:
+    r"""The page with its comments gone and its markup intact.
+
+    THE OBVIOUS VERSION OF THIS IS WRONG, and it was wrong here first. Running
+    `/\*.*?\*/` over the whole document opens a comment on the `/*` inside
+    `accept="audio/*,video/*"`, then closes it on the next `*/` hundreds of
+    lines later -- which silently deleted the entire transcription Expert panel
+    from what the assertions below were reading. Every negative assertion over
+    that region passed because the region was not there.
+
+    So `/* */` is stripped only inside <style> and <script>, where it is a
+    comment, and `<!-- -->` is stripped everywhere, where it always is.
+    """
+    out = re.sub(r"<!--.*?-->", "", html, flags=re.S)
+    for opener, closer in (("<style>", "</style>"), ("<script>", "</script>")):
+        start = out.index(opener)
+        end = out.index(closer, start)
+        out = (out[:start]
+               + re.sub(r"/\*.*?\*/", "", out[start:end], flags=re.S)
+               + out[end:])
+    return out
+
+
+def test_the_comment_strip_does_not_swallow_the_page_it_is_reading():
+    """The fence the four tests over `visible()` stand on.
+
+    A stripper that ate the Expert panels would make every "this string is
+    gone" assertion pass by deleting the place the string would have been.
+    These four markers sit either side of the accept attribute that caused it.
+    """
+    for marker in ("<summary>Expert: transcription</summary>",
+                   "<summary>Expert: Kokoro voices</summary>",
+                   "<summary>Expert: Chatterbox voices</summary>",
+                   '<label for="x-route">Route</label>'):
+        assert marker in visible(), f"the strip ate {marker!r}"
+
+
 def rule(selector: str) -> str:
     """One rule, from its selector to the first `}`.
 
@@ -436,14 +473,134 @@ def test_the_interface_gained_no_new_prose():
     assert 'id="fmt"' not in HTML, "the retired format control is back"
     assert "data-fmt" not in HTML
     assert '"(" + list.filter' not in HTML, "the job count is a sentence again"
-    # The four institutional-memory notes are restyled and not one word of them
-    # is changed: they exist so nobody re-adds denoise or re-copies Resemble's
-    # ranges, and burying them deeper is the looks-minimal-is-not-simple
-    # failure.
-    for kept in ("This note exists so nobody adds it back.",
-                 "Auto-detect is not a\n            default here, it is the only correct behaviour.",
-                 "reconciled, not copied."):
-        assert kept in HTML, kept
+
+def test_the_institutional_memory_moved_into_comments_and_was_not_lost():
+    """THIS ASSERTION IS THE INVERSE OF THE ONE IT REPLACES, on purpose.
+
+    Four .note flat paragraphs sat in the expert panels holding why denoise is
+    absent, why there is no language control, why Chatterbox's sliders are not
+    at Resemble's values, and why submission is always POST /jobs. They were
+    kept on screen so nobody would add denoise back or copy Resemble's ranges,
+    and the previous version of this test pinned them word for word.
+
+    The user has now asked a third time for interface copy to be cut, and named
+    those paragraphs: they are commit messages that escaped onto the screen.
+    Every one of them explains WHY the software is built this way, cites a
+    measurement, or argues with a hypothetical reader. None of them is
+    something the person transcribing a file needs at that moment.
+
+    So the reasoning moved to the comment above the element it described, which
+    is where the next reader looks, and this test is what stops the move from
+    being a deletion. Both halves are asserted: gone from the rendered page,
+    still in the file.
+    """
+    screen = visible()
+    # Gone from what a person reads.
+    for cut in ("This note exists so nobody adds it back.",
+                "it is the only correct behaviour",
+                "reconciled, not copied",
+                "The sliders are not broken",
+                "a finding no slider can express",
+                "a naive client writes the third into a .wav",
+                "They are placeholders, not measurements"):
+        assert cut not in screen, f"{cut!r} is still on the page"
+    # And every measured figure in them survived the move. Whitespace is
+    # collapsed first: a comment wraps at a different column than the markup it
+    # replaced, so matching the raw text would pin the line breaks rather than
+    # the facts.
+    file = re.sub(r"\s+", " ", HTML)
+    for kept in ("+26% mean WER", "worse in 9 of 13 conditions",
+                 "WER 1.0 from hallucination",
+                 "agreement collapsed to 0.017",
+                 "accepts_language = False",
+                 "/etc/stt-stack/glossary.txt",
+                 "0.5 / 0.5 / 0.8", "ge=0.0, le=1.0",
+                 "reconciled, not copied",
+                 "closing that stream cancels the job"):
+        assert kept in file, f"{kept!r} was lost rather than moved"
+
+
+def test_no_user_facing_string_carries_an_em_dash():
+    """The em dash was the loudest tell in this file: 27 of them, and every one
+    in a sentence a person reads.
+
+    IT IS BANNED FOR WHAT IT DOES, not for how it looks. A dash hides a second
+    clause inside a first one, so the reader meets the qualification after they
+    have already acted on the main verb -- "Keep the video -- a much bigger
+    download" is a decision and its cost welded into one breath. The
+    replacements are a full stop, a comma, a colon or brackets, and choosing
+    between them forces the writer to say which relationship the halves are in.
+
+    COMMENTS ARE STRIPPED FIRST and are exempt. They are not user-facing, they
+    hold the reasoning this pass moved off the screen, and rewriting the record
+    to match a style rule about the interface would be the wrong trade.
+    """
+    assert "\u2014" not in visible(), "an em dash is back in interface copy"
+
+
+def test_no_control_is_explained_by_a_paragraph_beside_it():
+    """The user asked three times for interface copy to be cut, and the third
+    time named the failure: paragraphs of explanation next to the controls.
+
+    Each string here was on the page. Each one explains WHY the software is
+    built this way, cites a measurement, names a file path, or argues with a
+    reader who has not complained yet. None of them is something the person
+    transcribing a file needs at the moment they are transcribing it. They are
+    in comments now, beside the code that made them true.
+    """
+    screen = visible()
+    for paragraph in (
+            "There is no preprocessing stage in this codebase",
+            "The glossary is a startup file",
+            "No language control, in either mode",
+            "This deployment is",
+            "Submission is always",
+            "diarized_json is a 400 on this stack",
+            "Chatterbox runs at about",
+            "Glossary changes are not reported",
+            "time-to-first-audio",
+            "X-Ignored-Parameters",
+            "Three sliders at non-stock values",
+            "Links work, but there will be no length or size",
+            "speech in, speech out",
+    ):
+        assert paragraph not in screen, f"{paragraph!r} is back on the page"
+
+
+def test_a_hint_under_a_control_stays_one_sentence_long():
+    """A ceiling with the reason for it attached.
+
+    Every static hint and note in the markup is measured with its tags removed
+    and its whitespace collapsed. The longest survivor of this pass is 78
+    characters. The longest string it replaced was 423, and four more ran past
+    200. A hundred is the fence: it passes everything the page says now, and it
+    fails the shortest of the paragraphs that were cut.
+    """
+    markup = HTML[HTML.index("<body>"):HTML.index("<script>")]
+    markup = re.sub(r"<!--.*?-->", "", markup, flags=re.S)
+    pattern = r'<(div|span)[^>]*class="(?:note[^"]*|hint[^"]*)"[^>]*>(.*?)</\1>'
+    seen = 0
+    for match in re.finditer(pattern, markup, re.S):
+        text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", match.group(2))).strip()
+        if not text:
+            continue
+        seen += 1
+        assert len(text) <= 100, f"{len(text)} characters of hint: {text!r}"
+    assert seen > 8, "the scan stopped finding hints, so it proves nothing"
+
+
+def test_nothing_on_screen_sends_the_reader_in_a_direction():
+    """"Trim it below", "the transcript above", "follow the control above".
+
+    A direction is only true for the writer's own screen. A reader on a phone,
+    or one who has scrolled, or one using a screen reader, is not looking at
+    what the writer was looking at. Naming the control costs the same number of
+    words and survives every layout: "Set Start at and Stop at to trim it".
+    """
+    screen = visible()
+    for direction in (r"\babove\b", r"\bbelow\b", r"[Cc]lick here"):
+        found = re.search(direction, screen)
+        assert not found, f"the page points at {found.group(0)!r} rather than a control"
 
 
 def test_every_pressable_surface_acknowledges_the_press():

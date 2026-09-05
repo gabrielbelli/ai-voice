@@ -129,8 +129,6 @@ body.scrolled header{box-shadow:0 1px 0 var(--line),
 .brand{font-size:var(--t-display);font-weight:700;line-height:1.15;
   letter-spacing:-.021em;min-width:0;white-space:nowrap;overflow:hidden;
   text-overflow:ellipsis}
-.brand small{font-size:var(--t-label);font-weight:400;color:var(--dim);
-  margin-left:var(--s2);letter-spacing:.005em}
 .spacer{flex:1}
 .pills{display:flex;gap:var(--s1);flex-wrap:wrap}
 .pill{font-size:var(--t-micro);line-height:1.3;letter-spacing:.02em;
@@ -502,10 +500,7 @@ details>summary:active{opacity:.72}
 @media (prefers-contrast:more) and (prefers-color-scheme:dark){
   :root{--line:#7b8592;--dim:#d3dae2;--card-line:#7b8592}
 }
-/* The brand's tagline is the first thing to go when the sticky header runs out
-   of room: the tabs are wayfinding and must not wrap to a second row. */
 @media (max-width:30rem){
-  .brand small{display:none}
   .tabs button{padding:var(--s1) var(--s2)}
 }
 </style>
@@ -514,7 +509,12 @@ details>summary:active{opacity:.72}
 
 <header>
   <div class="bar">
-    <span class="brand">ai-voice<small>speech in, speech out</small></span>
+    <!-- THE TAGLINE IS GONE. It read "speech in, speech out", under a tab
+         strip reading Transcribe, Speak and Jobs. A slogan that restates the
+         navigation beside it is the first line to cut, and it was also the
+         first line to hide on a narrow viewport -- a string worth hiding at
+         30rem is a string worth deleting at every width. -->
+    <span class="brand">ai-voice</span>
     <span class="spacer"></span>
     <!-- THERE WAS AN "EXPERT" CHECKBOX HERE: a global gate over the
          .expert-only class, which is to say over the three <details> panels at
@@ -557,9 +557,14 @@ details>summary:active{opacity:.72}
     <div class="card">
       <div class="drop" id="drop">
         <div class="big">Drop an audio or video file here</div>
+        <!-- IT USED TO ADD "video is fine, the audio is taken out of it". The
+             prompt directly over it already says "Drop an audio or video file
+             here", so the clause repeated the one line on this card nobody can
+             miss. The page does take the audio out of a video: pick() calls
+             toWav(), which decodes the file with decodeAudioData and uploads
+             16 kHz mono. -->
         <div class="hint">or <button class="link" id="browse" type="button">choose a file</button>
-          or <button class="link" id="sttrec" type="button">record from the microphone</button>
-          — video is fine, the audio is taken out of it</div>
+          or <button class="link" id="sttrec" type="button">record from the microphone</button></div>
         <div class="row" id="sttrecrow" hidden style="justify-content:center;align-items:center;margin-top:8px">
           <span class="ring tight" id="sttring">0:00</span>
           <div style="min-width:10rem"><div class="meter"><div id="sttlevel"></div></div></div>
@@ -569,7 +574,7 @@ details>summary:active{opacity:.72}
                accept="audio/*,video/*,.mkv,.mp4,.mov,.webm,.m4a,.opus,.flac">
         <div id="linkrow" style="margin-top:12px" hidden>
           <div class="row">
-            <input type="text" id="url" placeholder="…or paste a link (YouTube, podcast, anything yt-dlp knows)">
+            <input type="text" id="url" placeholder="…or paste a link">
             <button class="tight" id="resolve" type="button">Resolve</button>
           </div>
           <div class="hint" id="linkhint" aria-live="polite"></div>
@@ -618,20 +623,28 @@ details>summary:active{opacity:.72}
       <div id="stt-note" aria-live="polite"></div>
 
       <details id="stt-expert">
-        <summary>Expert — transcription</summary>
+        <summary>Expert: transcription</summary>
         <div class="body">
           <div class="grid2">
             <div>
+              <!-- diarized_json IS NOT OFFERED: it is a 400 on this stack. The
+                   hint under this select said so on screen, which is a
+                   sentence explaining the absence of an option nobody can see.
+
+                   AND UNDER PARAKEET, verbose_json.language is the literal
+                   string "unknown", every segment.seek is 0, every
+                   no_speech_prob 0.0 and every tokens array empty. They are
+                   placeholders, not measurements. That was a fourth paragraph
+                   on screen describing fields this page never renders. -->
               <label for="x-rf">response_format</label>
               <select id="x-rf">
-                <option value="">verbose_json — what this page asks for</option>
+                <option value="">verbose_json (default)</option>
                 <option value="json">json</option>
                 <option value="text">text</option>
                 <option value="verbose_json">verbose_json</option>
                 <option value="srt">srt</option>
                 <option value="vtt">vtt</option>
               </select>
-              <div class="hint">diarized_json is a 400 on this stack, so it is not offered.</div>
             </div>
             <div>
               <label for="x-gran">timestamp_granularities[]</label>
@@ -640,66 +653,67 @@ details>summary:active{opacity:.72}
                 <option value="segment">segment</option>
                 <option value="word">word</option>
               </select>
-              <div class="hint">Forces verbose_json — anything else is a 400.</div>
+              <div class="hint">Sets response_format to verbose_json.</div>
             </div>
             <div>
+              <!-- Parakeet honours include[]=logprobs. Which engine honours
+                   which field is engine trivia: it changes nothing the person
+                   ticking this box does next. -->
               <label><input type="checkbox" id="x-logprobs" style="width:auto"> include[]=logprobs</label>
-              <div class="hint">Forces json. Honoured on Parakeet.</div>
+              <div class="hint">Sets response_format to json.</div>
             </div>
             <div>
+              <!-- THE NATIVE ROUTE returns repaired, audio_seconds and
+                   realtime_factor, and refuses anything that is not 16 kHz.
+                   That field list was on screen. It names three keys of a JSON
+                   body this page never shows anybody, so it decided nothing.
+                   The consequence does decide something, so the hint keeps
+                   that and only that. updateRouteAvailability() writes the
+                   refusals. -->
               <label for="x-route">Route</label>
               <select id="x-route">
-                <option value="v1">/v1/audio/transcriptions — resamples, does subtitles</option>
-                <option value="native">/transcribe — richer, 16 kHz only</option>
+                <option value="v1">/v1/audio/transcriptions</option>
+                <option value="native">/transcribe (16 kHz only)</option>
               </select>
-              <div class="hint" id="x-route-hint">The native route returns
-                <code>repaired</code>, <code>audio_seconds</code> and
-                <code>realtime_factor</code>, and refuses anything that is not 16 kHz.
-                It carries no timings, so a native run has no highlight and no
-                .srt or .vtt beside the transcript.</div>
+              <div class="hint" id="x-route-hint">This route carries no timings:
+                no highlight, no .srt, no .vtt.</div>
             </div>
           </div>
 
-          <h3 style="margin-top:14px">Voice activity detection (Silero)</h3>
-          <div class="grid2">
-            <div><label>threshold <span class="hint">deployment default 0.5</span></label>
-              <div class="slider"><input type="range" id="x-vad-t" min="0" max="1" step="0.01" value="0.5"><output>0.50</output></div></div>
-            <div><label>prefix_padding_ms <span class="hint">default 100, not OpenAI's</span></label>
-              <div class="slider"><input type="range" id="x-vad-p" min="0" max="5000" step="10" value="100"><output>100</output></div></div>
-            <div><label>silence_duration_ms <span class="hint">default 300, not OpenAI's</span></label>
-              <div class="slider"><input type="range" id="x-vad-s" min="0" max="30000" step="50" value="300"><output>300</output></div></div>
-          </div>
+          <!-- SILERO IS THE VAD, and 0.5 / 100 / 300 are this deployment's
+               defaults, not OpenAI's. Each slider prints its own value in an
+               <output> beside it, so three hints repeating those numbers said
+               what the control said, and "not OpenAI's" argued with a reader
+               who never asked.
 
-          <div class="note flat">
-            <strong>There is no preprocessing stage in this codebase</strong> — the
-            pipeline is decode → VAD → ASR → glossary — so there is no denoise
-            toggle to offer. Denoising measured <strong>+26% mean WER</strong> on
-            this stack, worse in 9 of 13 conditions, one case above WER 1.0 from
-            hallucination. This note exists so nobody adds it back.
-          </div>
-          <div class="note flat">
-            <strong>The glossary is a startup file</strong>
-            (<code>/etc/stt-stack/glossary.txt</code>), not a request field. The
-            per-request vocabulary fields <code>prompt</code> and
-            <code>keywords[]</code> are both 400 on Parakeet. An <em>irrelevant</em>
-            glossary cost +12% WER on Parakeet and +28% on Whisper, which is a
-            finding no slider can express.
-          </div>
-          <div class="note flat">
-            <strong>No language control, in either mode.</strong> It is a 400
-            <code>unsupported_parameter</code> on <code>/v1</code> under Parakeet
-            and silently ignored on <code>/transcribe</code>
-            (<code>accepts_language = False</code>). <code>STT_LANGUAGE</code> is
-            deliberately unset on this deployment because pinning it breaks
-            English/Portuguese code-switching — agreement collapsed to 0.017 when
-            the service translated instead of transcribing. Auto-detect is not a
-            default here, it is the only correct behaviour.
-          </div>
-          <div class="note flat">
-            Under Parakeet, <code>verbose_json.language</code> is the literal
-            string <code>"unknown"</code>, and every <code>segment.seek</code> is
-            0, every <code>no_speech_prob</code> 0.0 and every <code>tokens</code>
-            empty. They are placeholders, not measurements.
+               THERE IS NO PREPROCESSING STAGE IN THIS CODEBASE. The pipeline
+               is decode -> VAD -> ASR -> glossary. There is no denoise toggle
+               to offer and there must not be one: denoising measured +26% mean
+               WER on this stack, worse in 9 of 13 conditions, one case above
+               WER 1.0 from hallucination. That paragraph sat on screen to stop
+               somebody adding it back. It stops them from here now, because
+               the person who reaches for denoise opens this file first.
+
+               NO LANGUAGE CONTROL, IN EITHER MODE. It is a 400
+               unsupported_parameter on /v1 under Parakeet, and silently
+               ignored on /transcribe (accepts_language = False). STT_LANGUAGE
+               is deliberately unset on this deployment: pinning it breaks
+               English/Portuguese code-switching, and agreement collapsed to
+               0.017 when the service translated instead of transcribing.
+               Auto-detect is not a default here, it is the only correct
+               behaviour. The #go-stt handler carries the same note.
+
+               THE GLOSSARY IS A STARTUP FILE (/etc/stt-stack/glossary.txt),
+               not a request field: prompt and keywords[] are both 400 on
+               Parakeet. loadGlossaries() carries the WER figures. -->
+          <h3 style="margin-top:14px">Voice activity detection</h3>
+          <div class="grid2">
+            <div><label>threshold</label>
+              <div class="slider"><input type="range" id="x-vad-t" min="0" max="1" step="0.01" value="0.5"><output>0.50</output></div></div>
+            <div><label>prefix_padding_ms</label>
+              <div class="slider"><input type="range" id="x-vad-p" min="0" max="5000" step="10" value="100"><output>100</output></div></div>
+            <div><label>silence_duration_ms</label>
+              <div class="slider"><input type="range" id="x-vad-s" min="0" max="30000" step="50" value="300"><output>300</output></div></div>
           </div>
         </div>
       </details>
@@ -773,7 +787,7 @@ details>summary:active{opacity:.72}
   <section id="tab-speak" role="tabpanel" aria-labelledby="tab-btn-speak" hidden>
     <div class="card">
       <label for="text">Text</label>
-      <textarea id="text" placeholder="Type or paste what you want spoken."></textarea>
+      <textarea id="text" placeholder="Type or paste the text."></textarea>
       <div class="hint"><span id="chars">0</span> / 4096 characters</div>
       <div id="codeswitch"></div>
 
@@ -801,7 +815,7 @@ details>summary:active{opacity:.72}
         <div>
           <label for="voice">Voice</label>
           <select id="voice"></select>
-          <button class="small link" id="delvoice" type="button" hidden>Remove this cloned voice</button>
+          <button class="small link" id="delvoice" type="button" hidden>Delete this voice</button>
         </div>
         <div>
           <!-- SYNTHESIS speed, not playback speed. Renamed the day a playback
@@ -830,8 +844,8 @@ details>summary:active{opacity:.72}
            inline background:var(--bg) is gone with it; the CSS says it now. -->
       <div class="card well" id="clone" hidden>
         <h2>Use my own voice</h2>
-        <div class="hint">10–30 seconds, one speaker, no music, speaking the
-          language you intend to synthesise.</div>
+        <div class="hint">10–30 seconds, one speaker, no music, in the
+          language you want.</div>
         <div class="row" style="align-items:center">
           <button class="primary tight" id="rec" type="button">● Record 15 s</button>
           <span class="ring tight" id="ring">15</span>
@@ -843,7 +857,7 @@ details>summary:active{opacity:.72}
              source, so taking twenty seconds out of a two-hour interview
              downloads twenty seconds. -->
         <div class="row">
-          <input type="text" id="cliplink" placeholder="…or paste a link to a voice">
+          <input type="text" id="cliplink" placeholder="…or paste a link">
           <button class="tight" id="clipresolve" type="button">Resolve</button>
         </div>
         <div class="row" id="cliprange" hidden>
@@ -894,78 +908,99 @@ details>summary:active{opacity:.72}
            comments, which is where someone looking for it will be. -->
 
       <details id="tts-expert-fast">
-        <summary>Expert — instant voices (Kokoro)</summary>
+        <summary>Expert: Kokoro voices</summary>
         <div class="body">
           <div class="grid2">
-            <div><label for="x-tfmt">format</label>
+            <div>
+              <!-- THE FIELD IS NAMED format ON /speak (default wav) AND
+                   response_format ON /v1 (default mp3). Different names,
+                   different defaults: the two routes do not share a request
+                   builder, so speakNow() writes whichever key the chosen route
+                   expects. That was on screen as a paragraph. It describes how
+                   this file is wired, and the reader picking a format cannot
+                   act on it. -->
+              <label for="x-tfmt">format</label>
               <select id="x-tfmt">
                 <option>mp3</option><option>opus</option><option>aac</option>
                 <option>flac</option><option>wav</option><option>pcm</option>
               </select>
-              <div class="hint">The field is <code>format</code> on
-                <code>/speak</code> (default wav) and <code>response_format</code>
-                on <code>/v1</code> (default mp3). Different names, different
-                defaults — they do not share a request builder.</div>
             </div>
-            <div><label for="x-troute">route</label>
+            <div>
+              <!-- /speak IS extra="forbid": an unknown field is a 422. /v1 is
+                   extra="allow" and reports what it dropped in
+                   X-Ignored-Parameters, which this page reads and prints in
+                   the result meta as "ignored: speed". The reader sees that
+                   line when it happens, so the protocol note under the select
+                   was telling them in advance about a message they get in
+                   arrears. -->
+              <label for="x-troute">route</label>
               <select id="x-troute">
-                <option value="speak">/speak — segments, per-segment voice, hard 0.5–2.0 speed</option>
-                <option value="v1">/v1/audio/speech — no segments, no language, clamps speed</option>
+                <option value="speak">/speak (segments, per-segment voice)</option>
+                <option value="v1">/v1/audio/speech (no segments, no language)</option>
               </select>
-              <div class="hint"><code>/speak</code> is <code>extra="forbid"</code>:
-                an unknown field is a 422. <code>/v1</code> is
-                <code>extra="allow"</code> and reports what it ignored in
-                <code>X-Ignored-Parameters</code>, which this page surfaces.</div>
             </div>
-            <div><label for="x-stream">stream_format</label>
+            <div>
+              <!-- SSE REPORTS TIME-TO-FIRST-AUDIO: measured 5.49 s into a
+                   55.06 s generation, against 58.98 s buffered. A benchmark
+                   belongs beside the code that motivated it, not under the
+                   control it describes. -->
+              <label for="x-stream">stream_format</label>
               <select id="x-stream"><option value="audio">audio</option>
                 <option value="sse">sse</option></select>
-              <div class="hint">SSE reports time-to-first-audio; measured 5.49 s
-                into a 55.06 s generation, against 58.98 s buffered.</div>
             </div>
           </div>
           <h3 style="margin-top:14px">Segments</h3>
-          <div class="hint">Each row is one <code>/speak</code> segment with a
-            pause after it. Segments exist only on <code>/speak</code>, so this
-            editor is greyed out on the other route.</div>
+          <div class="hint">One row is one segment with a pause after it.
+            <code>/speak</code> only.</div>
           <div id="segments"></div>
           <button class="small" id="addseg" type="button" style="margin-top:8px">+ Add segment</button>
         </div>
       </details>
 
       <details id="tts-expert-clone">
-        <summary>Expert — cloned voices (Chatterbox)</summary>
+        <summary>Expert: Chatterbox voices</summary>
         <div class="body">
-          <div class="note flat">This deployment is <strong>calmer than stock</strong>:
-            compose pins exaggeration 0.3, cfg_weight 0.3 and temperature 0.6 where
-            stock Chatterbox is 0.5 / 0.5 / 0.8. The sliders are not broken.
-            Resemble's own demo offers exaggeration 0.25–2.0; our backend validates
-            <code>ge=0.0, le=1.0</code>, so that range would 422 — these are
-            reconciled, not copied.</div>
-          <div class="grid2" style="margin-top:12px">
-            <div><label>exaggeration <span class="hint">0–1, here 0.3, stock 0.5</span></label>
+          <!-- THIS DEPLOYMENT IS CALMER THAN STOCK, and the numbers are not a
+               mistake. compose pins exaggeration 0.3, cfg_weight 0.3 and
+               temperature 0.6, where stock Chatterbox ships 0.5 / 0.5 / 0.8.
+               Resemble's own demo offers exaggeration 0.25-2.0; this backend
+               validates ge=0.0, le=1.0, so that range would 422. The two sets
+               are reconciled, not copied.
+
+               The paragraph that said all of this on screen argued with a
+               reader who thought the sliders were broken. Nobody thinks that
+               until a paragraph raises it, and the hints now name a default
+               instead of a rival product's range.
+
+               THREE SLIDERS AT NON-STOCK VALUES is the state people get lost
+               in, which is why Reset to defaults exists. CLONE_DEFAULTS holds
+               the values it restores. -->
+          <div class="grid2">
+            <div><label>exaggeration <span class="hint">0–1, default 0.3</span></label>
               <div class="slider"><input type="range" id="x-exag" min="0" max="1" step="0.05" value="0.3"><output>0.30</output></div></div>
-            <div><label>cfg_weight <span class="hint">0–1, here 0.3, stock 0.5</span></label>
+            <div><label>cfg_weight <span class="hint">0–1, default 0.3</span></label>
               <div class="slider"><input type="range" id="x-cfg" min="0" max="1" step="0.05" value="0.3"><output>0.30</output></div></div>
-            <div><label>temperature <span class="hint">0.1–1.5, here 0.6, stock 0.8</span></label>
+            <div><label>temperature <span class="hint">0.1–1.5, default 0.6</span></label>
               <div class="slider"><input type="range" id="x-temp" min="0.1" max="1.5" step="0.05" value="0.6"><output>0.60</output></div></div>
             <div><label>cross-language transfer</label>
-              <!-- Resemble's own guidance for cross-language cloning. -->
-              <div class="hint">Set cfg_weight to 0 when the clip's language
-                differs from the one selected.</div>
+              <!-- Resemble's own guidance for cross-language cloning. It names
+                   the Language control, because "the one selected" makes the
+                   reader work out which of two selects it means. -->
+              <div class="hint">If the clip's language differs from the
+                Language control, set cfg_weight to 0.</div>
             </div>
           </div>
           <div class="row" style="margin-top:12px">
-            <button class="small tight" id="resetclone" type="button">Reset to deployment defaults</button>
-            <span class="hint">Three sliders at non-stock values is exactly the state people get lost in.</span>
+            <button class="small tight" id="resetclone" type="button">Reset to defaults</button>
           </div>
-          <div class="note flat">Submission is always <code>POST /jobs</code>:
-            it answers 202 every time, with <code>chunks</code> and the server's own
-            <code>estimated_seconds</code>, and it survives a closed laptop. The
-            <code>/v1</code> SSE path is not offered as a default because closing
-            that stream <em>cancels the job</em>, and because the same request can
-            answer 200-audio, 200-event-stream or <strong>202 with JSON</strong>
-            depending on arithmetic — a naive client writes the third into a .wav.</div>
+          <!-- SUBMISSION IS ALWAYS POST /jobs. It answers 202 every time, with
+               chunks and the server's own estimated_seconds, and it survives a
+               closed laptop. The /v1 SSE path is not offered as a default,
+               because closing that stream cancels the job, and because one
+               request there can answer 200-audio, 200-event-stream or 202 with
+               JSON depending on arithmetic -- a naive client writes the third
+               into a .wav. queueJob() carries the same reasoning beside the
+               code that acts on it. -->
         </div>
       </details>
     </div>
@@ -975,9 +1010,13 @@ details>summary:active{opacity:.72}
   <section id="tab-jobs" role="tabpanel" aria-labelledby="tab-btn-jobs" hidden>
     <div class="card">
       <div class="row" style="align-items:center">
+        <!-- THE HEADER HINT IS GONE. It read "Chatterbox runs at about
+             0.138x realtime, so a job is minutes. You can close this page --
+             they run on the server." The rate is a measurement, and every live
+             row in renderJobs() already prints the close-the-page line beside
+             the job it applies to. A card-level copy said it again for a list
+             that was often empty. -->
         <h2 class="tight">Jobs</h2>
-        <span class="hint tight">Chatterbox runs at about 0.138× realtime, so a job
-          is minutes. You can close this page — they run on the server.</span>
         <span class="spacer"></span>
         <button class="small tight" id="refresh" type="button">Refresh</button>
       </div>
@@ -1027,7 +1066,7 @@ details>summary:active{opacity:.72}
     <!-- Was three lines explaining that yt-dlp trims before downloading. The
          reader is on a confirmation card deciding whether to fetch something;
          what they need is that trimming costs nothing, not how. -->
-    <div class="hint">Trimmed at the source — the rest is never downloaded.</div>
+    <div class="hint">Trimmed at the source. The rest is never downloaded.</div>
     <!-- OFF BY DEFAULT AND PER LINK. download_type "audio" never pulls the
          video stream at all, which is the whole reason a 2h14m podcast costs
          ~131 MB rather than gigabytes, so this must never become the default
@@ -1035,7 +1074,7 @@ details>summary:active{opacity:.72}
          changes the moment it is ticked: the cost is stated where the decision
          is made, not in a paragraph underneath it. -->
     <label style="margin-top:10px;display:block"><input type="checkbox" id="c-video"
-      style="width:auto"> Keep the video — a much bigger download</label>
+      style="width:auto"> Keep the video (a much bigger download)</label>
     <div id="c-subs"></div>
   </div>
   <div class="foot">
@@ -1359,8 +1398,7 @@ function setPlaybackRate(value) {
 }
 
 function wirePlayer(select, player) {
-  select.innerHTML = RATES.map(r =>
-    `<option value="${r}">${r === 1 ? "1× (normal)" : r + "×"}</option>`).join("");
+  select.innerHTML = RATES.map(r => `<option value="${r}">${r}×</option>`).join("");
   player.preservesPitch = true;
   player.webkitPreservesPitch = true;
   players.push({ select, player });
@@ -1606,17 +1644,19 @@ async function pick(file) {
   $("go-stt").disabled = false;
 
   if (file.size > CONFIG.max_upload_bytes) {
+    /* The ceiling exists because the transcription container reads an
+       upload whole into memory. That was on screen. It is the reason for a
+       refusal the reader cannot argue with, so it says the limit and stops. */
     note($("stt-note"), "bad", `That file is ${human(file.size)}. The server
-      refuses anything over ${human(CONFIG.max_upload_bytes)} — and it would be
-      read whole into the transcription container's memory if it did not.`);
+      refuses anything over ${human(CONFIG.max_upload_bytes)}.`);
     $("go-stt").disabled = true;
     return;
   }
   if (file.size > CAN_DECODE) {
-    note($("stt-note"), "warn", `${human(file.size)} is too large to decode in
-      the browser (<code>decodeAudioData</code> needs the whole file resident),
-      so it will be uploaded as it is. Expect it to be slow, and expect the
-      transcription container to hold all of it in memory while it works.`);
+    /* decodeAudioData needs the whole file resident, which is why CAN_DECODE
+       exists at all, and the container then holds the upload in memory too. */
+    note($("stt-note"), "warn", `${human(file.size)} is too large to decode
+      here, so it uploads as it is. Expect it to be slow.`);
     return;
   }
   note($("stt-note"), "flat", "Extracting the audio…");
@@ -1629,24 +1669,27 @@ async function pick(file) {
                             { type: "audio/wav" });
     stt.seconds = out.seconds; stt.rate = 16000;
     const compute = out.seconds / rate.stt();
+    /* The parenthesis said the figure came from the realtime factor this
+       browser measured on this box, and was an estimate rather than a promise.
+       roughly() rounds to "about 4 minutes" for exactly that reason, so the
+       hedge was printed twice and only one copy was doing anything. */
     note($("stt-note"), "ok", `Audio extracted: ${clock(out.seconds)}, now
       ${human(stt.prepared.size)} instead of ${human(file.size)}.
-      Transcription should take ${roughly(compute)}
-      <span class="hint">(at the ${rate.stt().toFixed(1)}× this browser has
-      measured on this box — an estimate, not a promise)</span>.`);
+      Transcription takes ${roughly(compute)}.`);
     if (compute > CONFIG.stt_budget_seconds) {
+      /* Past the ceiling the gateway answers 504 and the work is thrown
+         away, which is why this is worth interrupting somebody over. The
+         reader acts on the two escapes, not on the status code. */
       note($("stt-note"), "warn", `That is ${roughly(compute)} of compute, past
-        the gateway's own ${CONFIG.stt_budget_seconds} s ceiling for one
-        request — it would come back as a 504 with the work thrown away. Split
-        the recording, or paste it as a link instead and trim it on the card.`);
+        the gateway's ${CONFIG.stt_budget_seconds} s ceiling. Split the
+        recording, or paste it as a link and trim it.`);
     }
   } catch (err) {
     /* A container the browser cannot decode (some MKV subtitle tracks, AC-3,
        DTS) is not a failure: stt decodes with libav and will manage it. */
     stt.prepared = null;
-    note($("stt-note"), "flat", `Your browser could not decode that one
-      (${err.message || err}), so it will be uploaded as it is —
-      the server decodes with libav and handles far more than a browser does.`);
+    note($("stt-note"), "flat", `This browser could not decode that file
+      (${err.message || err}), so it uploads as it is.`);
   }
   updateRouteAvailability();
 }
@@ -1683,9 +1726,9 @@ function updateRouteAvailability() {
   const ok = sixteen && !subtitles;
   native.disabled = !ok;
   native.textContent =
-    ok ? "/transcribe — richer, 16 kHz only"
-    : !sixteen ? "/transcribe — unavailable: this file is not 16 kHz and was not decoded here"
-    : "/transcribe — unavailable: it has no timings, so it cannot write subtitles";
+    ok ? "/transcribe (16 kHz only)"
+    : !sixteen ? "/transcribe: unavailable, this file is not 16 kHz"
+    : "/transcribe: unavailable, it cannot write subtitles";
   if (!ok && select.value === "native") select.value = "v1";
   syncTranscribeControls();
 }
@@ -1744,7 +1787,7 @@ async function resolveLink() {
   const url = ($("url").value || "").trim();
   if (!url) return;
   $("resolve").disabled = true;
-  $("linkhint").textContent = "Resolving — nothing is being downloaded yet.";
+  $("linkhint").textContent = "Resolving. Nothing is downloaded yet.";
   try {
     const facts = await json("/ui/resolve", {
       method: "POST", headers: { "content-type": "application/json" },
@@ -1798,10 +1841,10 @@ async function abandon() {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ token }) });
     if (!out.reaped) {
-      note($("stt-note"), "warn", `Told MeTube to drop that link, but it still
-        has a record of it. Deleting by the wrong id there answers
-        <code>{"status":"ok"}</code> and does nothing, so this is worth a look
-        at the queue on port 30097.`);
+      /* Deleting by the wrong id in MeTube answers {"status":"ok"} and does
+         nothing, which is why a failed reap is worth reporting at all. */
+      note($("stt-note"), "warn", `MeTube still has a record of that link.
+        Check its queue on port 30097.`);
     }
   } catch (err) { note($("stt-note"), "warn", "Could not abandon it: " + err.message); }
 }
@@ -1820,15 +1863,15 @@ async function abandon() {
 function paintFacts(facts, compute) {
   const video = $("c-video").checked;
   const download = video
-    ? (facts.bytes ? `video — gigabytes, not the ${human(facts.bytes)} of audio`
-                   : "video — gigabytes rather than megabytes")
+    ? (facts.bytes ? `gigabytes, not the ${human(facts.bytes)} of audio`
+                   : "gigabytes, not megabytes")
     : (facts.bytes ? human(facts.bytes) + " of audio only"
-                   : "unknown — audio only, roughly 1 MB a minute");
+                   : "unknown, audio only");
   const rows = [
     ["Length", facts.duration ? clock(facts.duration) : "unknown"],
     ["Download", download],
     ["Transcribe", compute ? roughly(compute) + ` at ${rate.stt().toFixed(1)}×`
-                           : "unknown, because the length is unknown"],
+                           : "unknown"],
   ];
   $("c-facts").innerHTML = rows
     .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
@@ -1850,7 +1893,7 @@ function showConfirm(facts) {
      not even because it was selected for the previous link. */
   $("c-video").checked = false;
   $("c-title").textContent = facts.is_live ? "This is a live stream." : "Fetch this?";
-  $("c-sub").textContent = facts.uploader ? facts.title + " — " + facts.uploader : facts.title;
+  $("c-sub").textContent = facts.uploader ? facts.title + " · " + facts.uploader : facts.title;
 
   /* THE TWO ESTIMATES ARE NEVER BLENDED. For long media the download is the
      slow half, and one merged number hides which half to blame when it drags.
@@ -1865,20 +1908,22 @@ function showConfirm(facts) {
   if (facts.is_live) {
     /* A live stream has no end. Fetching it is not "big", it is unbounded, so
        it gets its own wording and its own escape rather than the generic one. */
-    live = `<div class="note bad"><strong>This is a live stream. It has no end.</strong>
-      It will download until something stops it.
+    live = `<div class="note bad"><strong>The stream has no end.</strong>
+      It downloads until you stop it.
       <div class="acts"><button class="small" id="c-ten" type="button">Take the first 10 minutes</button></div></div>`;
   } else if (compute && compute > CONFIG.stt_budget_seconds) {
+    /* Past the ceiling the gateway answers 504 and the work is thrown away.
+       The reader trims; the status code is not part of the decision. And the
+       old wording said "Trim it below", which names no control at all. */
     live = `<div class="note warn"><strong>This will not finish in one request.</strong>
-      ${roughly(compute)} of compute is past the gateway's
-      ${CONFIG.stt_budget_seconds} s ceiling, so it would come back as a 504
-      with the work thrown away. Trim it below.</div>`;
+      Set Start at and Stop at to trim it.</div>`;
   }
   if (!facts.probed) {
-    live += `<div class="note flat">The metadata probe ${
-      facts.probe_enabled ? "could not read this link" : "is switched off in this image"},
-      so there is no length or size here — MeTube resolves both and does not
-      expose either. Everything below still works; the estimate does not.</div>`;
+    /* MeTube resolves length and size and exposes neither, so with the probe
+       off or defeated there is nothing to quote. The fetch itself is fine. */
+    live += `<div class="note flat">No length or size for this link${
+      facts.probe_enabled ? "" : ": the metadata probe is off in this image"}.
+      The estimate is unavailable.</div>`;
   }
   $("c-live").innerHTML = live;
   if (facts.is_live) $("c-ten") && $("c-ten").addEventListener("click", () => {
@@ -1886,7 +1931,7 @@ function showConfirm(facts) {
   });
 
   $("c-subs").innerHTML = facts.has_subtitles
-    ? `<div class="note ok"><strong>This has real subtitles already</strong> — written by a person. Near-instant, and no transcription.
+    ? `<div class="note ok"><strong>This has real subtitles already</strong>, written by a person.
        <div class="acts"><button class="small" id="c-caps" type="button">Use the existing subtitles</button></div></div>`
     : "";
   if (facts.has_subtitles) $("c-caps").addEventListener("click", () => {
@@ -1971,9 +2016,9 @@ async function watchDownload() {
       return;
     }
     const percent = Number(state.percent) || 0;
-    note(host, "flat", `Downloading — ${percent.toFixed(0)}%${
-      state.speed ? " at " + human(state.speed) + "/s" : ""}${
-      state.eta ? ", " + clock(state.eta) + " left" : ""}
+    note(host, "flat", `Downloading ${percent.toFixed(0)}%${
+      state.speed ? " · " + human(state.speed) + "/s" : ""}${
+      state.eta ? " · " + clock(state.eta) + " left" : ""}
       <div class="bar-track"><div class="bar-fill" style="transform:scaleX(${(percent / 100).toFixed(4)})"></div></div>
       <button class="link" id="stopdl" type="button">Stop and forget it</button>`);
     const stop = $("stopdl");
@@ -2173,7 +2218,7 @@ function renderCaptions(payload) {
   $("result").hidden = false;
   $("transcript").textContent = display;
   $("result-meta").textContent = lines.length
-    ? `subtitles · ${lines.length} cues · nothing transcribed`
+    ? `subtitles · ${lines.length} cues`
     : "subtitles · no cues this page can read";
   /* The glossary field belongs to a transcription and there was not one. The
      note render() leaves here would otherwise still be on screen from the
@@ -2616,8 +2661,8 @@ function sttPlayback(display, cues, lines) {
        somebody else's. */
     $("sttwhy").textContent = stt.token
       ? (stt.captions
-         ? "No player: the subtitles were taken and no media was downloaded."
-         : "No player: that download is not something this page can play back.")
+         ? "No player: no media was downloaded."
+         : "No player: this page cannot play that download.")
       : "";
     $("sttwhy").hidden = !$("sttwhy").textContent;
     return;
@@ -2645,11 +2690,13 @@ function sttPlayback(display, cues, lines) {
   $("sttplay").hidden = false;
   $("sttwhy").hidden = true;
 
-  /* Said once, where the player is, and only when it is true: the bytes are
-     coming off the NAS as they are needed rather than sitting in this tab. */
-  const streamed = source.url ? " Streamed from the server as you play." : "";
+  /* IT USED TO ADD " Streamed from the server as you play." for a link. True
+     -- the bytes come off the NAS as the element asks for them rather than
+     sitting in this tab -- and there is nothing the reader does with it. The
+     scrub bar moves either way. sttStreaming is the flag that matters, and it
+     is read by the error handler rather than printed. */
   if (!cues) {
-    $("sttplayhint").textContent = "No timings in this response." + streamed;
+    $("sttplayhint").textContent = "No timings in this response.";
     return;
   }
   karaoke.cues = cues;
@@ -2660,7 +2707,7 @@ function sttPlayback(display, cues, lines) {
   karaoke.lines = video && lines && lines.length ? lines : null;
   karaoke.spans = paint($("transcript"), display, cues);
   $("transcript").className = "out karaoke";
-  $("sttplayhint").textContent = "Click a word to jump there." + streamed;
+  $("sttplayhint").textContent = "Click a word to jump there.";
 }
 
 /* A file the browser cannot decode for playback is not a failure worth a red
@@ -2678,10 +2725,8 @@ $("sttplayer").addEventListener("error", () => {
      the first thing to check -- and "your browser cannot play that file" would
      be a false statement about a file the browser never received. */
   $("sttwhy").textContent = sttStreaming
-    ? "No playback: the server would not serve that media back. The transcript above is unaffected."
-    : "Your browser cannot play that file back, so there "
-      + "is nothing to follow along with. The transcript above is unaffected — "
-      + "the server decodes with libav and handles far more than a browser does.";
+    ? "No playback: the server did not return the media. The transcript is unaffected."
+    : "This browser cannot play that file. The transcript is unaffected.";
 });
 
 /* A CONTAINER THE BROWSER WILL NOT RENDER COSTS THE PICTURE, NOT THE FEATURE.
@@ -2848,17 +2893,17 @@ async function render(response, format) {
      the browser-side 16 kHz extraction above matters: it is what makes the
      native route reachable for a file that was not already 16 kHz. Until
      an X-Glossary-Repaired header lands on /v1 (about five lines in stt), the
-     /v1 path genuinely cannot report this, and saying so is better than
-     pretending nothing was rewritten. */
+     /v1 path genuinely cannot report this.
+
+     IT USED TO SAY SO ON THE CARD: "Glossary changes are not reported on this
+     route -- only /transcribe returns them." That is a gap in another service,
+     printed after every /v1 run, and the reader can do nothing with it. The
+     card now shows the rewrites when there are rewrites to show, and nothing
+     otherwise. */
   if (repaired && repaired.length) {
     $("repaired").hidden = false;
     $("repaired").innerHTML = "Glossary rewrote: <strong>" +
       repaired.map(esc).join("</strong>, <strong>") + "</strong>";
-  } else if (format !== "native") {
-    $("repaired").hidden = false;
-    $("repaired").className = "note flat";
-    $("repaired").innerHTML = `Glossary changes are not reported on this route —
-      only <code>/transcribe</code> returns them.`;
   } else {
     $("repaired").hidden = true;
   }
@@ -3118,10 +3163,10 @@ async function loadVoices() {
      after the engines, appeared to swap for no visible reason. Speed is what
      you choose on; the engine is what you then need to recognise. */
   let html = "";
-  html += group("Kokoro, instant — English (US)", forLang(kokoro && kokoro.en_us));
-  html += group("Kokoro, instant — English (UK)", forLang(kokoro && kokoro.en_gb));
-  html += group("Kokoro, instant — Portuguese (Brazil)", forLang(kokoro && kokoro.pt_br));
-  html += group("Kokoro, instant — other languages", all.filter(v => !known.has(v)));
+  html += group("Kokoro, instant: English (US)", forLang(kokoro && kokoro.en_us));
+  html += group("Kokoro, instant: English (UK)", forLang(kokoro && kokoro.en_gb));
+  html += group("Kokoro, instant: Portuguese (Brazil)", forLang(kokoro && kokoro.pt_br));
+  html += group("Kokoro, instant: other languages", all.filter(v => !known.has(v)));
 
   /* CHATTERBOX IS ALWAYS HERE, and it used not to be. This group was built
      only `if (clones.length)`, so on a fresh deployment with nothing cloned
@@ -3140,9 +3185,13 @@ async function loadVoices() {
      CHATTERBOX_LANGS. Hiding them when a language is chosen would be hiding
      voices that can do the job. */
   const factor = (1 / rate.clone()).toFixed(0);
-  html += `<optgroup label="Chatterbox, slow — about ${factor}× the length of the audio, queued as a job">` +
-    `<option value="c:default">default — Chatterbox's own voice, no clip needed</option>` +
-    clones.map(c => `<option value="c:${esc(c.name)}">${esc(c.name)} — your clone</option>`).join("") +
+  /* The optgroup carries the cost, because the cost is what the reader picks
+     on. Each option under it used to repeat the header: "Chatterbox's own
+     voice" beneath a Chatterbox label, and "your clone" beside every name the
+     reader typed themselves. */
+  html += `<optgroup label="Chatterbox, slow: about ${factor}× the audio length, queued as a job">` +
+    `<option value="c:default">default (no clip needed)</option>` +
+    clones.map(c => `<option value="c:${esc(c.name)}">${esc(c.name)}</option>`).join("") +
     "</optgroup>";
   html += `<option value="new">+ Clone a new voice (Chatterbox)…</option>`;
   const previous = select.value;
@@ -3234,7 +3283,7 @@ $("x-troute").addEventListener("change", () => { syncSpeakControls(); estimate()
 $("delvoice").addEventListener("click", async () => {
   const voice = currentVoice();
   if (voice.kind !== "clone") return;
-  if (!confirm(`Delete the cloned voice "${voice.name}"? The clip is removed from disk.`)) return;
+  if (!confirm(`Delete the voice "${voice.name}"? The clip is deleted from disk.`)) return;
   try {
     await json("/ui/clips/" + encodeURIComponent(voice.name), { method: "DELETE" });
     await loadVoices();
@@ -3291,19 +3340,18 @@ function estimate() {
     note($("speak-note"), "", "");
   } else {
     const compute = audio / rate.clone();
-    /* THE ETA IS IN THE BUTTON. Nobody presses "Generate — about 36 minutes"
+    /* THE ETA IS IN THE BUTTON. Nobody presses "Generate (about 36 minutes)"
        by accident, and nobody has to go looking for a warning. Kokoro's button
        just says "Speak"; the asymmetry is the message. */
     $("go-tts").textContent = text.trim()
-      ? "Generate — " + roughly(compute) : "Generate";
+      ? "Generate (" + roughly(compute) + ")" : "Generate";
     if (compute > 600) {
       /* A WARNING WITH NO ESCAPE IS JUST AN OBSTACLE. The cheap path is
          offered as a button, not described in a sentence. */
       const quick = nearestKokoro();
       note($("speak-note"), "warn",
-        `${Math.round(text.trim().split(/\s+/).length)} words in this voice is
-         ${roughly(compute)} of compute.${quick ? ` <strong>${quick}</strong>
-         would do it in ${roughly(audio / rate.kokoro())}.` : ""}
+        `This is ${roughly(compute)} of compute.${quick ? ` <strong>${quick}</strong>
+         would take ${roughly(audio / rate.kokoro())}.` : ""}
          <div class="acts">
            ${quick ? `<button class="small" id="useq" type="button">Use ${quick} instead</button>` : ""}
            <button class="small" id="anyway" type="button">Queue it anyway</button>
@@ -3358,9 +3406,9 @@ function codeSwitchNote(text) {
      control that is not on the screen. Same test the request builder uses. */
   const editor = !$("tts-expert-fast").hidden && !$("addseg").disabled;
   if (pt && en && editor && !store.get("dismissed.codeswitch", false)) {
-    $("codeswitch").innerHTML = `<div class="note flat">Mixed English and
-      Portuguese — one language is sent for all of it. Use the
-      <strong>segments editor</strong> to switch voice mid-text.
+    $("codeswitch").innerHTML = `<div class="note flat">One request sends one
+      language. Use the <strong>segments editor</strong> to change voice
+      mid-text.
       <button class="small link" id="dismisscs" type="button">Got it</button></div>`;
     $("dismisscs").addEventListener("click", () => {
       store.set("dismissed.codeswitch", true); $("codeswitch").innerHTML = "";
@@ -3375,11 +3423,11 @@ function addSegment(text) {
   const row = document.createElement("div");
   row.className = "row";
   row.style.marginTop = "8px";
-  row.innerHTML = `<input type="text" class="seg-text" placeholder="one segment of speech" value="${esc(text || "")}">
+  row.innerHTML = `<input type="text" class="seg-text" placeholder="segment text" value="${esc(text || "")}">
     <div class="tight" style="min-width:110px"><label>pause after (s)</label>
       <input type="number" class="seg-pause" min="0" max="10" step="0.1" value="0"></div>
     <div class="tight" style="min-width:150px"><label>voice</label>
-      <select class="seg-voice"><option value="">same as above</option>${
+      <select class="seg-voice"><option value="">same voice</option>${
         ((VOICES.kokoro && VOICES.kokoro.voices) || [])
           .map(v => `<option>${v}</option>`).join("")}</select></div>
     <button class="small tight seg-del" type="button">×</button>`;
@@ -3536,7 +3584,7 @@ async function speakNow(voice, text) {
        honest thing is to say so rather than play it. */
     const payload = await response.json();
     if (payload.id) { adopt(payload.id); throw new Error(
-      "That came back as a queued job rather than audio — see the Jobs tab."); }
+      "That came back as a job. Open the Jobs tab."); }
     throw new Error(reason(payload, "unexpected JSON from a speech request"));
   } else {
     blob = await response.blob();
@@ -3697,15 +3745,16 @@ async function queueJob(voice, text) {
       headers:{ "content-type":"application/json" }, body: JSON.stringify(body) });
   } catch (err) {
     if (err.status === 429) {
-      throw new Error(`The queue is full. ${err.retryAfter
-        ? "It suggests trying again in " + err.retryAfter + " s."
-        : ""} Nothing was queued — press Generate again when it drains.`);
+      throw new Error(`The queue is full. Nothing was queued.${err.retryAfter
+        ? " Try again in " + err.retryAfter + " s." : ""}`);
     }
     if (err.status === 504) {
-      throw new Error(`The gateway gave up waiting. tts-long's own read timeout
-        sits above its 180 s synchronous window, so this means it is not
-        answering at all rather than merely slow — but any job it did accept is
-        still queued, so check the Jobs tab before resending.`);
+      /* tts-long's own read timeout sits above its 180 s synchronous window,
+         so a 504 here means it is not answering at all rather than merely
+         slow. A job it did accept is still queued either way, which is the
+         only half of that the reader acts on. */
+      throw new Error(`The gateway gave up waiting. Check the Jobs tab before
+        you send it again.`);
     }
     if (err.status === 503) {
       throw new Error("Chatterbox is restarting. Try again in half a minute.");
@@ -3754,8 +3803,7 @@ function renderJobs() {
   $("jobcount").textContent = running ? String(running) : "";
 
   if (!list.length) {
-    $("joblist").innerHTML = `<div class="hint">No jobs. Cloned voices are queued
-      here; instant voices play straight back on the Speak tab.</div>`;
+    $("joblist").innerHTML = `<div class="hint">No jobs. Cloned voices queue here.</div>`;
     document.title = "ai-voice";
     return;
   }
@@ -3811,14 +3859,14 @@ function renderJobs() {
       </div>
       ${live ? `<div class="bar-track"><div class="bar-fill" style="transform:scaleX(${(percent / 100).toFixed(4)})"></div></div>
         <div class="hint">${over
-          ? `still going — ${clock(elapsed)} in, past the ${clock(budget)} estimate`
+          ? `${clock(elapsed)} in, past the ${clock(budget)} estimate`
           : `${clock(elapsed)} in, ${roughly(budget - elapsed)} left`} · estimate</div>` : ""}
       ${preview ? `<details class="jobtext"${openRows.has(job.id) ? " open" : ""}><summary>${esc(preview)}</summary>
         <div class="body" data-text="${esc(job.id)}">Loading…</div></details>`
-        : job.recovered ? `<div class="hint">Recovered from disk after a
-            restart — what was said, and in which voice, was not kept.</div>` : ""}
+        : job.recovered ? `<div class="hint">Recovered after a restart. The
+            text and voice were not kept.</div>` : ""}
       ${job.status === "failed" ? `<div class="note bad">${esc(job.error || "no reason given")}</div>` : ""}
-      ${expired ? `<div class="hint">expired — the audio was deleted after ${TTL / 3600} hours</div>` : ""}
+      ${expired ? `<div class="hint">expired: the audio was deleted after ${TTL / 3600} hours</div>` : ""}
       ${job.realtime_factor ? `<div class="hint">${job.audio_seconds.toFixed(0)} s of audio in
         ${job.compute_seconds.toFixed(0)} s · ${job.realtime_factor.toFixed(3)}× realtime</div>` : ""}
       <div class="acts">
@@ -3831,13 +3879,13 @@ function renderJobs() {
           audio ? "Delete the audio" : "Forget"}</button>
       </div>
       ${live ? `<div class="hint">You can close this page. The job runs on the
-        server; come back to Jobs.</div>` : ""}
+        server.</div>` : ""}
     </div>`;
   }).join("");
 
   /* The answer on a background tab, without needing the tab. */
   document.title = soonest !== null && soonest > 0
-    ? `${Math.max(1, Math.round(soonest / 60))}m left — ai-voice` : "ai-voice";
+    ? `${Math.max(1, Math.round(soonest / 60))}m left · ai-voice` : "ai-voice";
 
   $("joblist").querySelectorAll("[data-play]").forEach(b =>
     b.addEventListener("click", () => playJob(b.dataset.play)));
@@ -3952,9 +4000,8 @@ async function forgetJob(id) {
      worth a dialog and does not get one. */
   const job = jobs.get(id);
   if (job && hasAudio(job) && !confirm(
-      `Delete the audio for job ${id.slice(0, 8)}?\n\nIt is deleted on the `
-      + `server, so it goes from every device, and it cannot be recovered. `
-      + `Download it first if you want to keep it.`)) return;
+      `Delete the audio for job ${id.slice(0, 8)}?\n\nThis cannot be undone. `
+      + `It is deleted on the server, so it goes from every device.`)) return;
   try {
     await json(`/jobs/${encodeURIComponent(id)}`, { method: "DELETE" });
   } catch (err) {
@@ -4029,8 +4076,7 @@ async function refreshJobs() {
     const unfinished = was.status === "queued" || was.status === "running";
     jobs.set(seen.id, unfinished
       ? { ...was, status: "failed",
-          error: "lost when the service restarted — the queue is in memory, "
-               + "so anything not finished did not survive" }
+          error: "lost when the service restarted" }
       : was);
   }
   store.set("jobs", keep);
@@ -4190,7 +4236,7 @@ $("clipresolve").addEventListener("click", async () => {
         .replace(/[^a-z0-9_-]+/g, "-").replace(/^-|-$/g, "").slice(0, 48);
     }
     note($("cliplinkhint"), "ok", esc(facts.title)
-      + (facts.duration ? ` — ${clock(facts.duration)}` : ""));
+      + (facts.duration ? ` · ${clock(facts.duration)}` : ""));
   } catch (err) {
     cliplink = null;
     $("cliprange").hidden = true;
@@ -4208,7 +4254,7 @@ $("clipimport").addEventListener("click", async () => {
 
   $("clipimport").disabled = true;
   try {
-    note($("cliplinkhint"), "flat", "Fetching that window…");
+    note($("cliplinkhint"), "flat", "Fetching…");
     await json("/ui/commit", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ token: cliplink.token, for_clip: true,
@@ -4284,8 +4330,7 @@ async function prepareClip(file, suggestedName) {
           .replace(/[^a-z0-9_-]+/g, "-").replace(/^-|-$/g, "").slice(0, 48);
       }
       note($("clipnote"), "ok",
-           "Sending it as it is — this browser could not decode it, and the "
-           + "voice service can.");
+           "Sending the original file. This browser could not decode it.");
       return;
     }
     clipSuffix = ".wav";
@@ -4302,8 +4347,8 @@ async function prepareClip(file, suggestedName) {
     note($("clipnote"), out.seconds < 8 ? "warn" : "ok",
       `${out.seconds.toFixed(1)} s ready.` +
       (out.seconds >= CONFIG.max_clip_seconds
-        ? ` Trimmed to the ${CONFIG.max_clip_seconds} s ceiling here, so nothing was uploaded twice.`
-        : out.seconds < 8 ? " Under ten seconds is thin — Chatterbox wants 10–30." : ""));
+        ? ` Trimmed to ${CONFIG.max_clip_seconds} s.`
+        : out.seconds < 8 ? " Under 10 s is thin." : ""));
   } catch (err) {
     clip = null; $("saveclip").disabled = true;
     note($("clipnote"), "bad", "Could not read that: " + (err.message || err));
@@ -4450,9 +4495,10 @@ $("saveclip").addEventListener("click", async () => {
     await loadVoices();
     $("voice").value = "c:" + payload.voice.name;
     onVoiceChange();
-    note($("speak-note"), "ok", `<strong>${payload.voice.name}</strong> is ready.
-      Cloned voices use Chatterbox: about ${(1 / rate.clone()).toFixed(0)}× the
-      length of the audio in compute, queued as a job you can walk away from.`);
+    /* It used to add what a cloned voice costs. The voice is now selected,
+       so the optgroup holding it says that, and estimate() has already put the
+       figure on the Generate button. Three copies of one number. */
+    note($("speak-note"), "ok", `<strong>${payload.voice.name}</strong> is ready.`);
   } catch (err) {
     note($("clipnote"), "bad", err.message);
     $("saveclip").disabled = false;
@@ -4469,9 +4515,12 @@ $("saveclip").addEventListener("click", async () => {
   $("linkrow").hidden = !CONFIG.ingestion;
   if (!CONFIG.ingestion) {
     $("linkhint").textContent = "";
-  } else if (!CONFIG.probe) {
-    $("linkhint").innerHTML = `<span class="hint">Links work, but there will be no length or size.</span>`;
   }
+  /* WITH THE PROBE OFF this said "Links work, but there will be no length or
+     size" under an empty box, before anybody had pasted anything. The confirm
+     card says the same thing at the moment it costs something: Length and
+     Transcribe both read "unknown" there, and the note beside them names the
+     probe. CONFIG.probe is still served and is no longer read here. */
 
   await poll();
   setInterval(poll, 30000);
@@ -4493,7 +4542,7 @@ $("saveclip").addEventListener("click", async () => {
        restart — which would be the worst possible version of this feature. */
     const option = [...$("voice").options].find(o => o.value === "new");
     if (option) { option.disabled = true;
-      option.textContent = "+ Use my own voice… (no voices volume mounted)"; }
+      option.textContent = "+ Clone a new voice (unavailable)"; }
   }
   estimate();
   for (const seen of remembered()) if (!jobs.has(seen.id)) jobs.set(seen.id,

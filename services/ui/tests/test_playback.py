@@ -450,10 +450,15 @@ def test_the_only_link_left_without_a_player_is_the_captions_one():
     """skip_download means no media stream was pulled at all, so that path
     genuinely has nothing to play -- and it is the one case where this page is
     fastest, which is worth its own sentence rather than a shortened version of
-    somebody else's."""
+    somebody else's.
+
+    THE SENTENCE IS SHORTER NOW. It read "the subtitles were taken and no media
+    was downloaded", which says one thing twice: the reader is looking at a
+    transcript, so where it came from is on the screen already. What is missing
+    is the player, and the reason is that no media exists to play."""
     body = _playback()
     assert '$("sttwhy").textContent = stt.token' in body
-    assert "the subtitles were taken and no media was downloaded" in body
+    assert "No player: no media was downloaded." in body
 
 
 def test_the_element_is_given_the_url_and_does_the_ranges_itself():
@@ -521,17 +526,29 @@ def test_the_card_says_what_keeping_the_video_costs_before_it_is_fetched():
 
 
 def test_the_new_copy_stays_under_the_line_length_this_page_holds_to():
-    """The user has twice asked for interface copy to be CUT. Every string this
-    feature adds is one sentence, and this is the bar it was written to."""
+    """The user has now asked THREE times for interface copy to be CUT. Every
+    string this feature adds is one sentence, and this is the bar.
+
+    THE FOURTH STRING IS GONE RATHER THAN SHORTENED. " Streamed from the server
+    as you play." was true and did nothing: the scrub bar behaves the same
+    either way, so it told the reader a fact with no action attached to it. It
+    is asserted absent here so that a later pass cannot quietly restore it.
+
+    The other three lost their em dashes. A dash is the punctuation that hides
+    a second clause inside a first one, which is the construction this page's
+    writing standard replaces with brackets, a colon or a full stop.
+    """
     strings = [
-        "Keep the video — a much bigger download",
-        "video — gigabytes rather than megabytes",
-        "No player: that download is not something this page can play back.",
-        " Streamed from the server as you play.",
+        "Keep the video (a much bigger download)",
+        "gigabytes, not megabytes",
+        "No player: this page cannot play that download.",
     ]
     for line in strings:
         assert line in HTML, f"the page no longer says {line!r}"
         assert len(line) < 110, f"{len(line)} characters: {line!r}"
+        assert "—" not in line, f"an em dash is back in {line!r}"
+    assert "Streamed from the server as you play" not in code(_playback()), \
+        "the sentence that did nothing is back on the player"
 
 
 def test_a_file_the_browser_cannot_decode_does_not_look_like_a_failure():
@@ -540,7 +557,12 @@ def test_a_file_the_browser_cannot_decode_does_not_look_like_a_failure():
     a browser does."""
     handler = HTML[HTML.index('$("sttplayer").addEventListener("error"'):]
     handler = handler[:handler.index("\nlet lastTranscript")]
-    assert "The transcript above is unaffected" in handler
+    # "above" is a direction, and a reader on a phone, or one who has scrolled,
+    # is not looking at whatever the writer was. The transcript is named; where
+    # it sits is not. The libav clause went with it: the comment over this
+    # handler already carries the reason, and the reader cannot act on it.
+    assert "The transcript is unaffected" in handler
+    assert "above" not in handler, "the handler points at a position again"
     assert '$("sttplay").hidden = true' in handler
 
 
@@ -556,7 +578,8 @@ def test_a_link_that_will_not_load_is_not_blamed_on_the_browser():
     handler = HTML[HTML.index('$("sttplayer").addEventListener("error"'):]
     handler = handler[:handler.index("\n/* A CONTAINER THE BROWSER")]
     assert "$(\"sttwhy\").textContent = sttStreaming" in handler
-    assert "the server would not serve that media back" in handler
+    # Active voice with the actor named: the server did or did not do a thing.
+    assert "the server did not return the media" in handler
     body = code(_playback())
     assert "sttStreaming = !source.file;" in body
 
