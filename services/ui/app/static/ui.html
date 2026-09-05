@@ -404,6 +404,15 @@ dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
    losing your place in a five-thousand-word transcript. */
 .out.karaoke{position:relative}
 .cue{border-radius:3px;cursor:pointer}
+/* PRESS FEEDBACK ON EVERY PRESSABLE SURFACE, not only <button>. The
+   reference's response rule is to acknowledge on pointerdown, and a
+   transcript word is the most-clicked surface on this page -- it seeks the
+   player -- yet it committed on release with nothing on press. A disclosure
+   summary is the same. Opacity rather than scale on the cue: a word inside a
+   line of text cannot shrink without shifting its neighbours. */
+.cue:active{background:var(--mark-bg);opacity:.72}
+details>summary:active{opacity:.72}
+
 .cue.on{background:var(--mark-bg);color:var(--mark-ink);font-weight:700;
   text-decoration:underline;text-decoration-thickness:2px;
   text-underline-offset:2px;transition:background-color .08s linear}
@@ -457,6 +466,10 @@ dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
    change reads the same media query in JS, at call time, exactly as follow()
    does, so an OS change mid-session takes effect. */
 @media (prefers-reduced-motion:reduce){
+  /* The press acknowledgement stays and only loses its scale -- reduced
+     motion means gentler feedback, not none, and the opacity step that
+     replaces it is not vestibular. */
+  button:active{transform:none}
   button:active:not(:disabled){transform:none;opacity:.65}
   .tabs button:active:not(:disabled){transform:none;opacity:.65}
   dialog{transform:none}
@@ -470,6 +483,9 @@ dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
   dialog::backdrop,dialog[open]::backdrop{
     -webkit-backdrop-filter:none;backdrop-filter:none}
   dialog[open]::backdrop{background-color:rgba(0,0,0,.7)}
+  /* The plate over moving video is where raising opacity matters most, and it
+     was the one translucent surface this query did not reach. */
+  .band span{background:#000}
 }
 @media (prefers-contrast:more){
   :root{--line:#8a939e;--dim:#3d4650;--card-line:#8a939e}
@@ -477,6 +493,7 @@ dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
     -webkit-backdrop-filter:none;backdrop-filter:none;
     border-bottom:1px solid var(--line)}
   .card,.job{border:1px solid var(--line)}
+  .band span{background:#000;border:1px solid #fff}
   details{border:1px solid var(--line);border-radius:var(--radius);
     padding:0 var(--s3)}
   .note.flat{border:1px solid var(--line);border-left-width:2px;
@@ -606,7 +623,7 @@ dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
             <div>
               <label for="x-rf">response_format</label>
               <select id="x-rf">
-                <option value="">follow the Output control above</option>
+                <option value="">follow Transcript format above</option>
                 <option value="json">json</option>
                 <option value="text">text</option>
                 <option value="verbose_json">verbose_json</option>
@@ -1186,6 +1203,9 @@ const speechSeconds = (text) => (text || "").length / 15;
 const TABS = Array.from(document.querySelectorAll('[role=tab]'));
 TABS.forEach(button => {
   button.addEventListener("click", () => {
+    /* Re-selecting the selected tab is not a state change, so it gets no
+       animation: without this a double-click on one tab flashed it. */
+    const changed = button.getAttribute("aria-selected") !== "true";
     TABS.forEach(b => {
       b.setAttribute("aria-selected", String(b === button));
       /* A ROVING TABSTOP. Three separate stops in front of the panel is what
@@ -1202,19 +1222,43 @@ TABS.forEach(button => {
        Web Animations rather than a class or an inline style write: it is
        fire-and-forget, it clears its own transform afterwards (an element left
        with a non-none transform becomes a containing block for anything fixed
-       inside it), and it never blocks input -- grabbing another tab
-       mid-animation just starts the next one. The state change is already
-       complete by the time this runs; the motion is decoration over it.
+       inside it), and it never blocks input.
+
+       IT STARTS FROM THE PRESENTATION VALUE, WHICH IT DID NOT. The first
+       keyframe was the literal `opacity: 0` -- a target, not a live read -- so
+       a tab grabbed mid-flight jumped: measured under a stub DOM, a second
+       click at t=60ms restarted from 0 while 0.333 was on screen. That is the
+       one rule the reference calls the single most important, and the comment
+       here claimed it while the code did the opposite.
+
+       getAnimations() gives the live value without reading layout: an
+       animation still running is cancelled and its computed opacity taken as
+       the new floor. Re-selecting the tab already selected returns early
+       instead, because there is no state change to decorate and the flash was
+       reachable by double-clicking one tab.
 
        Reduced motion drops the translate and keeps the fade, read at call time
        exactly as follow() does, so an OS change mid-session takes effect. */
     const panel = $("tab-" + button.dataset.tab);
-    if (panel && panel.animate) {
+    if (panel && panel.animate && changed) {
       const calm = matchMedia("(prefers-reduced-motion: reduce)").matches;
+      /* The live value, before cancelling: a running animation's own effect
+         knows where it is, and getComputedStyle would force a style flush for
+         a number this already has. */
+      let from = 0;
+      for (const running of panel.getAnimations()) {
+        const played = running.effect && running.effect.getComputedTiming();
+        if (played && typeof played.progress === "number") {
+          from = Math.max(from, played.progress);
+        }
+        running.cancel();
+      }
+      const shift = calm ? 0 : 4 * (1 - from);
       panel.animate(
-        [{ opacity: 0, transform: calm ? "none" : "translateY(4px)" },
+        [{ opacity: from, transform: shift ? `translateY(${shift}px)` : "none" },
          { opacity: 1, transform: "none" }],
-        { duration: calm ? 120 : 180, easing: "cubic-bezier(.2,.7,.3,1)" });
+        { duration: (calm ? 120 : 180) * (1 - from),
+          easing: "cubic-bezier(.2,.7,.3,1)" });
     }
   });
   /* Arrow, Home and End over the strip. It calls next.click() rather than

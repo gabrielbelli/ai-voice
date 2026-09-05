@@ -219,8 +219,40 @@ def test_the_tab_change_is_calmer_under_reduced_motion_rather_than_gone():
     handler = SCRIPT[SCRIPT.index("const TABS = Array.from"):]
     handler = handler[:handler.index("const scrollEdge")]
     assert 'matchMedia("(prefers-reduced-motion: reduce)").matches' in handler
-    assert 'calm ? "none" : "translateY(4px)"' in handler
-    assert "opacity: 0" in handler, "the fade went with the slide"
+    assert "calm ? 0 : 4 * (1 - from)" in handler, "the translate survived"
+    assert "opacity: from" in handler, "the fade went with the slide"
+    # `from` is 0 on an uninterrupted change, so the fade is unchanged there;
+    # it is the LIVE value when a tab is grabbed mid-flight. The literal
+    # `opacity: 0` this used to assert was the defect, not the property --
+    # see test_the_tab_animation_starts_from_the_presentation_value.
+
+
+def test_the_tab_animation_starts_from_the_presentation_value():
+    """It animated from the TARGET, which the reference calls the single most
+    important rule to get right.
+
+    The first keyframe was the literal `opacity: 0` -- not a live read -- so a
+    tab grabbed mid-flight jumped. Measured under a stub DOM: a second click at
+    t=60ms restarted from 0 while 0.333 was on screen. Two reachable paths, A
+    to B to A inside 180ms, and a double-click on one tab, which had no guard
+    at all.
+    """
+    handler = SCRIPT[SCRIPT.index("const TABS = Array.from"):]
+    handler = handler[:handler.index("const scrollEdge")]
+    assert "panel.getAnimations()" in handler, "no live value is read"
+    assert "getComputedTiming()" in handler
+    assert "running.cancel()" in handler, "the old animation is left running"
+    assert "opacity: from" in handler
+    assert "(1 - from)" in handler, "the remaining duration is not shortened"
+
+
+def test_re_selecting_the_selected_tab_animates_nothing():
+    """Without this a double-click on one tab flashed it: there is no state
+    change to decorate."""
+    handler = SCRIPT[SCRIPT.index("const TABS = Array.from"):]
+    handler = handler[:handler.index("const scrollEdge")]
+    assert 'button.getAttribute("aria-selected") !== "true"' in handler
+    assert "&& changed" in handler
 
 
 def test_the_asserted_reduced_motion_rule_is_still_one_line_by_itself():
@@ -404,3 +436,45 @@ def test_the_interface_gained_no_new_prose():
                  "Auto-detect is not a\n            default here, it is the only correct behaviour.",
                  "reconciled, not copied."):
         assert kept in HTML, kept
+
+
+def test_every_pressable_surface_acknowledges_the_press():
+    """`:active` reached <button> and nothing else.
+
+    A transcript word is the most-clicked surface on the Transcribe tab -- it
+    seeks the player -- and it committed on release with no feedback on press.
+    A disclosure summary was the same. Both take cursor:pointer, which is the
+    promise this was failing to keep.
+    """
+    assert ".cue:active{" in BARE_CSS
+    assert "details>summary:active{" in BARE_CSS
+
+
+def test_the_cue_press_does_not_move_its_neighbours():
+    """Opacity, not scale: a word inside a line of text cannot shrink without
+    shifting the words beside it."""
+    rule = BARE_CSS[BARE_CSS.index(".cue:active{"):]
+    rule = rule[:rule.index("}")]
+    assert "transform" not in rule and "scale" not in rule
+
+
+def test_the_caption_plate_answers_the_transparency_queries():
+    """It is the one translucent surface both queries missed, and the one over
+    moving video -- which is exactly where raising opacity matters."""
+    for query in ("prefers-reduced-transparency:reduce", "prefers-contrast:more"):
+        block = BARE_CSS[BARE_CSS.index("@media (" + query + ")"):]
+        block = block[:block.index("\n}")]
+        assert ".band span" in block, f"{query} does not reach the caption plate"
+
+
+def test_no_control_refers_to_a_label_that_no_longer_exists():
+    """An <option> read "follow the Output control above" after that control
+    had been renamed Transcript format. A pointer to a name nothing carries is
+    worse than no pointer."""
+    import re as _re
+
+    labels = set(_re.findall(r"<label[^>]*>([^<]+)</label>", HTML))
+    labels = {l.strip() for l in labels}
+    for referenced in _re.findall(r"follow (?:the )?([A-Z][A-Za-z ]+?)(?: control)? above", HTML):
+        assert referenced.strip() in labels, \
+            f"an option points at {referenced!r}, which is not a label on this page"
