@@ -330,6 +330,9 @@ def _run(synth: Synth, job: dict) -> None:
                    realtime_factor=round(duration / compute, 3) if compute else 0.0,
                    usage=usage,
                    finished_at=time.time())
+        # Beside the audio, so a restart can rebuild this row rather than a
+        # filename. See _write_sidecar.
+        _write_sidecar(job)
         log.info("%s %s: %.1fs audio in %.0fs (%.2fx)", job["id"][:8],
                  job["status"], duration, compute,
                  duration / compute if compute else 0)
@@ -368,10 +371,98 @@ async def _sweeper() -> None:
 
 
 def _discard(job: dict) -> None:
+    """The audio AND the metadata beside it.
+
+    Both, or every swept or deleted job would leave its {id}.json behind: the
+    same unbounded growth of /output the sweeper exists to stop, in smaller
+    files, and orphans that _recover would then have to reason about.
+    """
     path = job.get("path")
     if path:
         with suppress(OSError):
             Path(path).unlink()
+    job_id = job.get("id")
+    if job_id:
+        with suppress(OSError):
+            _sidecar(job_id).unlink()
+
+
+# WHAT A RESTART MUST NOT LOSE, written beside the audio as {id}.json.
+#
+# `jobs` is a dict in one process, so a restart empties it while the audio
+# survives in the volume. _recover then rebuilt each row from the only thing
+# left, the filename, and the voice, the language, the generation parameters,
+# the chunk count and the realtime factor were simply gone: every recovered row
+# read "voice unknown" (GAB-629, reported with a screenshot of a list whose
+# jobs had all been made with different cloned voices).
+#
+# A file beside the audio, NOT the browser's localStorage: a job made on the
+# laptop would show its voice there and "voice unknown" on the phone, and a
+# fact that depends on which device is asking is worse than an honest blank.
+#
+# `reference` is deliberately absent. It is a server-side path to a voice clip,
+# _public strips it from every response, and the voice NAME is what identifies
+# the job to a reader. `segments` is absent too: _said() flattens it into
+# `text`, which is what the listing previews and what GET /jobs/{id} returns.
+SIDECAR_KEYS = (
+    "status", "format", "voice", "language", "chunks", "cancelled",
+    "exaggeration", "cfg_weight", "temperature",
+    "created_at", "started_at", "finished_at",
+    "audio_seconds", "compute_seconds", "realtime_factor", "usage",
+    "offsets", "text",
+)
+
+
+def _sidecar(job_id: str) -> Path:
+    return OUT_DIR / f"{job_id}.json"
+
+
+def _write_sidecar(job: dict) -> None:
+    """Record a finished job beside its audio, for _recover to read back.
+
+    Never fatal. The audio is the artefact and it is already on disk by the
+    time this runs, so a metadata file that could not be written costs the row
+    its voice and nothing else — which is the state every job was in before
+    this existed. One write of a few hundred bytes, not a temp-file rename: a
+    torn write needs the machine to lose power mid-syscall, and _read_sidecar
+    already has to survive that case anyway.
+    """
+    data = {key: job[key] for key in SIDECAR_KEYS if job.get(key) is not None}
+    said = _said(job)
+    if said:
+        data["text"] = said
+    try:
+        _sidecar(job["id"]).write_text(json.dumps(data), encoding="utf-8")
+    except OSError as exc:
+        log.warning("%s: could not write the metadata sidecar (%s); a restart "
+                    "will recover this job's audio without its voice",
+                    job["id"][:8], exc)
+
+
+def _read_sidecar(job_id: str) -> dict:
+    """What _write_sidecar left, or {} when there is nothing usable.
+
+    Silent about a missing file: every job finished before this release has
+    audio and no sidecar, and those still recover with what the filename
+    carries. A corrupt one is logged instead, because a warning in the log is
+    the only sign of it anybody would ever get.
+
+    Filtered through SIDECAR_KEYS on the way IN as well as out. This file lives
+    in a writable volume, and merging it into the record unfiltered would let
+    whatever is in it set `path` — which is the argument to open() on
+    /jobs/{id}/audio.
+    """
+    try:
+        data = json.loads(_sidecar(job_id).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        log.warning("%s: unreadable metadata sidecar (%s); recovering the "
+                    "audio without it", job_id[:8], exc)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {key: value for key, value in data.items() if key in SIDECAR_KEYS}
 
 
 def _recover() -> int:
@@ -390,12 +481,17 @@ def _recover() -> int:
         orphaned another day's audio permanently. /output grew across restarts
         with nothing able to clean it.
 
-    What is recoverable is exactly what the filename carries: the id and the
-    format. The rest -- voice, language, the generation parameters, the
-    realtime factor -- lived only in the dict and is gone. The recovered record
-    says so with `recovered: true` rather than inventing plausible values, and
-    `finished_at` comes from the file's mtime so the TTL sweep can finally
-    reach it.
+    A FOURTH followed from the fix, and the sidecar is the answer to it. What
+    the filename carries is the id and the format; voice, language, the
+    generation parameters, the chunk count and the realtime factor lived only
+    in the dict, so every recovered row read "voice unknown" -- GAB-629. A job
+    that finishes now writes {id}.json beside its audio (see SIDECAR_KEYS) and
+    this reads it back.
+
+    Where there is no sidecar -- every job finished before this release --
+    nothing changes: the record still says `recovered: true` and still declines
+    to invent a voice, and `finished_at` still comes from the file's mtime so
+    the TTL sweep can reach it.
     """
     found = 0
     for path in sorted(OUT_DIR.glob("*.*")):
@@ -406,7 +502,7 @@ def _recover() -> int:
             stat = path.stat()
         except OSError:
             continue
-        jobs[job_id] = {
+        job = {
             "id": job_id, "status": "done", "format": suffix,
             "path": str(path), "bytes": stat.st_size,
             "created_at": stat.st_mtime, "started_at": stat.st_mtime,
@@ -415,7 +511,25 @@ def _recover() -> int:
             # "one chunk" and "we do not know how many".
             "recovered": True,
         }
+        job.update(_read_sidecar(job_id))
+        # THE FILE ITSELF SETTLES THESE, over anything the sidecar claims:
+        # which format is on disk and how many bytes it is are properties of
+        # what is actually here, and `recovered` is a property of how this row
+        # was built. Only the id, the path and those three are re-imposed --
+        # `finished_at` and the rest are exactly what the sidecar is for.
+        job.update(id=job_id, path=str(path), format=suffix,
+                   bytes=stat.st_size, recovered=True)
+        jobs[job_id] = job
         found += 1
+    # A SIDECAR WHOSE AUDIO HAS GONE describes nothing anybody can play or
+    # list. The walk above is over audio files, so a {id}.json with no job
+    # after it is an orphan -- and leaving it is the growth this function's
+    # third paragraph is about, one directory entry smaller. _discard removes
+    # the pair together, so this only catches audio deleted from outside.
+    for stale in OUT_DIR.glob("*.json"):
+        if stale.stem not in jobs:
+            with suppress(OSError):
+                stale.unlink()
     return found
 
 
@@ -628,6 +742,22 @@ def _segments(text: str | None,
     return [(piece, 0.0) for piece in chunk_text(text or "")]
 
 
+def _said(job: dict) -> str:
+    """Everything this job speaks, as one string.
+
+    Over `segments` AS THE WORKER HOLDS THEM, which are (text, pause_after)
+    pairs -- not the Segment models the request carried. This was reading them
+    as if they were dicts, so `seg.get` raised AttributeError on a tuple and a
+    single segments-only job turned GET /jobs into a 500 for every job in the
+    list. The page sends segments whenever the text has paragraph pauses, so
+    the whole Jobs tab went blank; measured with a one-segment request against
+    the real routes, see test_jobs.py.
+    """
+    if job.get("text"):
+        return job["text"]
+    return " ".join(text for text, _ in (job.get("segments") or []))
+
+
 def _public(job: dict) -> dict:
     """The job as /jobs reports it, over a snapshot for the reason above.
 
@@ -649,8 +779,7 @@ def _public(job: dict) -> dict:
     # hundred kilobytes on a poll that runs every few seconds. GET /jobs/{id}
     # carries the full text -- see below -- which is what a disclosure control
     # in a client should ask for.
-    source = job.get("text") or " ".join(
-        seg.get("text", "") for seg in (job.get("segments") or []))
+    source = _said(job)
     if source:
         source = " ".join(source.split())
         out["text_preview"] = source[:140] + ("…" if len(source) > 140 else "")
@@ -677,8 +806,14 @@ def get_job(job_id: str) -> dict:
     if not job:
         raise HTTPException(404, "no such job")
     out = _public(job)
-    if job.get("text"):
-        out["text"] = job["text"]
+    # _said, not job["text"], so a segments-only job answers with what it will
+    # say. `text` is null on those, and the page's expandable row reads exactly
+    # this field -- so every job the Speak tab submits with paragraph pauses
+    # said "the text was not kept for this job" while the text was right there
+    # in `segments`.
+    said = _said(job)
+    if said:
+        out["text"] = said
     if job.get("segments"):
         out["segments"] = job["segments"]
     return out

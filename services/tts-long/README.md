@@ -127,6 +127,17 @@ boundary, because `generate()` has no interruption point inside it. Finished
 jobs and their audio are swept after `TTS_JOB_TTL` — until now nothing was ever
 removed and `/output` grew for the lifetime of the process.
 
+`jobs` is a dict in one process, so a restart empties it while the audio sits
+in the volume and survives. Finished jobs are rebuilt from `/output` at
+startup, and each one writes a **metadata sidecar** — `{id}.json` beside
+`{id}.{format}` — so what comes back is the whole row and not a filename.
+Before it, the voice, the language, the generation parameters, the chunk count
+and the realtime factor lived only in the dict and every recovered job read
+*voice unknown*. Both files are removed together, by `DELETE` and by the sweep.
+A job finished before this release has no sidecar and still recovers with what
+its name carries; the record says `recovered: true` either way and never
+invents a voice it does not know.
+
 ## Segments and pauses
 
 Same contract as tts-stack — the same class, now, rather than the same idea
