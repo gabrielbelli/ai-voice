@@ -153,7 +153,7 @@ class Options:
     vocabulary: tuple[str, ...] = ()     # boosting.compile_automaton's shape
     # Decode-time biasing on Parakeet is OPT-IN PER REQUEST and off by default.
     # A glossary whose terms do not occur in the audio raised WER by 12% on
-    # this engine across 250 conditions, so a boost list nobody asked for is a
+    # this engine across 25 cells, so a boost list nobody asked for is a
     # measured cost rather than a neutral. Whisper's hotwords are unaffected by
     # this flag: they predate it, they are what `prompt` has always done there,
     # and moving them would change a shipped engine under a change about the

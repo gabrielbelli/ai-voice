@@ -91,7 +91,7 @@ was not, which is the exact silence this module exists to remove.
 
 Selecting several profiles at once is discouraged, and for a measured reason
 rather than a tidy one: a glossary whose terms do NOT occur in the audio raised
-WER by 12% on Parakeet and 28% on Whisper across 250 conditions. Irrelevant
+WER by 28% on Whisper, and nothing measurable on Parakeet across 25 cells. Irrelevant
 terms are not inert.
 
 STREAMING
@@ -434,13 +434,21 @@ def _glossary(form) -> profiles.Selection:  # noqa: ANN001
 def _boost(form, engine) -> bool:  # noqa: ANN001
     """`boost=true` — send this request's vocabulary to Parakeet's decoder.
 
-    OFF BY DEFAULT, AND THAT IS THE WHOLE POINT OF THE FIELD. Across 250
-    conditions a glossary whose terms do NOT occur in the audio raised WER by
-    12% on this engine. A boost list is therefore a bet — it recovers a term
-    the acoustic model mangled, and it costs accuracy on every request where
-    the terms are simply absent — and the caller who knows what is in their
-    audio is the one who can make it. A deployment that wants it for every
-    request sets STT_BOOST=1 and pays that cost knowingly, exactly as
+    OFF BY DEFAULT, ON BETTER GROUNDS THAN THE ONES FIRST GIVEN. This said a
+    glossary of absent terms costs 12% WER on this engine. It does not: that
+    figure came from FluidAudio's CoreML path, a different implementation on
+    different hardware, and it was withdrawn -- see docs/adr/0005. Measured on
+    THIS decoder, the shipped profiles' 79 absent terms are byte-identical to
+    plain, and 200 absent phrases cost +0.4% with an interval spanning zero.
+    An absent term is close to free here, because at START_WEIGHT=0 a phrase
+    must be entered on acoustics and an absent word is never entered.
+
+    It stays off by default anyway, for what the same run measured on the
+    other side: the win is -5.2% WER, which is fourteen words out of 2,378.
+    A default that changes every request in the estate for fourteen words is
+    not one the evidence asks for, and the caller who knows what is in their
+    audio is the one who can spend it. A deployment that wants it for every
+    request sets STT_BOOST=1, exactly as
     STT_GLOSSARY_DEFAULT re-enables an always-on repair glossary.
 
     Refused by name on Whisper rather than silently accepted, because Whisper

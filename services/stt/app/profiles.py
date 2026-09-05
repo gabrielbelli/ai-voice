@@ -17,8 +17,8 @@ image published to a public registry under a BSD licence. Anyone who pulled it
 got those rewrites applied to their own audio, naming projects they have never
 heard of, discoverable only by reading the image.
 
-**And an irrelevant term is not free.** Measured across 250 conditions: a
-glossary whose terms do NOT occur in the audio raised WER by **12% on Parakeet
+**And an irrelevant term is not free.** Measured across 25 cells: a
+glossary whose terms do NOT occur in the audio raised WER by **28% on Whisper
 and 28% on Whisper**. That measurement is the whole argument for small opt-in
 profiles. If an unused term cost nothing, one big always-on list would be fine
 — and it is also why selecting several profiles at once is discouraged in the

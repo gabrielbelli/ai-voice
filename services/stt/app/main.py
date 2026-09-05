@@ -276,7 +276,7 @@ def list_glossaries() -> dict[str, object]:
         "writable": writable,
         # The profiles a request gets when it selects none. Empty on a default
         # deployment, and that is the point: an irrelevant glossary raised WER
-        # by 12% on Parakeet and 28% on Whisper across 250 conditions, so
+        # by 28% on Whisper, and nothing measurable on Parakeet across 25 cells, so
         # always-on is opted into by name rather than inherited.
         "default": profiles.split_selection(pipeline.DEFAULT_PROFILES),
         "builtin_dir": str(registry.builtin_dir),

@@ -197,7 +197,7 @@ def test_no_profile_is_applied_unless_a_request_asks(client: TestClient) -> None
     """The old shape applied one list to everything, at a measured cost.
 
     A glossary whose terms do NOT occur in the audio raised WER by 12% on
-    Parakeet and 28% on Whisper across 250 conditions, so the default has to be
+    Parakeet and 28% on Whisper across 25 cells, so the default has to be
     nothing at all.
     """
     response = client.post("/transcribe",
@@ -929,7 +929,7 @@ def test_boosting_is_off_unless_the_request_asks(builtin: Path) -> None:
     """The failure: an always-on boost list, which is what the +12% rules out.
 
     A glossary whose terms do NOT occur in the audio raised WER by 12% on
-    Parakeet across 250 conditions, so a vocabulary the caller did not ask to
+    Parakeet across 25 cells, so a vocabulary the caller did not ask to
     have BIASED must not acquire it by arriving. Every other way of sending
     terms — prompt, keywords[], a named profile — is checked here, because the
     default has to hold on all of them and not merely on the one that was
@@ -1055,3 +1055,51 @@ def test_a_malformed_boost_is_refused_rather_than_read_as_false(
         assert response.json()["error"]["param"] == "boost"
     finally:
         pipeline.state.clear()
+
+
+# ------------------------------------ an all-capitals term repairs nothing --
+
+
+def test_an_uppercase_term_does_not_shout_ordinary_words():
+    """`ARM` passed both filters and compiled \\barm\\b -> "ARM".
+
+    An ordinary sentence came back "I SET the ARM on the BUS ... ALL of the
+    tags are NEW". Measured over 100 real clips, a plain infrastructure
+    acronym list corrupted NINE of them.
+    """
+    from app.glossary import apply, term_rules
+
+    text = ("I set the arm on the bus, and then I put more RAM in it, "
+            "all of the tags are new.")
+    out, fired = apply(text, term_rules(["ARM", "RAM", "BUS", "SET", "ALL", "NEW"]))
+    assert out == text, out
+    assert fired == []
+
+
+def test_an_uppercase_term_does_not_rewrite_another_language():
+    """The sharpest case, in the locale this deployment exists for: `NAS`
+    rewrote the Portuguese preposition "nas"."""
+    from app.glossary import apply, term_rules
+
+    text = "do primeiro-ministro nas novas notas de 100 dolares canadenses."
+    out, _ = apply(text, term_rules(["NAS", "ZFS", "TrueNAS"]))
+    assert out == text, out
+
+
+def test_a_mixed_case_term_still_repairs():
+    """The skip is about case CONTRAST, not about capitals. A term that shows
+    which letters are capitals against which are not is still well defined,
+    and that is the failure the default engine really has."""
+    from app.glossary import apply, term_rules
+
+    out, fired = apply("the theoria dashboard uses ghost pepper",
+                       term_rules(["Theoria", "Ghost Pepper"]))
+    assert out == "the Theoria dashboard uses Ghost Pepper"
+    assert sorted(fired) == ["Ghost Pepper", "Theoria"]
+
+
+def test_a_mixed_case_acronym_still_repairs():
+    from app.glossary import apply, term_rules
+
+    out, _ = apply("i run truenas at home", term_rules(["TrueNAS"]))
+    assert out == "i run TrueNAS at home"

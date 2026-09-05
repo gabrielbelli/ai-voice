@@ -11,8 +11,8 @@
 # `catalaxy = Catallaxy` applied to their audio — a rewrite naming a project
 # they have never heard of, that they could not discover without reading the
 # image, and that they did not ask for. It was not free either: measured across
-# 250 conditions, a glossary whose terms do NOT occur in the audio raised WER
-# by 12% on Parakeet and 28% on Whisper.
+# 25 cells, a glossary whose terms do NOT occur in the audio raised WER
+# by 28% on Whisper, and nothing measurable on Parakeet.
 #
 # Install it, on a deployment with /glossaries mounted:
 #

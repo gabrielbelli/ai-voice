@@ -758,8 +758,8 @@ def test_the_vocabulary_control_is_outside_the_expert_panel():
 
 
 def test_nothing_is_selected_by_default():
-    """Measured across 250 conditions: a glossary whose terms do NOT occur in
-    the audio raises WER by 12% on Parakeet and 28% on Whisper. An always-on
+    """Measured across 25 cells: a glossary whose terms do NOT occur in
+    the audio raises WER by 28% on Whisper, and nothing measurable on Parakeet. An always-on
     list is the worst available shape."""
     body = _code(_fn("async function loadGlossaries("))
     assert 'aria-pressed="false"' in body

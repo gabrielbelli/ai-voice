@@ -68,7 +68,7 @@ COPY services/stt/app/ ./app/
 # published to a public registry, rewriting strangers' audio to name projects
 # they have never heard of. It was not free either: measured across 250
 # conditions, a glossary whose terms do NOT occur in the audio raised WER by
-# 12% on Parakeet and 28% on Whisper.
+# 28% on Whisper, and nothing measurable on Parakeet.
 #
 # So the personal terms left the image entirely (see
 # services/stt/examples/glossaries/personal.txt, which is deliberately NOT

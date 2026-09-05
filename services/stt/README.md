@@ -510,8 +510,8 @@ transcript is the product.
 A glossary is a **named profile**, selected per request. **Nothing is applied
 unless a request asks for it.**
 
-That default is measured, not tidy. Across 250 conditions, a glossary whose
-terms do **not** occur in the audio raised WER by **12% on Parakeet and 28% on
+That default is measured, not tidy. Across 25 cells, a glossary whose
+terms do **not** occur in the audio raised WER by **28% on Whisper and 28% on
 Whisper**. Irrelevant terms are not inert — they actively cost accuracy — which
 is why one always-on list is the worst available shape and why **selecting
 several profiles at once is discouraged**. Select the one that matches what is

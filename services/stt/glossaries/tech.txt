@@ -5,7 +5,7 @@
 # rather than a stylistic preference: a term in `tech` is paid for by every
 # request that selects `tech`, so a name only one person ever says makes the
 # profile worse for everybody else who uses it. An unused term is not inert —
-# measured across 250 conditions it cost +12% WER on Parakeet and +28% on
+# measured across 25 cells it cost +12% WER on Parakeet and +28% on
 # Whisper. Put your own names in a deployment-supplied profile instead; see
 # examples/glossaries/personal.txt.
 #

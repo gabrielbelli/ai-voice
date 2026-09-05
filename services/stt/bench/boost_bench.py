@@ -42,7 +42,7 @@ way a noise condition can. It also has to sweep a weight, which means twenty-odd
 decodes of the same audio, which is the shape bench.py's HTTP client is worst
 at. So this drives `asr.Parakeet` in process, and imports bench.normalise so
 both harnesses score identically and the numbers stay comparable to the
-250-condition table this project quotes.
+25-cell table this project quotes.
 
 It does NOT start a server. An earlier round left four orphaned uvicorn
 processes on this laptop, one at 489% CPU for thirteen minutes.
@@ -50,7 +50,7 @@ processes on this laptop, one at 489% CPU for thirteen minutes.
 THE TWO AXES, AND WHY THE SECOND ONE DECIDES
 --------------------------------------------
 ADR 0002 removed an always-on glossary because terms that do NOT occur in the
-audio raised WER by 12% on Parakeet and 28% on Whisper across 250 conditions.
+audio raised WER by 28% on Whisper, and nothing measurable on Parakeet across 25 cells.
 Any biasing feature therefore has two numbers, not one:
 
     present   the clip's own distinctive words are boosted   does WER improve

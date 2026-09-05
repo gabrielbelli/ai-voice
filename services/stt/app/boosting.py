@@ -29,8 +29,8 @@ works in, including the Brazilian Portuguese this deployment is used in.
 
 THE MEASUREMENT THAT SHAPES EVERY DEFAULT BELOW
 -----------------------------------------------
-Across 250 conditions, a glossary whose terms do NOT occur in the audio raised
-WER by 12% on Parakeet and 28% on Whisper. Irrelevant vocabulary is not inert;
+Across 25 cells, a glossary whose terms do NOT occur in the audio raised
+WER by 28% on Whisper, and nothing measurable on Parakeet. Irrelevant vocabulary is not inert;
 it actively costs accuracy. So this feature is judged on two axes — what it
 recovers when the terms are there, and what it costs when they are not — and
 every default here is chosen against the second one.
@@ -172,7 +172,7 @@ WEIGHT = _number("STT_BOOST_WEIGHT", 3.0)
 # At start_weight == weight == 2.0 the same probe additionally recovered
 # "Claude Code" and "Theoria" — and inserted a spurious "The" before "Theoria"
 # (" The" is a start edge of "Theoria"), and capitalised "dashboard" and
-# "dictation" for no reason. That is the 250-condition finding reproducing
+# "dictation" for no reason. That is the 25-cell finding reproducing
 # itself inside the decoder, where the post-decode glossary cannot undo it.
 START_WEIGHT = _number("STT_BOOST_START_WEIGHT", 0.0)
 

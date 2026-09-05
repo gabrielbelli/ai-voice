@@ -20,8 +20,8 @@ and safer of the two, and the division of labour is worth stating exactly:
             no acoustic risk, and cannot be undone by the decoder.
   boosting  can recover a word the model never approached, which repair cannot.
             It is opt-in per request because it is a bet: a boost list whose
-            terms are absent from the audio raised WER by 12% on Parakeet
-            across 250 conditions, and the damage lands inside the decode where
+            terms are absent from the audio raised WER by 28% on Whisper and nothing measurable on Parakeet
+            across 25 cells, and the damage lands inside the decode where
             this module cannot reach it.
 
 TWO KINDS OF RULE, FROM TWO KINDS OF LINE
@@ -103,6 +103,27 @@ def term_rules(terms: Iterable[str]) -> list[tuple[re.Pattern[str], str]]:
         LOWERCASES a correct sentence-initial "Sync". The shipped profiles are
         full of these — `commit`, `nginx`, `kubectl` — which is what makes the
         skip worth naming rather than assuming.
+      * a term with NO LOWER-CASE LETTER IN IT. This is the mirror of the
+        skip above and it was missing, which shipped a defect: `ARM` passed
+        both filters and compiled `\\barm\\b -> "ARM"`, so an ordinary
+        sentence came back "I SET the ARM on the BUS ... ALL of the tags are
+        NEW". Measured over 100 real clips, a plain infrastructure acronym
+        list corrupted NINE of them, and the sharpest case was in the locale
+        this deployment exists for: `NAS` rewrote the Portuguese preposition
+        "nas" in "do primeiro-ministro nas novas notas".
+
+        A case repair is only well defined when the term shows WHICH letters
+        are capitals against which are not -- "Theoria", "TrueNAS",
+        "Ghost Pepper". An all-capitals term shows no such contrast, so its
+        rule is `\\bx\\b -> "X"` over every occurrence of the letters in any
+        language, and a three-letter acronym is a word somewhere. There is no
+        way to tell the Portuguese "nas" from a misheard "NAS" without a
+        dictionary this image does not have -- the same wall the single-word
+        check in profiles.py hit.
+
+        The cost is real and worth naming: `ZFS`, `API` and `CPU` no longer
+        get case repair. Decoder boosting still takes them, which is the
+        mechanism that can actually tell whether the acronym was SAID.
       * a term shorter than MIN_TERM_CHARS.
 
     A term in a script with no case — `日本語` — is skipped by the first of
@@ -119,7 +140,9 @@ def term_rules(terms: Iterable[str]) -> list[tuple[re.Pattern[str], str]]:
     return compile_rules({
         term.lower(): term
         for term in terms
-        if len(term) >= MIN_TERM_CHARS and term != term.lower()
+        if len(term) >= MIN_TERM_CHARS
+        and term != term.lower()          # nothing to repair, or harmful
+        and term != term.upper()          # no case contrast: see above
     })
 
 

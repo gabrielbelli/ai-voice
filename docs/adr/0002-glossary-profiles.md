@@ -31,8 +31,8 @@ published to a public registry under a BSD licence. Anyone who pulls it gets
 have never heard of, that they cannot discover without reading the image, and
 that they did not ask for.
 
-**And it is not free to carry.** Measured across 250 conditions: a glossary
-whose terms do not occur in the audio raises WER by **12% on Parakeet and 28%
+**And it is not free to carry.** Measured across 25 cells: a glossary
+whose terms do not occur in the audio raises WER by **28% on Whisper and 28%
 on Whisper**. Irrelevant terms are not inert — they actively cost accuracy. So
 a single always-on list is the worst shape available: it is simultaneously too
 personal for other people and too broad for any one recording.

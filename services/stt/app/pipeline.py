@@ -46,8 +46,8 @@ MODEL = os.getenv("STT_MODEL", "parakeet")
 # deliberate behaviour change: this service used to compile one file at boot and
 # apply it to every transcript, which is both a public image carrying one
 # person's project names and a measured accuracy cost — a glossary whose terms
-# do NOT occur in the audio raised WER by 12% on Parakeet and 28% on Whisper
-# across 250 conditions. Absent a selection, behaviour is now the
+# do NOT occur in the audio raised WER by 28% on Whisper, and nothing measurable on Parakeet
+# across 25 cells. Absent a selection, behaviour is now the
 # specification's: no glossary, no biasing.
 #
 # A deployment that wants the old always-on shape asks for it by name —
@@ -150,7 +150,7 @@ def start() -> None:
     # Nothing is baked in for Parakeet, and that is deliberate rather than a
     # gap. Its biasing is compiled per request from asr.Options.vocabulary and
     # is off unless the request asked, because a deployment-wide always-on
-    # boost list is the shape the +12% measurement above rules out. A
+    # boost list is the shape the Whisper measurement above rules out. A
     # deployment that wants it anyway sets STT_BOOST=1, which changes the
     # DEFAULT the route applies rather than bypassing the route.
     hotwords = default.hotwords if HOTWORDS_ENABLED else None

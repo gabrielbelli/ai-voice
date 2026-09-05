@@ -596,7 +596,7 @@ def test_an_absent_vocabulary_does_not_change_the_transcript(parakeet) -> None: 
     """The terms-ABSENT axis, which is the one that decides the defaults.
 
     A glossary whose terms do not occur in the audio raised WER by 12% on this
-    engine across 250 conditions, so a biasing feature has to be judged on what
+    engine across 25 cells, so a biasing feature has to be judged on what
     it costs when the vocabulary is irrelevant — not only on what it recovers
     when the vocabulary is right. At the shipped defaults the transcript of
     real corpus audio is unchanged by a list of terms that are not in it.
