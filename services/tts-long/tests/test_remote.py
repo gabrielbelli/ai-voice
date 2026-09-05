@@ -700,3 +700,69 @@ def test_the_two_backends_speak_through_exactly_the_same_signature():
     assert str(local) == str(remote), (
         "the backends have drifted apart:\n  local  " + str(local)
         + "\n  remote " + str(remote))
+
+
+def test_a_long_job_on_a_busy_runner_is_never_charged_for_working():
+    """THE DEFECT THIS PREVENTS: a healthy runner losing every long job.
+
+    `max_wait` bounds how long the GPU's owner may have the machine. It was
+    implemented as a deadline from submission, which bounds the whole job
+    instead -- so with the 900 s default and a runner speaking at around 0.6x
+    realtime, ANY job over roughly eight minutes of audio abandoned the GPU and
+    re-spoke on the CPU, on a completely idle machine, reporting that somebody
+    was gaming. Streamed, it was worse: _worker treats a RemoteYield with
+    `delivered > 0` as an honest failure, so a working runner produced a FAILED
+    job. This is the service whose whole purpose is long jobs.
+
+    Here the runner never stalls and needs more polls than the bound would
+    allow if running time were charged. It must still finish.
+    """
+    client = FakeClient(segments=6)
+    client.cfg = RunnerConfig(host="runner.invalid", service="chatterbox",
+                              poll=0.0, max_wait=0.0)
+    spoken = RemoteSynth(client, JOB).speak_segments(
+        segs(6), "en", 0.5, 0.5, 0.8, None)
+
+    assert spoken.audio.size == 6 * (SAMPLE_RATE // 10), \
+        "a running runner was charged for running and the job was abandoned"
+    assert client.cancelled == [], "the lease was withdrawn from a working runner"
+
+
+def test_only_the_time_the_owner_has_the_machine_counts_towards_the_bound():
+    """The other half of the same fix: a stall IS charged, and still raises.
+
+    max_wait=0 means the first poll that finds the job not running is already
+    over the bound, so a runner that yields and never comes back must give up
+    rather than wait for ever.
+    """
+    client = FakeClient(segments=4, yield_after=2, yield_polls=None)
+    client.cfg = RunnerConfig(host="runner.invalid", service="chatterbox",
+                              poll=0.0, max_wait=0.0)
+    with pytest.raises(RemoteYield) as raised:
+        RemoteSynth(client, JOB).speak_segments(
+            segs(4), "en", 0.5, 0.5, 0.8, None)
+
+    assert raised.value.delivered == 2, "the segments already made were forgotten"
+    assert client.cancelled == ["remote-job-1"], \
+        "the lease was left on a runner nobody is waiting for"
+
+
+def test_a_job_queued_before_it_ever_ran_says_so():
+    """THE DEFECT THIS PREVENTS: the commonest case reporting nothing.
+
+    The guard was `status == "queued" and parts and not waiting`, so waiting
+    was only ever reported once a segment had landed. Submitting while the
+    owner is ALREADY at the machine -- which is most of an evening -- produced
+    no callback at all, and the local job read `running` for the whole bound
+    with nothing happening. The segment count belongs in the message, not in
+    the condition.
+    """
+    client = FakeClient(segments=2, yield_after=0, yield_polls=2)
+    seen: list[bool] = []
+    spoken = RemoteSynth(client, JOB, on_wait=seen.append).speak_segments(
+        segs(2), "en", 0.5, 0.5, 0.8, None)
+
+    assert seen == [True, False], \
+        "expected queued-then-running with nothing delivered yet, got " + repr(seen)
+    assert spoken.audio.size == 2 * (SAMPLE_RATE // 10), \
+        "reporting the wait cost the job its segments"

@@ -432,12 +432,29 @@ class RemoteSynth:
             params["reference_sha256"] = self._client.ensure_asset(reference)
 
         remote_id = self._client.submit(params, key)
-        deadline = time.monotonic() + cfg.max_wait
         seen: set[str] = set()
         parts: list[np.ndarray] = []
         total_tokens = 0
         pauses = [pause for _, pause in segments]
         waiting = False
+        # HOW LONG THE OWNER HAS HAD THE MACHINE, ACCUMULATED. Not a deadline
+        # from submission, which is what this was and which made the bound mean
+        # something nobody intended.
+        #
+        # `max_wait` defaults to 900 s and the runner speaks at around 0.6x
+        # realtime, so a fixed deadline meant every job over roughly eight
+        # minutes of audio abandoned the GPU and re-spoke on the CPU -- on a
+        # completely idle machine, blaming an owner who was not there. Worse
+        # once anything had been delivered: _worker treats a RemoteYield with
+        # `delivered > 0` as an honest failure, so a healthy runner produced a
+        # FAILED job. tts-long is the long-job service. That was the case it
+        # exists for.
+        #
+        # Only time the runner is NOT working on this job counts. Waiting out a
+        # six-second yield is right; waiting out an evening of gaming is not,
+        # and this is the difference between those two.
+        waited = 0.0
+        ticked = time.monotonic()
 
         while True:
             if cancelled is not None and cancelled():
@@ -494,10 +511,21 @@ class RemoteSynth:
             #
             # Restarting on a yield would have been the natural-looking choice
             # and is wrong in all three of those ways at once.
-            if status == "queued" and parts and not waiting:
+            # NO `parts` GUARD. It used to require a segment to have landed
+            # before this would report waiting, so submitting while the owner
+            # was ALREADY gaming -- the commonest case there is -- reported
+            # nothing, and the job read "running" for the whole bound. The
+            # count belongs in the message, not in the condition.
+            if status == "queued" and not waiting:
                 waiting = True
-                log.info("the runner yielded the GPU after %d of %d segments; "
-                         "waiting for its owner to finish", len(parts), len(segments))
+                if parts:
+                    log.info("the runner yielded the GPU after %d of %d "
+                             "segments; waiting for its owner to finish",
+                             len(parts), len(segments))
+                else:
+                    log.info("the runner has not started this job; it is "
+                             "queued behind other work or its owner is using "
+                             "the machine")
                 if self._on_wait is not None:
                     self._on_wait(True)
             elif status == "running" and waiting:
@@ -505,7 +533,14 @@ class RemoteSynth:
                 if self._on_wait is not None:
                     self._on_wait(False)
 
-            if time.monotonic() > deadline:
+            # Charged only while the runner is not working on this job, so a
+            # long job on an idle runner is never charged at all.
+            now = time.monotonic()
+            if status != "running":
+                waited += now - ticked
+            ticked = now
+
+            if waited > cfg.max_wait:
                 # THE BOUND, and the only thing that still raises. Waiting out a
                 # six-second yield is right; waiting out an entire evening of
                 # gaming is not, because the local CPU would have finished long
@@ -514,8 +549,9 @@ class RemoteSynth:
                 self._client.cancel(remote_id)
                 raise RemoteYield(
                     f"the runner produced {len(parts)} of {len(segments)} "
-                    f"segments within {cfg.max_wait:.0f}s; its owner is using "
-                    "the machine", delivered=len(parts))
+                    f"segments and then had the GPU taken back for "
+                    f"{waited:.0f}s of the {cfg.max_wait:.0f}s allowed; its "
+                    "owner is using the machine", delivered=len(parts))
             time.sleep(cfg.poll)
 
         audio = splice([(p, 0.0) for p in parts]) if parts else np.zeros(0, dtype=np.float32)

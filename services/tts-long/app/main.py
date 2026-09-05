@@ -299,6 +299,23 @@ def _worker() -> None:
                     log.info("%s: %s; speaking it locally", job["id"][:8], yielded)
                     job["backend"] = "local"
                     _run(state["synth"], job)
+            except Exception as exc:  # noqa: BLE001 - see below
+                # THE SAME CLASS THE KeyError GUARD ABOVE IS ABOUT, and it was
+                # only half covered. _run catches its own failures and marks
+                # the job, but _backend_for is called OUTSIDE it: it reads
+                # configuration and asks the runner for its state, and anything
+                # it raises left this try/finally, left the while loop and
+                # killed the thread for good. Every later job would then sit
+                # `queued` for ever with nothing to run it.
+                #
+                # A job that cannot be spoken is a failed job, which is what
+                # _run would have said. It is not a reason to stop speaking.
+                log.exception("%s: could not be started", job["id"][:8])
+                job.update(status="failed", error=str(exc) or exc.__class__.__name__,
+                           finished_at=time.time())
+                stream = job.get("stream")
+                if stream is not None:
+                    stream.put("error", str(exc) or exc.__class__.__name__)
         finally:
             # In `finally`, so a failed job wakes its caller with an error
             # rather than leaving it to sit out the whole timeout.
@@ -439,7 +456,17 @@ def _run(synth: Synth, job: dict) -> None:
         # still find the whole thing there.
         path = OUT_DIR / f"{job['id']}.{job['format']}"
         data, _ = encode(spoken.audio, job["format"])
-        path.write_bytes(data)
+        # TEMP THEN RENAME, because _recover TRUSTS THIS FILE. A plain
+        # write_bytes interrupted by a restart leaves a truncated file, and
+        # _recover walks /output and rebuilds whatever it finds as `status:
+        # "done"` with `bytes` set to the truncated length -- a job that reads
+        # finished and plays as silence or half a sentence, with nothing
+        # anywhere reporting a problem. rename is atomic within a filesystem,
+        # so the file is either absent or whole and _recover cannot see a
+        # partial one. The runner's own lease already did it this way.
+        staging = path.with_suffix(path.suffix + ".part")
+        staging.write_bytes(data)
+        staging.replace(path)
 
         duration = spoken.audio.size / SAMPLE_RATE
         # PER BACKEND. See _rates: a GPU's 20x must never enter the average that
@@ -575,7 +602,13 @@ def _write_sidecar(job: dict) -> None:
     if said:
         data["text"] = said
     try:
-        _sidecar(job["id"]).write_text(json.dumps(data), encoding="utf-8")
+        # Temp then rename, for the reason the audio write gives: _recover
+        # reads this back and json.loads a truncated file raises, which costs
+        # the row its voice for no reason other than when the power went.
+        target = _sidecar(job["id"])
+        staging = target.with_suffix(".json.part")
+        staging.write_text(json.dumps(data), encoding="utf-8")
+        staging.replace(target)
     except OSError as exc:
         log.warning("%s: could not write the metadata sidecar (%s); a restart "
                     "will recover this job's audio without its voice",
@@ -673,6 +706,12 @@ def _recover() -> int:
         if stale.stem not in jobs:
             with suppress(OSError):
                 stale.unlink()
+    # A half-written audio or sidecar file from a restart mid-write. _recover
+    # ignores the suffix by design, so without this nothing would ever remove
+    # them and /output would grow by one on every unlucky restart.
+    for partial in OUT_DIR.glob("*.part"):
+        with suppress(OSError):
+            partial.unlink()
     return found
 
 
