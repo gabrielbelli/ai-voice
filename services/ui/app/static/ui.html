@@ -1184,14 +1184,66 @@ const speechSeconds = (text) => (text || "").length / 15;
    heap dump, and no header to attach. api() above is a plain fetch for exactly
    that reason. */
 
-document.querySelectorAll('[role=tab]').forEach(button => {
+const TABS = Array.from(document.querySelectorAll('[role=tab]'));
+TABS.forEach(button => {
   button.addEventListener("click", () => {
-    document.querySelectorAll('[role=tab]').forEach(b =>
-      b.setAttribute("aria-selected", String(b === button)));
+    TABS.forEach(b => {
+      b.setAttribute("aria-selected", String(b === button));
+      /* A ROVING TABSTOP. Three separate stops in front of the panel is what
+         the tablist pattern exists to avoid. */
+      b.tabIndex = b === button ? 0 : -1;
+    });
     ["transcribe","speak","jobs"].forEach(name =>
       $("tab-" + name).hidden = name !== button.dataset.tab);
+    /* THE ONE PLACE THIS PAGE FELT LIKE A DOCUMENT: an instant `hidden`
+       toggle. 4px and 180 ms on the INCOMING panel only -- hint the direction,
+       do not stage a slide -- and deliberately NO exit animation, so a click
+       is never waiting on a transition.
+
+       Web Animations rather than a class or an inline style write: it is
+       fire-and-forget, it clears its own transform afterwards (an element left
+       with a non-none transform becomes a containing block for anything fixed
+       inside it), and it never blocks input -- grabbing another tab
+       mid-animation just starts the next one. The state change is already
+       complete by the time this runs; the motion is decoration over it.
+
+       Reduced motion drops the translate and keeps the fade, read at call time
+       exactly as follow() does, so an OS change mid-session takes effect. */
+    const panel = $("tab-" + button.dataset.tab);
+    if (panel && panel.animate) {
+      const calm = matchMedia("(prefers-reduced-motion: reduce)").matches;
+      panel.animate(
+        [{ opacity: 0, transform: calm ? "none" : "translateY(4px)" },
+         { opacity: 1, transform: "none" }],
+        { duration: calm ? 120 : 180, easing: "cubic-bezier(.2,.7,.3,1)" });
+    }
+  });
+  /* Arrow, Home and End over the strip. It calls next.click() rather than
+     repeating what a tab does, so the listener above stays the only thing that
+     knows, and keyboard and mouse cannot drift apart. */
+  button.addEventListener("keydown", ev => {
+    const at = TABS.indexOf(button);
+    let to = -1;
+    if (ev.key === "ArrowRight" || ev.key === "ArrowDown") to = (at + 1) % TABS.length;
+    else if (ev.key === "ArrowLeft" || ev.key === "ArrowUp") to = (at + TABS.length - 1) % TABS.length;
+    else if (ev.key === "Home") to = 0;
+    else if (ev.key === "End") to = TABS.length - 1;
+    if (to < 0) return;
+    ev.preventDefault();
+    TABS[to].focus();
+    TABS[to].click();
   });
 });
+
+/* A SCROLL EDGE, NOT A DIVIDER. The header's line now exists only while there
+   is something underneath it, which is the point of a translucent bar: a
+   permanent 1px rule under it says "chrome" whether or not anything is being
+   covered. Passive, because a listener on scroll must never be able to hold
+   one up. */
+const scrollEdge = () =>
+  document.body.classList.toggle("scrolled", window.scrollY > 4);
+addEventListener("scroll", scrollEdge, { passive: true });
+scrollEdge();
 
 /* KEPT, THOUGH THE STATUS PILLS IT USED TO DRAW ARE GONE. HEALTH is not
    decoration: rate.clone() reads tts_long's live realtime_factor out of it,
@@ -1862,7 +1914,7 @@ async function watchDownload() {
     note(host, "flat", `Downloading — ${percent.toFixed(0)}%${
       state.speed ? " at " + human(state.speed) + "/s" : ""}${
       state.eta ? ", " + clock(state.eta) + " left" : ""}
-      <div class="bar-track"><div class="bar-fill" style="width:${percent}%"></div></div>
+      <div class="bar-track"><div class="bar-fill" style="transform:scaleX(${(percent / 100).toFixed(4)})"></div></div>
       <button class="link" id="stopdl" type="button">Stop and forget it</button>`);
     const stop = $("stopdl");
     if (stop) stop.addEventListener("click", abandon, { once: true });
@@ -3606,8 +3658,12 @@ const JOBTEXT = new Map();
 
 function renderJobs() {
   const list = [...jobs.values()].sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
-  $("jobcount").textContent = list.filter(j => j.status === "queued" || j.status === "running").length
-    ? "(" + list.filter(j => j.status === "queued" || j.status === "running").length + ")" : "";
+  /* A BARE NUMBER, because it is now an accent chip in the tab rather than a
+     parenthesis in a sentence -- "(2)" inside a pill is a bracket drawn twice.
+     Two characters shorter, and readable from the other two tabs without
+     stopping to parse it. The CSS hides the chip when this is "". */
+  const running = list.filter(j => j.status === "queued" || j.status === "running").length;
+  $("jobcount").textContent = running ? String(running) : "";
 
   if (!list.length) {
     $("joblist").innerHTML = `<div class="hint">No jobs. Cloned voices are queued
@@ -3665,7 +3721,7 @@ function renderJobs() {
         <span class="hint">${job.chunks ? job.chunks + " chunks" : ""}${
           job.queued_ahead ? " · " + job.queued_ahead + " ahead" : ""}</span>
       </div>
-      ${live ? `<div class="bar-track"><div class="bar-fill" style="width:${percent}%"></div></div>
+      ${live ? `<div class="bar-track"><div class="bar-fill" style="transform:scaleX(${(percent / 100).toFixed(4)})"></div></div>
         <div class="hint">${over
           ? `still going — ${clock(elapsed)} in, past the ${clock(budget)} estimate`
           : `${clock(elapsed)} in, ${roughly(budget - elapsed)} left`} · estimate</div>` : ""}
@@ -3953,6 +4009,43 @@ $("refresh").addEventListener("click", () => { refreshJobs(); });
   webm-on-Chrome / mp4-on-Safari split a non-problem rather than a bug report.
 */
 let clip = null, clipSuffix = ".wav", recorder = null, recTimer = null;
+/* The stop handle each meter hands back, so the recorder's onstop can end the
+   frame loop without knowing anything about how it paints. */
+let levelStop = null, sttLevelStop = null;
+
+/* THE MIC METER, PAINTED FROM rAF AND MOVING A TRANSFORM.
+
+   Both meters used to write style.width from the recorder's own 100 ms
+   setInterval -- a layout property, written ten times a second, reporting a
+   signal that moves faster than that. So it was sampled below the rate of the
+   thing it measures AND it was the one thing on the page animating layout.
+   The frame loop is display-synced and the transform is composited.
+
+   Instant attack so a peak is never missed, exponential release at 0.25 a
+   frame so the bar settles rather than strobing. Deliberately NOT a spring: a
+   level meter that overshoots draws a peak that was never in the signal, which
+   is a control lying about the microphone, and the whole point of this meter is
+   that someone can trust it before they find out thirty-six minutes later that
+   it was not picking them up. */
+function meter(bar, analyser, data) {
+  let shown = 0;
+  let frame = 0;
+  const paint = () => {
+    analyser.getByteTimeDomainData(data);
+    let peak = 0;
+    for (const v of data) peak = Math.max(peak, Math.abs(v - 128) / 128);
+    /* x1.6 and clamped, which is the same headroom the old percentage had. */
+    const target = Math.min(1, peak * 1.6);
+    shown = target > shown ? target : shown + (target - shown) * 0.25;
+    bar.style.transform = "scaleX(" + shown.toFixed(3) + ")";
+    frame = requestAnimationFrame(paint);
+  };
+  frame = requestAnimationFrame(paint);
+  return () => {
+    cancelAnimationFrame(frame);
+    bar.style.transform = "scaleX(0)";
+  };
+}
 
 $("cliporfile").addEventListener("click", () => $("clipfile").click());
 
@@ -4143,8 +4236,8 @@ $("rec").addEventListener("click", async () => {
   recorder.onstop = async () => {
     stream.getTracks().forEach(t => t.stop());
     clearInterval(recTimer);
+    if (levelStop) { levelStop(); levelStop = null; }
     $("rec").textContent = "● Record 15 s";
-    $("level").style.width = "0";
     await prepareClip(new File(chunks, "recording", { type: recorder.mimeType }), "my-voice");
   };
 
@@ -4158,13 +4251,13 @@ $("rec").addEventListener("click", async () => {
 
   recorder.start();
   $("rec").textContent = "■ Stop";
+  levelStop = meter($("level"), analyser, data);
   let left = 15;
   $("ring").textContent = left;
+  /* The interval is the COUNTDOWN now and nothing else; the meter left it for
+     the frame loop above. 100 ms is right for a number that ticks in whole
+     seconds and wrong for a level. */
   recTimer = setInterval(() => {
-    analyser.getByteTimeDomainData(data);
-    let peak = 0;
-    for (const v of data) peak = Math.max(peak, Math.abs(v - 128) / 128);
-    $("level").style.width = Math.min(100, peak * 160).toFixed(0) + "%";
     if ((left -= 0.1) <= 0) { $("ring").textContent = "0"; recorder.stop(); ctx.close(); }
     else $("ring").textContent = Math.ceil(left);
   }, 100);
@@ -4198,6 +4291,7 @@ $("sttrec").addEventListener("click", async () => {
   sttRecorder.onstop = async () => {
     stream.getTracks().forEach(t => t.stop());
     clearInterval(sttTimer);
+    if (sttLevelStop) { sttLevelStop(); sttLevelStop = null; }
     $("sttrecrow").hidden = true;
     $("sttrec").disabled = false;
     if (!chunks.length) return;
@@ -4219,12 +4313,10 @@ $("sttrec").addEventListener("click", async () => {
   sttRecorder.start();
   $("sttrec").disabled = true;
   $("sttrecrow").hidden = false;
+  sttLevelStop = meter($("sttlevel"), analyser, data);
   const began = Date.now();
+  /* The clock, and the hard stop. The meter is on the frame loop. */
   sttTimer = setInterval(() => {
-    analyser.getByteTimeDomainData(data);
-    let peak = 0;
-    for (const v of data) peak = Math.max(peak, Math.abs(v - 128) / 128);
-    $("sttlevel").style.width = Math.min(100, peak * 160).toFixed(0) + "%";
     const secs = Math.floor((Date.now() - began) / 1000);
     $("sttring").textContent = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
     /* The one hard stop, and it is the ceiling the upload has anyway. Better
