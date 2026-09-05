@@ -420,8 +420,10 @@ def test_the_scroll_edge_cannot_hold_up_a_scroll():
 
 def test_no_selector_hides_a_disabled_control():
     """THE STANDING RULE, and the reason the greying pass is CSS and not JS.
-    chosenFormat(), granularities() and segments() read .disabled and .hidden
-    as the authority for what to send. A control the current route cannot carry
+    expertFormat(), granularities() and segments() read .disabled and .hidden
+    as the authority for what to send -- chosenFormat() was the third reader
+    until the Transcript format control it served was retired, and the rule
+    outlived it. A control the current route cannot carry
     is greyed WITH THE REASON beside it; a control that vanishes takes its
     explanation with it, and fifteen defects of that shape were fixed once."""
     for offender in re.finditer(r"([^{}]*:disabled[^{}]*)\{([^}]*)\}", BARE_CSS):

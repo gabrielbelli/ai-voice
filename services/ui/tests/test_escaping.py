@@ -885,6 +885,23 @@ def test_the_vocabulary_control_is_outside_the_expert_panel():
     assert box < panel, "the vocabulary control is inside or after the expert panel"
 
 
+def test_the_vocabulary_row_still_says_what_it_is():
+    """THE FAILURE A PROSE PASS MAKES: the element survives and the string that
+    named it does not. #glossbox holds one <label> and a container the buttons
+    are written into, so an emptied label leaves a row of bare profile names
+    with nothing saying what choosing one does -- and every other assertion
+    about this control goes on passing, because the control is still there.
+
+    The row is also the only field left on its line, so there is no neighbour
+    to borrow a heading from.
+    """
+    box = HTML.index('id="glossbox"')
+    row = HTML[box:HTML.index('id="gloss"', box)]
+    found = re.search(r"<label[^>]*>([^<]*)</label>", row)
+    assert found, "the vocabulary row has no label at all"
+    assert found.group(1).strip(), "the vocabulary label lost its text"
+
+
 def test_nothing_is_selected_by_default():
     """Measured across 25 cells: a glossary whose terms do NOT occur in
     the audio raises WER by 28% on Whisper, and nothing measurable on Parakeet. An always-on

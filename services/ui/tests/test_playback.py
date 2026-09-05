@@ -261,6 +261,17 @@ def test_the_download_button_names_the_file_it_writes():
     assert "lastTranscript.name" in label, "the label is not read off the file"
     assert '<button class="small tight" id="download" type="button">Download .txt<' in HTML
 
+    # THE ASSERTION ABOVE WAS SATISFIED BY THE WRONG LINE. nameDownload() reads
+    # lastTranscript.name twice -- once to find the dot, once to take the
+    # extension -- so replacing the whole assignment with the bare string
+    # "Download" left the first read in place and the test went on passing. It
+    # is the ASSIGNMENT that has to carry the extension, so that is what this
+    # reads: the textContent the button ends up with, not merely a mention of
+    # the file somewhere in the same function.
+    written = code(label[label.index('$("download").textContent'):])
+    assert "lastTranscript.name.slice(dot)" in written, \
+        "the label no longer takes the extension off the file it writes"
+
 
 def test_the_subtitle_cue_pattern_matches_what_this_stack_writes():
     """The page's parser and services/stt's _clock() must agree about a cue.
@@ -280,6 +291,40 @@ def test_the_subtitle_cue_pattern_matches_what_this_stack_writes():
 
 
 # --------------------------------------------------- how it is rendered --
+
+
+def test_the_cues_are_actually_painted_and_not_merely_parsed():
+    """PARSING THE TIMINGS AND DRAWING THEM ARE TWO THINGS, and only the first
+    was pinned. Every test above this one asks whether the cues were requested,
+    returned and located; none asked whether sttPlayback then turned them into
+    the spans the highlight moves between. Emptying that one assignment --
+    `karaoke.spans = []` instead of the paint() call -- left the whole suite
+    green while the transcript rendered as one flat block of text and no word
+    ever lit up, which is the entire feature gone with nothing to catch it.
+
+    The three lines together are what make a highlight: the spans exist, the
+    player they follow is known, and the pane is put into the mode the CSS
+    styles the lit word from.
+    """
+    playback = code(body_of("function sttPlayback(display, cues, lines)",
+                            "\n/* A file the browser cannot decode"))
+    assert 'karaoke.spans = paint($("transcript"), display, cues);' in playback, \
+        "the cues are located but never drawn"
+    assert "karaoke.cues = cues;" in playback
+    assert "karaoke.player = player;" in playback
+    assert '$("transcript").className = "out karaoke";' in playback
+
+
+def test_the_transcript_is_painted_before_it_is_told_to_look_painted():
+    """ORDER, because the class is what the CSS draws the lit word with and the
+    spans are what carries it. Setting the class first and painting after would
+    look identical in every static assertion and flicker an unstyled transcript
+    on every run.
+    """
+    playback = code(body_of("function sttPlayback(display, cues, lines)",
+                            "\n/* A file the browser cannot decode"))
+    assert playback.index("karaoke.spans = paint(") \
+        < playback.index('$("transcript").className = "out karaoke"')
 
 
 class Sniff(HTMLParser):
