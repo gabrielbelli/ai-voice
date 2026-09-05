@@ -24,6 +24,17 @@ $dest = "$env:LOCALAPPDATA\ai-voice-worker"
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 Copy-Item $src (Join-Path $dest 'ai-voice-worker.exe') -Force
 
+# The runtime scripts travel with the agent so provision.ps1, runner.py,
+# loadgen.py and fake_job.ps1 are all in one place next to the exe. They are a
+# few kilobytes; the 8 GiB of torch and weights that provision.ps1 downloads goes
+# into runtime\ underneath and is never copied from the repo.
+$srcRuntime = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'runtime'
+if (Test-Path $srcRuntime) {
+    $dstRuntime = Join-Path $dest 'runtime'
+    New-Item -ItemType Directory -Force -Path $dstRuntime | Out-Null
+    Copy-Item (Join-Path $srcRuntime '*') $dstRuntime -Recurse -Force -Exclude '.venv','python','models','cache'
+}
+
 $ini = Join-Path $dest 'worker.ini'
 $example = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'worker.ini.example'
 if (-not (Test-Path $ini) -and (Test-Path $example)) { Copy-Item $example $ini }
@@ -34,4 +45,9 @@ Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' `
 Write-Host "installed to $dest"
 Write-Host "starts at next logon; to start it now:"
 Write-Host "  & '$dest\ai-voice-worker.exe'"
+Write-Host ""
+Write-Host "It starts in Off mode if you set StartMode = Off in worker.ini, which is"
+Write-Host "the recommended way to begin: it watches and logs without ever taking the"
+Write-Host "GPU, so you can check its verdicts against your own week of gaming first."
+Write-Host ""
 Write-Host "to remove: Remove-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run AiVoiceWorker; Remove-Item -Recurse '$dest'"

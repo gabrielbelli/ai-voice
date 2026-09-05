@@ -41,6 +41,23 @@ namespace AiVoice.Worker
         /// set well clear of it rather than just above it.
         public int MemClockBusyMhz = 1500;
 
+        // A WARNING ABOUT THIS SIGNAL, found by reading what else runs on spring.
+        //
+        // The machine runs C:\gpu-clocklock.ps1 on a loop, which applies
+        // `nvidia-smi -lgc 1800` and `-pl 270` every ten minutes (the user's own
+        // script; see GAB-578 for why it re-applies rather than firing once).
+        // That LOCKS THE CORE CLOCK, and it is why clocks.sm reads exactly 1800 in
+        // all 150 samples of the idle baseline. The core clock is therefore a
+        // constant on this machine and worthless as a load signal - which is why
+        // the policy reads clocks.MEM instead, and clocks.mem is not what -lgc
+        // pins. Measured idle memory clock is 810 MHz with zero variance.
+        //
+        // If anyone ever adds `-lmc` to that script, this signal dies silently:
+        // the memory clock would then be a constant too and MemClockBusyMhz would
+        // never fire again. The tier-1 vetoes would carry on working, so the
+        // failure would be a quiet loss of sensitivity rather than a visible
+        // break. Worth knowing before debugging it from scratch.
+
         /// P5 for 100 per cent of the idle baseline. P0 and P2 are the performance
         /// states; P8 is deeper idle. Treating anything faster than P5 as load gives
         /// a signal that moves before utilisation does, because the driver raises the
@@ -80,6 +97,10 @@ namespace AiVoice.Worker
             "dwm", "explorer", "csrss", "ShellHost", "SearchHost",
             "StartMenuExperienceHost", "ShellExperienceHost", "ApplicationFrameHost",
             "SystemSettings", "CrossDeviceResume", "TextInputHost", "SearchApp",
+            // pid 4, the kernel. Measured holding 4.0 MiB on spring's idle desktop
+            // 2026-09-05. It was missing from this list, which was harmless only
+            // because 4 MiB is three orders of magnitude under the trip point.
+            "System",
             "msedgewebview2", "Raycast", "steamwebhelper", "steam", "steamservice",
             "CamoStudio", "vgtray", "LogonUI", "sihost", "ctfmon"
         };
@@ -111,17 +132,41 @@ namespace AiVoice.Worker
         /// Poll interval for the cheap Win32 and registry signals.
         public int FastPollMs = 1000;
 
-        /// Poll interval for the performance counters. Kept slow on purpose: a single
-        /// Get-Counter call against the GPU Engine set was measured at 1069-1851 ms
-        /// (probe p7). The PDH API used directly from C# is far cheaper than that
-        /// cmdlet, but the set is still large and this data only ever refines a
-        /// decision, never makes one alone.
-        public int CounterPollMs = 5000;
+        /// Poll interval for the performance counters.
+        ///
+        /// Two seconds, not five. The counters are the ONLY way an unknown game -
+        /// one with no Steam appid and no name in GameProcessNames - is detected,
+        /// via the VRAM veto, so this interval is that path's entire detection
+        /// latency. Read in-process through PDH the whole set costs 98 ms
+        /// (probe p7), against Get-Counter's measured 1069-1851 ms for the same
+        /// data, which is the reason this program is not a PowerShell script.
+        /// Paying three extra seconds of the user's frame time to save 98 ms of
+        /// one core every two seconds is the wrong way round; at 2000 ms the
+        /// counters cost under 5 per cent of one core and the unknown-game path
+        /// drops from a ~7 s worst case to ~3 s.
+        public int CounterPollMs = 2000;
 
-        /// Grace period given to a running job when the policy says yield, before it
-        /// is killed outright. The user's frame budget is 16 ms; five seconds of
-        /// contention is already bad, and anything longer is indefensible.
-        public int YieldGraceSeconds = 5;
+        /// Grace period given to a running job when the policy says yield, before
+        /// the job object is closed and the whole tree dies.
+        ///
+        /// Two seconds, and the kill is the NORMAL path rather than the exception.
+        /// The reason is a hard limit rather than a preference: Chatterbox's
+        /// generate() has no interruption point inside it (services/tts-long's
+        /// synth.py says so in its own docstring, and DELETE /jobs/{id} documents
+        /// the same limit for the local CPU worker). So the child cannot abort
+        /// mid-chunk. What it can do is decline to start another chunk and drop
+        /// the one in flight, which is what the YIELD line on stdin asks for.
+        ///
+        /// Waiting politely for a chunk to finish would cost a bounded but
+        /// unmeasured number of seconds of the user's frame time, and the stated
+        /// constraint is that the user has full priority. The cooperative stage
+        /// exists only to save a chunk that is already computed and one write away
+        /// from being delivered; anything slower than that gets killed. Killing
+        /// mid-CUDA-kernel is safe by construction - process teardown returns the
+        /// context and the allocation to the driver, and a chunk only becomes real
+        /// when the whole array is delivered, so there is no partial write to
+        /// corrupt.
+        public int YieldGraceSeconds = 2;
 
         // -- Job runtime ---------------------------------------------------------
 
@@ -130,6 +175,26 @@ namespace AiVoice.Worker
         public string JobCommand = "";
         public string JobArguments = "";
         public string JobWorkingDir = "";
+
+        /// The tray mode, persisted. Auto | AlwaysOn | Off.
+        public string StartMode = "Auto";
+
+        /// Where the agent appends one line per state change. This is the file the
+        /// week-long false-idle trial is read out of, so it is plain text with a
+        /// timestamp and a reason on every line and nothing that needs a parser.
+        public string LogPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "ai-voice-worker", "worker.log");
+
+        /// Written by runtime/provision.ps1 while it downloads. One line of plain
+        /// text, e.g. "torch, 1.4 of 2.4 GB". Present means setup is in progress;
+        /// absent means it is not. A file rather than a pipe because provisioning
+        /// is a separate script the user can run on its own.
+        public string ProvisionStatusPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "ai-voice-worker", "runtime", "provision.status");
+
+        public string ConfigPath = "";
 
         public string StatePath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -144,6 +209,7 @@ namespace AiVoice.Worker
         public static Config Load(string path)
         {
             var c = new Config();
+            c.ConfigPath = path == null ? "" : path;
             if (path == null || !File.Exists(path)) return c;
             foreach (string raw in File.ReadAllLines(path))
             {
@@ -179,6 +245,10 @@ namespace AiVoice.Worker
                 case "gameprocessnames": c.GameProcessNames = v.Split(','); break;
                 case "vramallowlist": c.VramAllowlist = v.Split(','); break;
                 case "idlepstates": c.IdlePStates = v.Split(','); break;
+                case "startmode": c.StartMode = v; break;
+                case "logpath": c.LogPath = v; break;
+                case "statepath": c.StatePath = v; break;
+                case "provisionstatuspath": c.ProvisionStatusPath = v; break;
             }
         }
     }

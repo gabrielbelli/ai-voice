@@ -1,317 +1,622 @@
 # ai-voice-worker
 
-A Windows machine lends its GPU to the voice stack, but only while its owner is
-not using it. One 40 KB executable, a tray icon with **Auto / Always on / Off**,
-and a policy that errs towards giving the card back.
+A Windows tray agent that lends an idle gaming PC's GPU to ai-voice, and gets out
+of the way the instant its owner wants it back.
 
-The machine this was built and measured against is `spring` — an RTX 3070, 8 GiB,
-driver 610.47, Windows 11 Pro 10.0.26200, a Ryzen 7 5700X3D and 32 GB, which is
-somebody's gaming PC and not a server. Everything below with a number in it was
-measured there on 2026-09-05. The scripts that produced those numbers are in
-[`probe/`](probe) and re-run unchanged.
+**This is a proof of concept.** It exists to answer two questions nobody could
+answer before: whether GPU idleness can be detected reliably enough to trust with
+somebody's gaming session, and whether Chatterbox can run on a machine with no
+Python installed. A polished tray application that cannot answer those would not
+have been the deliverable.
 
-## Why this exists at all
+Read [What is real, what is stubbed](#what-is-real-what-is-stubbed) before
+anything else. Quite a lot here is deliberately not built.
 
-One component in the stack is slower than realtime: Chatterbox voice cloning runs
-at **0.138x realtime** on the NAS's CPU, which is about seven minutes of compute
-per minute of audio. Nothing else is close — Parakeet transcribes at 47-63x
-realtime on CPU and Kokoro beats realtime — so nothing else has any business
-asking for a GPU, and neither of them is in scope here. Chatterbox's 0.5B fits an
-8 GiB card comfortably. That is the entire case, and it is worth keeping in view,
-because it means this worker only ever has to run one kind of job.
+---
 
-## What was actually hard
+## Why only Chatterbox, and why only this machine
 
-Not the tray icon. The question nobody could answer in advance was whether
-idleness can be detected reliably enough to be trusted with somebody's ranked
-match, and the obvious answer is wrong in three separate directions.
+`ai-voice` has five services. Exactly one of them is slower than realtime:
+Chatterbox voice cloning runs at **0.138x** on the NAS's CPU, which is about
+seven minutes of compute per minute of audio. Parakeet already does 47-63x
+realtime on CPU and Kokoro beats realtime, so neither wants a GPU and neither is
+in scope. An RTX 3070 with 8 GiB fits Chatterbox's 0.5B model comfortably.
 
-**`utilisation.gpu < N` is unreachable on this machine.** A 90-second, 92-sample
-baseline of an ordinary idle desktop — dwm, explorer, two Edge WebView2, Raycast,
-Steam's helper, CamoStudio and Vanguard's tray all resident:
+That single number is the whole justification (Linear GAB-627, GAB-628).
 
-| | min | max | mean | p95 |
-|---|---|---|---|---|
-| `utilisation.gpu` | 5 % | 6 % | 5.13 % | 6 % |
-| `utilisation.memory` | 3 % | 4 % | 3.73 % | 4 % |
-| `clocks.mem` | 810 MHz | 810 MHz | — | **zero variance, 92/92** |
-| `pstate` | — | — | — | **P5, 92/92** |
-| `power.draw` | 33.68 W | 35.13 W | 34.59 W | 34.98 W |
-| `memory.used` | 416 MiB | 416 MiB | — | zero variance |
+---
 
-An idle desktop never reads below 5 %. A threshold under 5 can never fire; a
-threshold over 6 is inside the noise. The signal is not merely imprecise, it is
-the wrong instrument.
+## The problem, and why the obvious answer does not work
 
-**`nvidia-smi` cannot see per-process memory here.** `--query-compute-apps`
-returns `used_memory` as `[N/A]` for all fifteen resident processes, and `pmon`
-returns `-` for every per-process column. That is the WDDM driver model, not a
-fault, and it removes the obvious way to notice a game that is paused but still
-resident — which is the expensive failure, because a paused game draws nothing
-and expects to resume in one frame.
+The obvious answer is "run when `utilisation.gpu` is below some threshold". On
+this machine that fails in three separate ways, each measured rather than
+assumed. The 150-sample idle baseline in
+`tests/fixtures/_recorded_idle_spring.csv` was taken with the desktop up and
+untouched:
 
-**A browser decoding video is not a game.** Utilisation rises for both.
+| signal | idle reading |
+|---|---|
+| `utilisation.gpu` | **5-6%**, never lower, in all 150 samples |
+| `clocks.mem` | **810 MHz**, zero variance |
+| `pstate` | **P5**, 150 of 150 |
+| `power.draw` | 34.55-36.02 W |
+| `memory.used` | 388 MiB, zero variance |
 
-## The signals that do work
+**Wrong low.** A threshold under 5% can never be satisfied here. A threshold over
+6% is inside the noise. The naive test is not merely imprecise, it is
+unreachable.
 
-The answer was not a better threshold. It was a different class of signal.
+**Wrong high.** A browser decoding video raises utilisation without touching the
+shaders. Yielding to that would make the worker useless on a desktop that is
+nearly always playing something.
 
-| | signal | source | idle reading | why it earns its place |
-|---|---|---|---|---|
-| 1 | `RunningAppID` | `HKCU\Software\Valve\Steam` | `0` | Steam writes the appid **before the game renders a frame**. Fires during the launcher splash, seconds ahead of any GPU evidence. |
-| 2 | `vgc` service | SCM | `Stopped` | Starts with Valorant. Note `vgk`, the kernel driver, is *always* Running (StartType System) and is therefore useless — `vgc` is the one to watch. |
-| 3 | game process exists | `Process.GetProcessesByName` | none | Survives pause, alt-tab and minimise. |
-| 4 | per-process VRAM | `\GPU Process Memory(*)\Dedicated Usage` | dwm 172.4, CamoStudio 112.3, explorer 40.3 MiB | **The counter that replaces what nvidia-smi will not tell us.** Survives pause. |
-| 5 | memory clock / pstate | `nvidia-smi` | 810 MHz, P5, no variance | The driver's own answer to "is this real work". |
-| 6 | power draw | `nvidia-smi` | 33.7–35.1 W | A 3070 under load pulls 200 W+. A six-fold separation, against a 1.45 W idle spread. |
-| 7 | engine-type split | `\GPU Engine(*)\Utilization Percentage` | 3d 0.95, videodecode 0.00 | Separates "rendering" from "playing a video". |
-| 8 | utilisation | `nvidia-smi` | 5–6 % | Last, weakest, advisory only. |
+**Wrong late, and this is the expensive one.** A game paused at a menu draws
+nothing. It still owns its VRAM and resumes in one frame. `utilisation.gpu` calls
+that idle and hands the card to a job.
 
-Signal 4 is worth dwelling on. The Windows GPU performance counters give exactly
-what NVML refuses to: per-process dedicated memory, and utilisation split by
-engine. The two accountings cross-check — the counters reported 423.4 MiB of
-adapter dedicated memory against `nvidia-smi`'s 417 MiB for the same instant, a
-1.5 % disagreement, which is two ways of counting the same truth rather than two
-different truths.
+And the obvious fix for the third case is not available:
+`nvidia-smi --query-compute-apps` returns `used_memory` as **`[N/A]` for every
+process** on this machine, because of the WDDM driver model. `pmon` shows `-` per
+process too. Per-process GPU memory simply is not there.
 
-They are also read through PDH, a documented OS API. Nothing is injected, no
-process is opened for write, no graphics API is hooked, no shell hook is
-registered. On a machine with Riot Vanguard resident in the kernel at all times,
-that is a constraint on the design and not a footnote: full-screen detection
-compares a window rectangle to a monitor rectangle, which is what every screen
-reader does, rather than reaching for `IDXGIOutput`.
+**What is there is the OS.** `\GPU Process Memory(*)\Dedicated Usage` read dwm at
+169.4 MiB, CamoStudio at 112.3, explorer at 40.3, and the adapter total within
+1.5% of nvidia-smi's own figure for the same instant. `\GPU Engine(*)` splits
+`3d` 1.06 from `videodecode` 0.00 — which is exactly what separates a game from a
+YouTube tab.
 
-## The policy
+---
 
-Three tiers. **Tiers 0 and 1 are vetoes** — any one alone means yield
-immediately, with no confirmation window, because each answers "does a game
-exist" rather than "is a game currently drawing", and the first question is the
-one that matters. **Tier 2 votes**, and needs three consecutive seconds to carry.
+## The policy: a ladder, not a threshold
 
-**Tier 0, fail closed.** The `nvidia-smi` stream is stale or dead; or the agent is
-not in the console session. Blindness must never mean "help yourself".
+### Tier 0 — blind. Fail closed.
 
-**Tier 1, a game exists.** Steam has a game open; `vgc` is running; a named game
-process exists; a non-allowlisted process holds ≥ 512 MiB of GPU memory; the
-foreground window covers a whole monitor.
+`nvidia-smi` stream dead, or the agent is not in the console session. The state is
+**`Blocked`**, which is deliberately a different thing from `Busy`: "I cannot see
+you" is not "a game is running", and the tray says so, because one of those means
+something needs fixing and the other does not.
 
-**Tier 2, something is drawing.** Memory clock above 1500 MHz; pstate outside
-`P5/P8/P12`; power above 70 W; utilisation above 25 %; 3D engine above 20 %.
+The policy starts in `Blocked`. An agent that has seen no samples knows nothing,
+and "knows nothing" must never mean "help yourself to the GPU".
 
-Deliberately **not** a load vote: `utilisation.decoder` and the `videodecode`
-engine. Video playback uses a fixed-function block, not the shaders. A Chatterbox
-job and a YouTube tab can share this card, and yielding to a video would make the
-worker useless on a desktop that is nearly always playing something. This is a
-decision about what to ignore, not a threshold.
+### Tier 1 — vetoes. A game **exists**. Instant, no confirmation.
 
-Also deliberately not a gate: **user input**. The user asked for a GPU worker, and
-someone typing in an editor is not using the GPU. `GetLastInputInfo` is collected
-and logged, but it does not decide.
+These survive a pause, an alt-tab and a minimise, which `utilisation.gpu` does
+not.
 
-### Where the thresholds come from
-
-| setting | default | measured basis |
+| signal | source | why |
 |---|---|---|
-| `MemClockBusyMhz` | 1500 | idle floor 810 MHz, zero variance over 92 samples |
-| `PowerBusyWatts` | 70 | idle ceiling 35.13 W; 70 is double the entire idle draw |
-| `UtilGpuBusyPct` | 25 | idle p95 6 %; four times the noise floor |
-| `ForeignVramBusyMiB` | 512 | largest idle consumer dwm at 172.4 MiB; three times it |
-| `BusyConfirmSamples` | 3 | 3 s at the 1 Hz sample rate |
-| `ClearCooldownSeconds` | 90 | longer than a level load or a round break |
+| `RunningAppID != 0` | `HKCU\Software\Valve\Steam` | Steam writes it **before the first frame is rendered** |
+| `vgc` running | service control manager | starts with Valorant, before the window. **`vgk` is always running and is useless** — measured Running/System while `vgc` was Stopped/Manual |
+| named game process | `GameProcessNames` | survives pause and minimise |
+| ≥512 MiB held by a non-allowlisted process | `GPU Process Memory` | the paused-game backstop; three times the largest thing on an idle desktop (dwm, 169.4 MiB) |
+| full-screen foreground window | `GetWindowRect` vs `GetMonitorInfoW` | not proof of a game, but proof the user is doing one thing with their whole screen |
 
-### The asymmetry, which is the whole design
+Our own child process is always exempt. Counting our own VRAM as evidence of a
+user would make the policy oscillate the moment a job allocated anything.
 
-Detection is fast and release is slow. A false "busy" costs one job. A false
-"idle" costs the user their game. So the confirmation window is three seconds and
-the cooldown before the GPU is taken back is ninety.
+### Tier 2 — votes. Something is **drawing**. Three consecutive seconds.
 
-### How long it takes to notice a game starting
+Memory clock > 1500 MHz · pstate outside P5/P8/P12 · power > 70 W · utilisation >
+25% · 3D engine > 20%.
 
-This is the number the feature will be judged on.
+**Video decode deliberately does not yield.** **Input idleness deliberately does
+not gate** — the request was GPU-only. `GetLastInputInfo` is collected into
+`state.json` for the trace and never consulted by `Evaluate()`.
 
-| what starts | detected by | detection | + yield grace | total |
-|---|---|---|---|---|
-| a Steam game | `RunningAppID`, before the first frame | ≤ 1 s | 5 s | **≤ 6 s** |
-| Valorant | `vgc` service starting | ≤ 1 s | 5 s | **≤ 6 s** |
-| a known game process | process enumeration | ≤ 1 s | 5 s | **≤ 6 s** |
-| an unknown non-Steam game | VRAM veto at the 5 s counter poll | ≤ 5 s | 5 s | **≤ 10 s** |
-| an unknown game, GPU signals only | 3 votes + ~1 s driver averaging | ≤ 4 s | 5 s | **≤ 9 s** |
+### The asymmetry is the safety property
 
-The launcher signals fire *before* the game touches the GPU, so in the common
-case the card is handed back during the splash screen. The worst case is a game
-that uses no launcher and is not in `GameProcessNames`, at about ten seconds —
-and the fix for that is one line in `worker.ini`.
+```ini
+BusyConfirmSamples   = 3     # ~3 s for a tier-2 vote; tier 1 is instant
+ClearCooldownSeconds = 90    # busy -> available
+YieldGraceSeconds    = 2
+FastPollMs           = 1000
+CounterPollMs        = 2000
+```
+
+Going busy is instant. Coming back takes **90 seconds of continuous clear**. A
+false busy costs one job; a false idle costs the user their game.
+
+---
+
+## The idleness policy is a separate, testable module
+
+This is the part that decides whether the user trusts the thing, so it is
+exercisable with no GPU, no game, no driver and no console session.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tests\run-tests.ps1
+```
+
+**38 assertions, 0 failures**, about a second, compiled by the C# compiler inside
+Windows. It links `Model.cs`, `Config.cs`, `Policy.cs` and `Replay.cs` and
+**nothing else** — no `Signals.cs`, so no user32, no PDH, no registry, no service
+control manager. That split is why the tests exist at all: before it, compiling
+the policy meant compiling the P/Invoke, and the decision could only be exercised
+on a Windows desktop with a GPU in it, which is to say only where getting it
+wrong is expensive.
+
+There is **no second implementation**. The tests drive the same
+`Policy.Evaluate` the tray runs; only the input differs.
+
+Each test is named after the mistake it stops:
+
+| fixture | asserts |
+|---|---|
+| `idle_desktop.csv` | 150 s of **real measured idle** ends `Available` and is never `Busy` |
+| `session0_blocked.csv` | **real**, including session columns: an agent over SSH refuses for ever and names the session, not a game |
+| `steam_launch.csv` | Steam vetoes on the row the appid appears, while the GPU is still P5 at 810 MHz — proving it fires before any load signal could |
+| `paused_game_vram.csv` | a game holding 3.8 GiB with **no Steam appid and an idle GPU** is still caught |
+| `video_playback.csv` | decoder at 41% never yields |
+| `tier2_load_only.csv` | a load vote fires on the third consecutive sample, not the second or fourth |
+| `valorant_vgc.csv` | caught by `vgc` |
+| `smi_dead.csv` | a dead stream is `Blocked`, never `Busy` |
+| `cooldown_90s.csv` | `Available` returns at exactly row 119, not 118 |
+| `alt_tab_midgame.csv` | alt-tabbing out of a game never frees the GPU, even after the GPU falls back to idle |
+| `own_job_vram.csv` | our own 3.2 GiB is not a user — **and the same 3.2 GiB held by anything else is** |
+| `locked_fullscreen.csv` | a lock screen is not a full-screen game |
+| `_recorded_vram_spring.csv` | none of the **15 real processes** on an idle desktop trips the veto |
+
+**The fixture format is the calibration format.** `Replay.cs` reads exactly what
+`--calibrate` writes, so twenty minutes of a real match drops into
+`tests/fixtures/` and becomes a regression test with nobody transcribing numbers.
+
+`tests/gen_fixtures.py` regenerates the synthetic ones and its docstring is where
+the real/invented line is drawn.
+
+---
 
 ## What is proven, and what is not
 
-Proven on the real machine, by running the actual binary there:
+### Measured, on the real machine
 
-- it **compiles with the C# compiler that ships inside Windows** — 6 files,
-  `csc.exe`, exit 0, **40,448 bytes**, no SDK, no NuGet, no network
-- the GPU stream, launcher registry, service query, session detection and
-  performance counters all work, and the JSON snapshot is populated
-- **the VRAM veto fires and names its evidence.** With the threshold dropped to
-  100 MiB and dwm removed from the allowlist, it reported
-  `dwm (pid 1752) holds 169 MiB of GPU memory` and refused to run. That is the
-  mechanism the paused-game case depends on, exercised against real data
-- the game-process veto fires (`game process present: steamwebhelper`)
-- the tier-2 load votes fire and name themselves. With every trip point moved
-  below the measured idle floor they reported `performance state P5`,
-  `power draw 36.3 W` and `utilisation 5%` on the third consecutive sample —
-  confirming both the votes and the three-sample confirmation window. They now
-  correctly stand down while a veto is active, since the decision is already made
-- **the session check fires, which is the fail-closed path working in the field.**
-  Run over SSH the agent reports
-  `agent is in session 0, console is session 1: cannot observe the user`
-  and refuses to run
-- cost: **3.94 % of one core, 0.25 % of this 16-thread CPU**, 35.6 MiB for the
-  agent plus 30.9 MiB for its `nvidia-smi` child, which itself measured 0.00 %
-- reading the counters in-process costs **98 ms**, against 1069–1851 ms for the
-  `Get-Counter` cmdlet — an 11-19x difference, and the reason the agent is not a
-  PowerShell script
-- no process is left behind by any mode
+| claim | result |
+|---|---|
+| Policy decides correctly on recorded samples | **38/38**, no GPU needed |
+| Builds with no SDK, no NuGet, no network | **49,664 bytes**, zero warnings at `/warn:4`, built on `spring` itself |
+| Fails closed from the wrong session | `--once` returns `"state":"blocked"`, `"can_run":false` |
+| Counter read cost, in-process | **98 ms** (vs `Get-Counter`'s measured 1069-1851 ms) |
+| **Cooperative yield: YIELD on stdin → child gone** | **20 ms** |
+| **Stubborn yield: child ignores stdin → job object kills the tree** | **2002 ms**, bounded exactly by `YieldGraceSeconds` |
+| Runner abandons cleanly, chunks restored | verified: 6/6 back in `pending`, none stuck |
+| stdin EOF dead-man's switch | verified: agent gone → runner exits without taking work |
+| uv fetches its own CPython with **no system Python** | **CPython 3.12.14 in 1.14 s** with `env -i` — empty environment, no PATH |
+| Lock pins the **GPU** wheel | `torch 2.6.0+cu126` from `download.pytorch.org` |
+| Download size | **5.55 GiB** (measured, see below) |
 
-**Not proven, and it must be said plainly: the busy side of every GPU threshold.**
-The instruction for this investigation was read-only — install nothing, start
-nothing that outlives a command, it is the user's gaming PC — so no load could be
-generated to measure what a running game actually looks like. The idle side is
-measured to four significant figures. The busy side is inferred from the idle
-distribution and the known behaviour of the part.
+### Not proven, and it matters
 
-That gap is closed by measurement rather than argument:
+**The busy side of every tier-2 threshold.** 1500 MHz / P0 / 70 W / 25% / 20% are
+margins reasoned from an idle baseline. Read-only probing on somebody's gaming PC
+cannot generate GPU load, so nothing has ever been observed under a game. Until
+`--calibrate` runs, **tier 1 carries all the weight** — by design, but it is a
+single point of failure for any game that Steam and the process list do not know.
 
-```powershell
-.\ai-voice-worker.exe --calibrate game.csv 20
-```
+**Every signal that has never run outside session 0**: foreground, full-screen,
+lock, input. All measurements so far came from SSH, where `GetForegroundWindow()`
+returns 0. The first run from the console is also the first test of that code.
+That the untested half is untested *because the safety mechanism worked* is
+correct, and still leaves it untested.
 
-Run that, play for twenty minutes, and it writes every signal once a second to a
-CSV and exits on its own. The tier-2 thresholds should then be set from the
-observed separation instead of from a margin on the idle floor. Until that has
-been done once, the tier-1 vetoes are doing the real work — which they are
-designed to, and which is why the launcher signals are ranked first.
+**Chatterbox's realtime factor on the 3070.** Nobody has it. It is the entire
+justification for GAB-628.
 
-Also unverified, for the same reason: `GetLastInputInfo`, `GetForegroundWindow`
-and the lock detection could only be exercised from session 0, where they are
-meaningless by construction. They need one run from the desktop.
+**Cold start: spawn to first chunk.** If it is 60 s and real idle windows are two
+minutes, a worker that yields correctly never finishes anything and the design is
+net negative on merit rather than on a bug. `runner.py` logs
+`first chunk delivered` for exactly this.
+
+**Killing torch mid-CUDA-kernel** is expected-safe but unobserved on this card.
+
+**False-idle rate over a week.** This is the actual deliverable, not the tray
+icon. False busies do not count in any quantity; a single false idle during a
+ranked match ends the project.
+
+---
+
+## A finding about this specific machine
+
+`spring` runs `C:\gpu-clocklock.ps1` on a loop, which applies
+`nvidia-smi -lgc 1800` and `-pl 270` every ten minutes (GAB-578). **That locks the
+core clock**, which is why `clocks.sm` reads exactly 1800 in all 150 baseline
+samples. The core clock is a constant here and worthless as a signal — so the
+policy uses `clocks.mem`, which `-lgc` does not pin and which measured 810 MHz
+with zero variance.
+
+If anyone ever adds `-lmc` to that script, the memory-clock vote dies **silently**:
+tier 1 keeps working, so it would be a quiet loss of sensitivity rather than a
+visible break.
+
+---
 
 ## Packaging
 
-The ask was "something contained, like an AppImage". AppImage is Linux; the
-Windows options are a portable `.exe`, an embeddable Python distribution shipped
-alongside, or MSIX. The answer here is **both of the first two, split along the
-line where the size is**.
+Two pieces, split along the line where the size is:
 
-| | agent | job runtime |
-|---|---|---|
-| what | detection, tray, policy | Chatterbox on torch |
-| size | **40 KB** | ~2.5-3 GB |
-| dependencies | **none** | CUDA wheels |
-| install | copy the file | `runtime/provision.ps1` |
-| removal | delete the file | delete the folder |
+```
+ai-voice-worker.exe   49,664 bytes   no dependencies    does the detection
+runtime\              ~8.0 GiB       one script, once   does the work
+```
 
-The agent is C# against .NET Framework 4.8, which is part of Windows — measured
-present on spring at release 533509, with `csc.exe` in
-`C:\Windows\Microsoft.NET\Framework64\v4.0.30319`. There is no runtime dependency
-to manage because the runtime is the operating system. It also means the build
-needs no build host: any Windows machine can produce the binary, and it was in
-fact produced on the target machine over SSH.
+### The agent needs nothing, because its runtime is the operating system
 
-**What that costs.** C# 5, because the in-box compiler predates Roslyn and no SDK
-is installed — no string interpolation, no `?.`, no `nameof`. It is a real
-constraint on the source and it is the price of a build with no toolchain.
+Built by `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe` — the C#
+compiler that ships inside Windows. No SDK, no NuGet, no build host, no network.
+It was built and run on `spring` itself over SSH. **The runtime dependency the
+question was about does not exist for the agent.**
 
-**Why not the alternatives.** PyInstaller onefile needs a Windows build host and
-a CI job, produces 30-60 MB, unpacks to a temp directory on every launch, and is
-routinely flagged by antivirus — poor manners on a machine running kernel-mode
-anti-cheat. MSIX needs a signing certificate and gives package identity and a
-virtualised filesystem, neither of which helps something whose whole job is to
-read the machine it sits on. .NET 8 is present here (8.0.29) but is not
-guaranteed on any other Windows box, and a self-contained publish is ~70 MB.
+The cost is **C# 5**: no string interpolation, no `?.`, no `nameof`. The source is
+written to it. The tray icon is drawn rather than shipped so the deliverable stays
+one file.
 
-The job runtime cannot be made small — torch is torch — so it is provisioned once
-by a script into one directory. Embeddable Python is a ZIP: no registry, no PATH,
-no administrator, removed by deleting the folder. The Store Python currently on
-`PATH` on spring is the alias stub that prints "Python was not found", and `py` is
-absent; the embeddable distribution sidesteps both. The cost is that it has no
-`ensurepip` and no `venv`, so pip is bootstrapped by hand and `._pth` edited to
-re-enable `site` — about fifteen lines, once, in `runtime/provision.ps1`.
+### The runtime is `uv` with a locked, on-disk venv
+
+AppImage is Linux. The honest Windows equivalent is **one folder you delete to
+uninstall, that touched nothing outside itself** — because nothing produces a
+self-contained *file* here: 4.28 GiB of CUDA DLLs and 3 GiB of weights land on
+disk as files under every option.
+
+`uv.exe` is a single ~17 MB binary with no prerequisites. It fetches its own
+CPython. Everything is confined by `UV_PYTHON_INSTALL_DIR`,
+`UV_PROJECT_ENVIRONMENT`, `UV_CACHE_DIR` and — most importantly — **`HF_HOME`**,
+so weights go to `models\` and survive a reinstall.
+
+**Proven, not asserted.** With `env -i` — a completely empty environment, no PATH,
+no system Python reachable — uv downloaded CPython 3.12.14 and installed it in
+**1.14 seconds**, then created a venv whose `base_prefix` points inside the
+isolated directory, and installed packages into it.
+
+That also kills the embeddable-Python option outright: python.org's newest
+embeddable build is **3.12.10** and 3.12.11 is a **404** (the branch is
+security-fix-only). Choosing it would pin a gaming PC to a permanently unpatched
+interpreter, while uv fetches 3.12.14.
+
+### The trap this hit, and you will too
+
+`runtime/pyproject.toml` names `torch` and `torchaudio` as **direct**
+dependencies even though `chatterbox-tts` already requires both. That is not
+style. `[tool.uv.sources]` only applies to direct dependencies, so with torch left
+transitive the lock resolved **`torch 2.6.0` from pypi.org — the CPU-only wheel**.
+Verified here, then fixed; `uv lock` then reported:
+
+```
+Updated torch v2.6.0 -> v2.6.0+cu126
+Updated torchaudio v2.6.0 -> v2.6.0+cu126
+```
+
+This is the single most common way this setup fails and **it fails silently**:
+everything imports, everything runs, and the worker turns out slower than the NAS
+it was meant to relieve. `provision.ps1` asserts `torch.cuda.is_available()` and
+`"+cu" in torch.__version__` as a second line of defence.
+
+The previously committed `provision.ps1` had exactly this bug in pip form and has
+been rewritten.
+
+### Why the version pin is forced, not chosen
+
+`chatterbox-tts==0.1.7` hard-pins `torch==2.6.0`, which exists on Windows as
+cu124 and cu126 only. Python 3.14 would unlock torch ≥2.9, but 3.14 removed
+`pkg_resources`, which `resemble-perth` imports — already documented at
+`services/tts-long/requirements.txt:30`. **Python 3.12 + cu126 overrides nobody's
+pin.** Resolved: 112 packages, `numpy 1.26.4`, `transformers 5.2.0`.
+`gradio 6.8.0` and `pre-commit` are hard runtime deps of chatterbox — upstream's
+mistake, inherited, ~40 MB out of 5,600, not worth stripping now.
+
+### The honest download size
+
+| | measured |
+|---|---|
+| `torch 2.6.0+cu126` win_amd64 wheel | **2496.1 MB** |
+| `torchaudio` | 4.2 MB |
+| the other 109 wheels | 251.2 MB |
+| Chatterbox weights (6 files, `allow_patterns`) | **3208.9 MB** |
+| **total download, once** | **≈ 5960 MB = 5.55 GiB** |
+| on disk afterwards | ≈ 8.0 GiB, against 242 GB free |
+
+**No packaging choice makes this smaller.** Every option downloads the same bytes,
+and a frozen exe would still need the network for the weights, so "works offline
+out of the box" was never available.
+
+The wheel ships `cudart`, `cublas`, `cudnn_*`, `cufft`, `cusolver`, `cusparse`,
+`curand`, `nvrtc` and `nvJitLink` in `torch\lib\`. **No CUDA Toolkit is required
+and none should be installed.** The only host dependencies are the display driver
+and the MSVC 2015-2022 x64 runtime, both already present.
+
+### What was rejected
+
+| option | why not |
+|---|---|
+| **PyInstaller `--onefile`** | unpacks the whole payload to temp **on every launch** — 4.3 GiB of DLL writes per start — and AV-flags. Poor manners next to kernel-mode anti-cheat |
+| **PyInstaller `--onedir` / Nuitka** | produces the directory uv would have produced, minus reproducibility and minus `pip install`-a-fix, and makes us the redistributor of NVIDIA's DLLs and cuDNN's separate SLA. Nuitka additionally fights `torch.jit` and compiles for hours |
+| **MSIX** | needs a cert in the **LocalMachine Trusted People store from an admin PowerShell**. Admin, on a gaming PC, for an 8 GiB package |
+| **Embeddable Python zip** | no `ensurepip`, no `venv`, a `._pth` that must be hand-edited — and it is a dead end at 3.12.10 |
+| **WSL2 / Docker** | neither installed. `wsl --install` is admin + reboot + hypervisor features on a machine running Vanguard |
+
+**Costs, plainly:** first run needs network and takes minutes; there is a `.venv`
+a curious user could break; **the exe is unsigned**, so SmartScreen warns on first
+run and Mark-of-the-Web must be cleared. A code-signing certificate is the honest
+fix and is out of scope here.
+
+---
+
+## Vanguard safety
+
+Riot Vanguard is kernel-mode and always resident on this machine. Everything here
+is passive and ordinary: `Shell_NotifyIcon`, registry **reads**,
+`ServiceController.Status`, performance counters, and spawning `nvidia-smi`.
+
+**No `SetWindowsHookEx`, no `ReadProcessMemory`, no injection, no driver, no input
+synthesis, no overlay, and no listening socket.** The parts that could have looked
+like automation — anything reaching into another process — are exactly the parts
+designed out by reading OS counters instead.
+
+The residual risk is social, not technical: an unsigned executable from an unknown
+publisher, running at login, spawning a GPU process on a machine with kernel-mode
+anti-cheat. **The cheapest mitigation is the recommended first step below.**
+
+---
 
 ## Install
 
+Nothing here needs administrator, a reboot, or a PATH edit.
+
+### 1. Build and install the agent
+
 ```powershell
-powershell -ExecutionPolicy Bypass -File build.ps1     # -> dist\ai-voice-worker.exe
-powershell -ExecutionPolicy Bypass -File install.ps1   # -> %LOCALAPPDATA%, HKCU Run key
+git clone <this repo>
+cd services\worker
+powershell -ExecutionPolicy Bypass -File build.ps1
+powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
-`install.ps1` uses the **Run key, not a Windows service**, and that is not a
-shortcut. A service runs in session 0, and from session 0 the agent cannot see
-the user at all — measured, `GetForegroundWindow()` returned 0 and
-`GetLastInputInfo()` reported 620953 ms of idleness while the user was at the
-machine. The policy detects this and refuses to run, so a service install would
-never work rather than working badly.
+That writes `%LOCALAPPDATA%\ai-voice-worker\` and one `HKCU\...\Run` value. It
+installs as a **Run key, not a service**, and that is load-bearing: a service runs
+in session 0, where `GetForegroundWindow()` returns 0 and `GetLastInputInfo()`
+reported **620,953 ms** of "idle" with the user sitting at the machine. Tier 0
+detects that and refuses to run, so a service install would fail loudly rather
+than work badly.
 
-Then, when the GPU work is wanted:
+### 2. Run it in **Off** mode for a week first
+
+```ini
+StartMode = Off
+```
+
+**This is the recommended way to begin and it is nearly free.** Off keeps
+sampling and keeps logging; it just never takes the GPU. So a week of
+`worker.log` gives the false-idle record — checked against your own account of
+when you were playing — before the thing has ever touched your card, and before
+any anti-cheat has seen it spawn a GPU process.
+
+Check it with:
+
+```powershell
+& "$env:LOCALAPPDATA\ai-voice-worker\ai-voice-worker.exe" --watch 30
+```
+
+### 3. Calibrate the thresholds you have not measured
+
+The busy side of tier 2 is guesswork until this runs.
+
+```powershell
+# during twenty minutes of an actual game
+& "$env:LOCALAPPDATA\ai-voice-worker\ai-voice-worker.exe" --calibrate game.csv 20
+```
+
+Or, without waiting for a match, once the runtime exists:
+
+```powershell
+.\runtime\.venv\Scripts\python.exe runtime\loadgen.py --seconds 120 --vram-mib 2000
+# in another window
+& ".\ai-voice-worker.exe" --calibrate busy.csv 2
+```
+
+`loadgen.py` moves utilisation, power, clocks, pstate and VRAM. It does **not**
+drive the 3D engine — that needs a real renderer — so `Util3dBusyPct` still wants
+a game. Drop either CSV into `tests\fixtures\` and it becomes a test.
+
+### 4. Provision the GPU runtime (~5.6 GiB, once)
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File runtime\provision.ps1
 ```
 
-and point `JobCommand` in `worker.ini` at the resulting `python.exe`. With
-`JobCommand` empty the agent runs in detection-only mode, which is what this
-proof of concept ships as.
+It prints the two lines to paste into `worker.ini`. While it runs the tray shows
+**"Setting up: ..."** in its own colour, because a grey icon during a 5.6 GiB
+download reads as broken and gets killed at 4 GB.
 
-## Modes
+### Uninstall
 
 ```powershell
-.\ai-voice-worker.exe --once                   # one JSON snapshot, exits
-.\ai-voice-worker.exe --watch 30               # a line a second for 30s, exits
-.\ai-voice-worker.exe --calibrate game.csv 20  # every signal to CSV, exits
-.\ai-voice-worker.exe                          # tray icon
+Remove-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run AiVoiceWorker
+Remove-Item -Recurse "$env:LOCALAPPDATA\ai-voice-worker"
 ```
 
-Every command-line mode exits on its own. That is deliberate: it is what makes the
-thing safe to drive over SSH against a machine you are a guest on.
+That is all of it. No registry beyond that one value, no service, no driver.
 
-The tray icon is green when the GPU is available, amber during the cooldown, red
-when it has been given back, grey when off or blocked. The menu carries the
-current state, the reason for it, the three modes and **Copy diagnostics**, which
-puts the full JSON snapshot on the clipboard.
+---
 
-## Talking to the rest of the stack
+## The tray
 
-The agent writes its status to
-`%LOCALAPPDATA%\ai-voice-worker\state.json` once a second, replaced by rename so
-there are no torn reads. **It opens no listening socket**, which is a deliberate
-choice on a machine running kernel-mode anti-cheat.
+| mode | behaviour |
+|---|---|
+| **Auto** | runs only when the policy says `Available`. The default, and the one everything above exists to make trustworthy |
+| **Always on** | ignores the policy — **but still evaluates, logs and publishes the verdict it is overriding**, so you can benchmark on demand while a detector that is not in charge keeps collecting evidence |
+| **Off** | never runs, **keeps sampling and logging** |
 
-Nothing in the five existing services was changed, and nothing needs to change for
-detection to work. What the stack would need before this worker can take real
-jobs, none of it done here:
+Mode is persisted to `worker.ini` immediately. A setting that silently resets is a
+setting people stop trusting.
 
-- **`services/tts-long` needs a way to hand a job out and take a result back.**
-  Today it owns its queue in-process. A remote worker needs to lease a job, get
-  the reference audio, and return the audio — the job model exists, the transport
-  does not.
-- **The runtime must yield within the grace period.** The agent kills its job
-  tree via a Windows job object with `KILL_ON_JOB_CLOSE`, which is reliable but
-  blunt: a job killed mid-generation is lost work. A cooperative shutdown
-  signal — a sentinel file, or a line on stdin — would let a job checkpoint
-  instead, and `JobRunner.Stop` is where that would attach.
-- **Whatever leases the work must assume the worker vanishes**, because it will,
-  in about six seconds, whenever somebody launches a game.
+```
+Yielded to you                     <- headline
+Steam is running Counter-Strike 2  <- WHY, one line
+Why? >                             <- every reason, in full, untruncated
+------
+( ) Auto   ( ) Always on   (o) Off
+------
+3 started, 1 yielded, last 20 ms
+Copy diagnostics
+Exit
+```
+
+**The "why" line is the feature.** The question this proof of concept has to
+answer is whether the user trusts the detector, and trust comes from it being able
+to say `dwm (pid 1752) holds 169 MiB` or `agent is in session 0, console is
+session 1: cannot observe the user` rather than just going red.
+
+| colour | state |
+|---|---|
+| green | `Available` |
+| amber | `Draining` — cooling down, with the seconds left |
+| red | `Busy` — yielded to you |
+| grey | `Blocked` or Off |
+| blue | provisioning |
+| **hollow ring** | **Always-on is running against a busy verdict** — so "I am using your GPU while you game" is never invisible |
+
+**No balloon notifications, ever.** A toast over a ranked match is the wrong
+thing and it is what makes people uninstall.
+
+`state.json` is written once a second by write-temp-then-rename, so anything on
+the box can read the worker's mind **without opening a port** on a machine running
+kernel-mode anti-cheat.
+
+---
+
+## How yielding works
+
+**t = 0 ms.** The policy returns a tier-1 veto. State flips to `Busy`; the icon
+goes red in the same tick. Three things happen and none of them blocks:
+
+1. The lease is released — the chunk goes back to `pending` before the child has
+   noticed.
+2. `YIELD` is written to the child's stdin.
+3. `Stop()` is queued to the thread pool **so the 1 Hz sampler keeps sampling**.
+
+**t ≈ 20 ms** (measured). If the runner was between chunks, it exits and the
+driver gets the CUDA context and the weights back.
+
+**t = 2002 ms** (measured). Grace expires. `CloseHandle(job)` takes the whole tree
+down together — including any torch child — and takes it down even if the agent
+itself is killed, because the kernel closes the handle when the agent's process
+object is torn down.
+
+### The hard floor, stated plainly
+
+**`generate()` has no interruption point inside it.** `services/tts-long`'s
+`synth.py` says so in its own docstring, and `DELETE /jobs/{id}` documents the
+same limit for the local CPU worker. The runner **cannot** abort mid-chunk. What
+it can do is not start another one and drop the current result.
+
+That is why the grace is **2 seconds and the kill is the normal path, not the
+exception**. Waiting politely for a chunk to finish is a bounded-but-unmeasured
+number of seconds of the user's frame time, and the user has full priority. The
+cooperative stage exists only to save a chunk that is already computed.
+
+Killing mid-CUDA-kernel is safe by construction: process teardown returns the
+context, and audio only becomes real when the whole array is delivered, so there
+is no partial write to corrupt.
+
+**The number this does not know is how long one `generate()` takes on the 3070.**
+If it is 30 s, `TTS_CHUNK_MAX_CHARS` has to come down — already an environment
+variable, no code change.
+
+---
+
+## What is real, what is stubbed
+
+### Real
+
+- The whole idleness policy, and 38 tests over recorded samples.
+- The tray, all three modes, the why-list, mode persistence, `state.json`,
+  `worker.log`.
+- The agent↔child supervision: job object, stdin YIELD, EOF dead-man's switch,
+  and both yield latencies **measured on the real machine**.
+- `runner.py`'s queue, lease-claim, abandon-and-restore and timing instrumentation
+  — exercised end to end with `--fake-model`.
+- The uv bootstrap and the hash-pinned 112-package Windows lock.
+
+### Stubbed, deliberately
+
+- **The entire wire protocol.** No HTTP, no socket, no TLS, no auth, no
+  `/workers/*` routes. The transport is a **directory queue**:
+  `queue\pending\NNNN.json` carries the lease shape verbatim and `runner.py`
+  writes `queue\done\NNNN.f32` plus a JSON sidecar. This exercises the whole
+  lease/abandon state machine — including the case that decides everything, a
+  chunk dropped mid-flight — with zero network code and zero listening ports.
+- **Zero changes to any existing service.** `tts-long`, `gateway`, `ui`, `stt`,
+  `tts` and `compose.yaml` are untouched: no new route, no port, no volume, no
+  key. That is the design's best evidence — a remote GPU worker that needs no
+  change to the deployment topology has not moved the auth boundary.
+- **The reference-clip fetch.** No content-addressed cache. Copy one `.wav` in by
+  hand and put its path in the lease as `reference_path`.
+- **Voice registry, language matching, capability negotiation.** One model, one
+  language, one machine.
+- **No audio returns to orko.** The f32le blobs stay on disk so the byte-for-byte
+  diff can be run by hand later.
+- **`GATEWAY_WORKER_KEYS`**, the ~10-line path-scoped credential. Not built,
+  because nothing authenticates to anything yet. The current gateway key can
+  synthesise, transcribe, delete jobs and read every clip, which is why a worker
+  should not carry one.
+- **No code signing, no auto-update, no telemetry, no scheduler, no second
+  worker.** Exactly one chunk in flight, ever — which is also true of the real
+  design, because `on_chunk` feeds a sequential encoder and parallel chunks would
+  break `offsets` silently.
+
+### Not yet run at all
+
+Chatterbox itself has **never been run on this GPU**. `provision.ps1` has not been
+executed on `spring` — nothing was installed there, as required. Every number in
+[What is proven](#what-is-proven-and-what-is-not) about torch, CUDA, realtime
+factor and cold start is therefore still open.
+
+> **When the local-vs-remote byte-identity diff is eventually run**, it will fail
+> unless it is run with a **fixed seed and `temperature=0`**. Chatterbox samples.
+> Without that caveat the difference gets blamed on the transport, which will be
+> the one thing that is innocent.
+
+---
 
 ## Layout
 
-```text
-src/Signals.cs   sampling: nvidia-smi, PDH counters, session, launchers
-src/Policy.cs    the three tiers, the hysteresis, the state machine
-src/Agent.cs     the loop, and the job object that supervises the runtime
-src/TrayApp.cs   the icon and its menu
-src/Program.cs   --once, --watch, --calibrate, --tray
-build.ps1        csc.exe -> one .exe
-install.ps1      copy, and the HKCU Run key
-runtime/         provision.ps1: embeddable Python, pip, torch, a CUDA check
-probe/           the read-only probes behind every number in this file
+```
+src/Model.cs      plain data. No P/Invoke, so the policy is testable
+src/Config.cs     every default, with the measurement behind it
+src/Policy.cs     tiers, hysteresis, state machine, the VRAM veto
+src/Replay.cs     recorded CSV -> Snapshots
+src/Signals.cs    nvidia-smi stream, PDH counters, session, launchers
+src/Agent.cs      1 Hz loop + 2 s counter loop + the job object
+src/TrayApp.cs    icon, modes, why-list
+src/Program.cs    --once  --watch  --calibrate  --tray
+build.ps1         csc.exe -> one exe          install.ps1   HKCU Run key
+tests/            run-tests.ps1, Tests.cs, gen_fixtures.py, fixtures/
+runtime/          pyproject.toml, uv.lock, provision.ps1,
+                  runner.py, loadgen.py, fake_job.ps1
+probe/            p1..p7, the original evidence
 ```
 
-See Linear GAB-627 and GAB-628.
+`--watch` and `--calibrate` exit on their own. That is not decoration: it is what
+makes the thing safe to drive over SSH against somebody's gaming PC without
+leaving a process behind.
+
+---
+
+## What the rest of the stack would need, when this stops being a stub
+
+Nothing yet — and that is the point. When the transport is built:
+`tts-long` gains five `/workers/*` routes, a `generate=` hook in
+`speak_segments`, three keys added to `_public`'s **strip set** (`assigned`,
+`pieces`, `attempts` — `_public` is a denylist, so forgetting this 500s `GET
+/jobs` exactly like the `_said()` bug fixed in `566f6a2`), and a 5 s lease
+sweeper. The gateway gains five proxy entries and, ideally,
+`GATEWAY_WORKER_KEYS`. `compose.yaml` gains nothing.
+
+A `tts-long` restart still loses queued jobs. That is unchanged and deliberately
+out of scope: this proves a **worker** can vanish safely; the **coordinator**
+vanishing is GAB-627's separate question, and conflating the two is how a proof of
+concept stops proving anything.
+
+**Not evaluated: Ray Serve, LitServe, vLLM router, llama-swap.** The repo's own
+recycle-before-building rule says check first. My read is that they solve provider
+pooling but none solves *opportunistic* membership on a machine whose owner
+outranks the scheduler — which is the only hard part here — but that read is
+unverified and should be checked before this is built beyond a proof of concept.

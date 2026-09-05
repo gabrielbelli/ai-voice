@@ -1,129 +1,167 @@
-# Provision the GPU job runtime on a Windows machine with no Python.
+# Put a working Chatterbox GPU runtime on a machine with no Python.
 #
-# READ THIS FIRST. NOTHING IN THIS FILE HAS BEEN RUN ON spring. The investigation
-# that produced the agent was read-only by instruction: no installs, no settings
-# changes, nothing left running. This script is therefore the WRITTEN-DOWN STEP
-# the user runs themselves, not something that was executed on their behalf. It
-# is deliberately idempotent and deliberately confined to one directory.
+# WHAT THIS REPLACED, AND WHY. The first version of this script installed
+# unpinned "torch torchaudio" from the cu124 index and then chatterbox-tts. Because
+# chatterbox-tts pins torch==2.6.0, pip then resolved 2.6.0 FROM PYPI - which on
+# Windows is the CPU-ONLY wheel - and silently replaced the GPU one that had just
+# been downloaded. Its torch.cuda.is_available() gate caught the result, so it
+# failed loudly rather than shipping a worker slower than the NAS it was meant to
+# relieve. But it failed, every time.
 #
-# WHY THIS IS SEPARATE FROM THE AGENT AT ALL.
+# The same trap exists in uv and it was hit while writing this: a source mapping
+# only applies to a DIRECT dependency, so with torch left transitive the lock
+# resolved torch 2.6.0 from pypi.org. runtime/pyproject.toml therefore names torch
+# and torchaudio explicitly. uv.lock is committed and hash-pinned, so what gets
+# installed here is what was resolved and checked, not whatever resolves today.
 #
-# The agent is 40 KB and needs nothing installed - measured, it compiles and runs
-# on spring with the C# compiler that ships inside Windows. The job runtime is
-# the opposite kind of thing: Chatterbox is torch, and torch with CUDA 12 wheels
-# is roughly 2.5-3 GB on disk. No packaging format makes that small. Bundling it
-# into the agent would turn a 40 KB file that can be copied anywhere into a
-# multi-gigabyte download that has to be rebuilt whenever a threshold changes.
+# NOTHING IS INSTALLED ON THE MACHINE. No Python, no CUDA Toolkit, no admin, no
+# reboot, no PATH edit, no registry write. Everything lands in one directory:
 #
-# So they are split along the line where the size is:
+#   %LOCALAPPDATA%\ai-voice-worker\runtime\
+#     uv.exe        a single ~17 MB binary with no prerequisites of its own
+#     python\       CPython 3.12, fetched by uv from python-build-standalone
+#     .venv\        the 112-package locked environment
+#     models\       HF_HOME. ~3 GiB of weights, content-addressed
+#     cache\        uv's wheel cache
 #
-#   ai-voice-worker.exe   40 KB, no dependencies, does the detection
-#   runtime\              ~3 GB, provisioned once by this script, does the work
+# Uninstall is: delete that directory.
 #
-# and the agent supervises the runtime as a child process in a job object, so it
-# can take the GPU back inside the grace period.
+# WHY NOT THE EMBEDDABLE PYTHON ZIP, which this script used to use. It has no
+# ensurepip and no venv, its ._pth disables site so Lib\site-packages is not
+# importable until you hand-edit it, and pip has to be bootstrapped from
+# get-pip.py. It is also a dead end: python.org ships 3.12.10 as the newest
+# embeddable build and 3.12.11 is a 404, because the 3.12 branch is
+# security-fix-only. uv fetched CPython 3.12.14 - four patch releases newer -
+# in 1.14 seconds, verified with a completely empty environment and no system
+# Python reachable at all.
 #
-# WHY EMBEDDABLE PYTHON RATHER THAN AN INSTALLER OR THE STORE.
-#
-#   * python-3.11-embed-amd64.zip is a ZIP, not an installer. It writes nothing
-#     to the registry, adds nothing to PATH, needs no administrator, and is
-#     removed by deleting the folder. On a machine that is somebody's gaming PC
-#     and runs kernel-mode anti-cheat, "unzip a folder" is a much easier thing to
-#     justify than "run an installer that touches system state".
-#   * The Microsoft Store python is what is currently on PATH on spring, and it
-#     is the alias stub: measured, `python` resolves to
-#     C:\Users\htcga\AppData\Local\Microsoft\WindowsApps\python.exe and prints
-#     "Python was not found". `py` is absent entirely. Store Python also runs
-#     under a package identity with a virtualised filesystem, which is a poor
-#     host for CUDA libraries.
-#   * winget install would work and is one line, but it changes machine state
-#     the user did not ask to change, and it is not removable by deleting a
-#     folder.
-#
-# The cost, stated plainly: the embeddable distribution has no ensurepip, no
-# tkinter and no venv, so pip has to be bootstrapped by hand (done below) and the
-# ._pth file has to be edited to re-enable site-packages (also done below). That
-# is about fifteen lines of ceremony, once, in exchange for a runtime that is a
-# directory rather than an installation.
+#   powershell -ExecutionPolicy Bypass -File provision.ps1
 
+[CmdletBinding()]
 param(
-  [string] $Root       = "$env:LOCALAPPDATA\ai-voice-worker\runtime",
-  [string] $PyVersion  = "3.11.9",
-  # cu124 wheels: the driver on spring is 610.47 with CUDA UMD 13.3 (measured),
-  # which is far newer than the 12.4 runtime the wheels carry, and the CUDA
-  # minor-version compatibility guarantee runs forwards, so this is safe.
-  [string] $TorchIndex = "https://download.pytorch.org/whl/cu124"
+    [string]$Root = (Join-Path $env:LOCALAPPDATA 'ai-voice-worker\runtime'),
+    # The project definition and lock. Defaults to the directory this script is in,
+    # which is how it works from a git checkout.
+    [string]$Project = (Split-Path -Parent $MyInvocation.MyCommand.Path),
+    [switch]$SkipModels
 )
 
 $ErrorActionPreference = 'Stop'
-$py = Join-Path $Root 'python'
+$ProgressPreference = 'SilentlyContinue'   # a progress bar over SSH is noise
 
-Write-Host "Provisioning into $Root"
-New-Item -ItemType Directory -Force -Path $Root, $py | Out-Null
+$statusFile = Join-Path $Root 'provision.status'
 
-# --- 1. embeddable Python -----------------------------------------------------
-$zip = Join-Path $env:TEMP "python-$PyVersion-embed-amd64.zip"
-if (-not (Test-Path (Join-Path $py 'python.exe'))) {
-  $url = "https://www.python.org/ftp/python/$PyVersion/python-$PyVersion-embed-amd64.zip"
-  Write-Host "  downloading $url"
-  Invoke-WebRequest -Uri $url -OutFile $zip
-  Expand-Archive -Path $zip -DestinationPath $py -Force
-  Remove-Item $zip -Force
+function Set-Status([string]$text) {
+    # The tray polls this file and shows it in its own colour. First run pulls
+    # about 5.6 GiB; a grey icon for twenty minutes reads as broken and gets
+    # killed at 4 GB, which is the worst possible moment to stop.
+    try {
+        New-Item -ItemType Directory -Force -Path $Root | Out-Null
+        Set-Content -Path $statusFile -Value $text -Encoding UTF8
+    } catch { }
+    Write-Host "==> $text"
 }
 
-# --- 2. re-enable site-packages ----------------------------------------------
-# The embeddable build ships a python311._pth with "import site" commented out,
-# which is what stops pip from working at all. Uncommenting it is the documented
-# way to make the distribution usable as an application runtime.
-Get-ChildItem (Join-Path $py 'python*._pth') | ForEach-Object {
-  $t = Get-Content $_.FullName
-  if ($t -match '^\s*#\s*import site') {
-    ($t -replace '^\s*#\s*import site', 'import site') | Set-Content $_.FullName -Encoding ASCII
-    Write-Host "  enabled site in $($_.Name)"
-  }
+function Clear-Status {
+    try { Remove-Item -Force $statusFile -ErrorAction SilentlyContinue } catch { }
 }
 
-# --- 3. pip -------------------------------------------------------------------
-if (-not (Test-Path (Join-Path $py 'Scripts\pip.exe'))) {
-  $gp = Join-Path $env:TEMP 'get-pip.py'
-  Invoke-WebRequest -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile $gp
-  & (Join-Path $py 'python.exe') $gp --no-warn-script-location
-  Remove-Item $gp -Force
-}
+try {
+    New-Item -ItemType Directory -Force -Path $Root | Out-Null
 
-# --- 4. the payload -----------------------------------------------------------
-# torch first and from its own index, so pip does not resolve the CPU-only wheel
-# from PyPI and leave you with a worker that cannot use the GPU it exists for.
-Write-Host "  installing torch (this is the ~2.5 GB part)"
-& (Join-Path $py 'python.exe') -m pip install --no-warn-script-location `
-    --index-url $TorchIndex torch torchaudio
+    # Everything uv does stays inside $Root. HF_HOME matters most: the weights are
+    # content-addressed, are shared across versions, and are the one part of the
+    # payload that must survive a reinstall - so they must never land inside .venv
+    # where a rebuild would take them with it.
+    $env:UV_PYTHON_INSTALL_DIR  = Join-Path $Root 'python'
+    $env:UV_PROJECT_ENVIRONMENT = Join-Path $Root '.venv'
+    $env:UV_CACHE_DIR           = Join-Path $Root 'cache'
+    $env:HF_HOME                = Join-Path $Root 'models'
+    $env:UV_PYTHON_DOWNLOADS    = 'automatic'
 
-Write-Host "  installing chatterbox"
-& (Join-Path $py 'python.exe') -m pip install --no-warn-script-location chatterbox-tts
+    # ---------------------------------------------------------------- uv ---
+    $uv = Join-Path $Root 'uv.exe'
+    if (-not (Test-Path $uv)) {
+        Set-Status 'downloading uv (17 MB)'
+        $zip = Join-Path $Root 'uv.zip'
+        Invoke-WebRequest -UseBasicParsing `
+            -Uri 'https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip' `
+            -OutFile $zip
+        Expand-Archive -Path $zip -DestinationPath $Root -Force
+        Remove-Item -Force $zip
+    }
+    if (-not (Test-Path $uv)) { throw "uv.exe missing after download" }
+    Set-Status ("uv " + (& $uv --version))
 
-# --- 5. prove the GPU is actually reachable -----------------------------------
-# WHY THIS CHECK IS NOT OPTIONAL. Installing the CPU-only torch wheel by accident
-# is the single most common way this kind of setup fails, and it fails silently:
-# everything imports, everything runs, and the job is slower than the NAS it was
-# meant to relieve. Fail loudly here instead.
-$probe = @'
+    # ------------------------------------------------------ interpreter ---
+    # No system Python is consulted, and none is required. uv fetches a
+    # standalone CPython build into $Root\python.
+    Set-Status 'fetching CPython 3.12 (24 MB)'
+    & $uv python install 3.12
+    if ($LASTEXITCODE -ne 0) { throw "uv python install failed" }
+
+    # ---------------------------------------------------------- packages ---
+    # --frozen means: use uv.lock exactly, do not re-resolve. Offline it still
+    # starts from whatever is already in .venv. When nothing has changed this is
+    # a sub-second no-op, which is what makes "git pull && uv sync" a viable
+    # update path instead of reshipping a 4 GB binary.
+    Set-Status 'installing torch and CUDA (2.5 GB) - this is the long one'
+    & $uv sync --project $Project --frozen --no-dev
+    if ($LASTEXITCODE -ne 0) { throw "uv sync failed" }
+
+    $py = Join-Path $Root '.venv\Scripts\python.exe'
+    if (-not (Test-Path $py)) { throw "venv python missing at $py" }
+
+    # ------------------------------------------------------------- gate ---
+    # The single most important check in this file. Installing the CPU-only wheel
+    # is the most common way this setup fails and it fails SILENTLY: everything
+    # imports, everything runs, and the worker is slower than the NAS it was
+    # supposed to relieve. Fail here, loudly, rather than at benchmark time.
+    Set-Status 'checking CUDA'
+    $probe = @'
 import sys, torch
-print("torch", torch.__version__)
-print("cuda available:", torch.cuda.is_available())
+print("torch          ", torch.__version__)
+print("cuda available ", torch.cuda.is_available())
+print("cuda version   ", torch.version.cuda)
 if not torch.cuda.is_available():
-    print("FAIL: no CUDA. The CPU-only wheel was probably installed.")
-    sys.exit(1)
-print("device:", torch.cuda.get_device_name(0))
+    sys.exit("FATAL: torch cannot see the GPU. This is almost always the CPU-only "
+             "wheel from PyPI rather than the cu126 wheel from download.pytorch.org. "
+             "Check that uv.lock pins torch==2.6.0+cu126.")
+if "+cu" not in torch.__version__:
+    sys.exit("FATAL: %s is not a CUDA build." % torch.__version__)
+print("device         ", torch.cuda.get_device_name(0))
 free, total = torch.cuda.mem_get_info()
-print("vram free/total MiB:", free // 1048576, "/", total // 1048576)
+print("vram free/total %.0f / %.0f MiB" % (free/2**20, total/2**20))
 '@
-$probeFile = Join-Path $Root 'check_gpu.py'
-$probe | Set-Content $probeFile -Encoding UTF8
-& (Join-Path $py 'python.exe') $probeFile
-if ($LASTEXITCODE -ne 0) { throw "GPU check failed - see above" }
+    $probe | & $py -
+    if ($LASTEXITCODE -ne 0) { throw "CUDA check failed" }
 
-Write-Host ""
-Write-Host "Runtime ready at $py"
-Write-Host "Point worker.ini at it:"
-Write-Host "  JobCommand   = $py\python.exe"
-Write-Host "  JobArguments = -m worker.run"
+    # ----------------------------------------------------------- models ---
+    if (-not $SkipModels) {
+        # ~3.0 GiB, into $Root\models via HF_HOME. Done here rather than on first
+        # job so that the first job is not a twenty-minute download during
+        # somebody's idle window.
+        Set-Status 'downloading Chatterbox weights (3.0 GB)'
+        $fetch = @'
+import os
+from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+print("HF_HOME =", os.environ.get("HF_HOME"))
+ChatterboxMultilingualTTS.from_pretrained(device="cpu")
+print("weights present")
+'@
+        $fetch | & $py -
+        if ($LASTEXITCODE -ne 0) { throw "model download failed" }
+    }
+
+    Clear-Status
+    Write-Host ""
+    Write-Host "Runtime ready at $Root"
+    Write-Host "Set JobCommand in worker.ini to:"
+    Write-Host "  JobCommand = $py"
+    Write-Host "  JobArguments = `"$(Join-Path $Project 'runner.py')`" --queue `"$(Join-Path (Split-Path -Parent $Root) 'queue')`""
+}
+catch {
+    Set-Status ("FAILED: " + $_.Exception.Message)
+    Write-Error $_
+    exit 1
+}

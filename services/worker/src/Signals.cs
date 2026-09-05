@@ -27,20 +27,6 @@ namespace AiVoice.Worker
 {
     // ---------------------------------------------------------------- GPU ---
 
-    public class GpuSample
-    {
-        public DateTime At;
-        public int UtilGpu;         // per cent, whole-GPU, averaged by the driver
-        public int UtilMem;         // per cent of time the memory bus was busy
-        public int UtilEncoder;     // NVENC
-        public int UtilDecoder;     // NVDEC
-        public int ClockMemMhz;     // memory clock
-        public int ClockSmMhz;
-        public string PState;       // P0 fastest .. P8 idle
-        public double PowerWatts;
-        public int MemUsedMiB;
-        public bool Valid;
-    }
 
     /// Streams nvidia-smi at 1 Hz from ONE long-lived child process.
     ///
@@ -176,12 +162,6 @@ namespace AiVoice.Worker
 
     // ------------------------------------------------ per-process GPU state ---
 
-    public class ProcessGpuUse
-    {
-        public int Pid;
-        public string Name;
-        public double DedicatedMiB;
-    }
 
     /// Per-process GPU memory, from the Windows "GPU Process Memory" performance
     /// counter set.
@@ -342,18 +322,6 @@ namespace AiVoice.Worker
 
     // ------------------------------------------------------- Windows session ---
 
-    public class SessionSignals
-    {
-        public uint ConsoleSessionId;
-        public uint OwnSessionId;
-        public bool RunningInConsoleSession;
-        public bool Locked;
-        public int InputIdleSeconds;      // -1 when not measurable from this session
-        public int ForegroundPid;
-        public string ForegroundProcess;
-        public string ForegroundTitle;
-        public bool ForegroundIsFullScreen;
-    }
 
     public static class Win
     {
@@ -486,13 +454,6 @@ namespace AiVoice.Worker
 
     // -------------------------------------------------------------- launchers ---
 
-    public class LauncherSignals
-    {
-        public int SteamRunningAppId;     // 0 when Steam is running no game
-        public string SteamRunningAppName;
-        public bool ValorantAntiCheatActive;
-        public List<string> GameProcesses = new List<string>();
-    }
 
     /// Reads what the launchers already publish about themselves.
     ///

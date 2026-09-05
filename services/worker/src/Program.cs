@@ -123,7 +123,7 @@ namespace AiVoice.Worker
                         g == null ? "-" : g.ClockMemMhz.ToString(CultureInfo.InvariantCulture),
                         g == null ? "-" : g.PState,
                         s.CountersFresh ? s.Util3d.ToString("0.0", CultureInfo.InvariantCulture) : "-",
-                        s.ForeignVram.Count.ToString(CultureInfo.InvariantCulture),
+                        a.Policy.ForeignVram(s).Count.ToString(CultureInfo.InvariantCulture),
                         a.Policy.Last.ReasonText);
                     Thread.Sleep(1000);
                 }
@@ -147,17 +147,24 @@ namespace AiVoice.Worker
                 bool fresh = !File.Exists(csv);
                 using (var w = new StreamWriter(csv, true, new UTF8Encoding(false)))
                 {
-                    if (fresh)
-                        w.WriteLine("iso_time,state,util_gpu,util_mem,enc,dec,mem_clk_mhz,sm_clk_mhz," +
-                                    "pstate,power_w,mem_used_mib,eng_3d,eng_decode,eng_encode," +
-                                    "locked,input_idle_s,fullscreen,fg_process,steam_appid,vgc," +
-                                    "foreign_vram_top_mib,foreign_vram_top_name,reason");
+                    // The header is Replay.Header itself rather than a copy of it.
+                    // These two must not drift: the whole value of this mode is
+                    // that the CSV it produces drops straight into
+                    // tests/fixtures/ and becomes a regression test with nobody
+                    // transcribing numbers.
+                    if (fresh) w.WriteLine(Replay.Header);
                     int n = minutes * 60;
                     for (int i = 0; i < n; i++)
                     {
                         Snapshot s = a.Current;
                         GpuSample g = s.Gpu;
-                        ProcessGpuUse top = s.ForeignVram.Count > 0 ? s.ForeignVram[0] : null;
+                        // The RAW top consumer, before the allowlist. Recording the
+                        // post-filter answer would make "dwm holding 169 MiB" and
+                        // "nothing at all" identical rows, and the replay tests
+                        // could not then exercise Policy.ForeignVram at all.
+                        ProcessGpuUse top = null;
+                        foreach (ProcessGpuUse u in s.GpuProcesses)
+                            if (top == null || u.DedicatedMiB > top.DedicatedMiB) top = u;
                         w.WriteLine(string.Join(",", new string[] {
                             DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture),
                             Policy.Describe(a.Policy.State),
@@ -173,14 +180,21 @@ namespace AiVoice.Worker
                             s.Util3d.ToString("0.00", CultureInfo.InvariantCulture),
                             s.UtilVideoDecode.ToString("0.00", CultureInfo.InvariantCulture),
                             s.UtilVideoEncode.ToString("0.00", CultureInfo.InvariantCulture),
+                            s.GpuHealthy ? "1" : "0",
+                            s.CountersFresh ? "1" : "0",
+                            s.Session == null ? "" : s.Session.OwnSessionId.ToString(CultureInfo.InvariantCulture),
+                            s.Session == null ? "" : s.Session.ConsoleSessionId.ToString(CultureInfo.InvariantCulture),
                             s.Session == null ? "" : (s.Session.Locked ? "1" : "0"),
                             s.Session == null ? "" : s.Session.InputIdleSeconds.ToString(CultureInfo.InvariantCulture),
                             s.Session == null ? "" : (s.Session.ForegroundIsFullScreen ? "1" : "0"),
                             s.Session == null ? "" : Csv(s.Session.ForegroundProcess),
                             s.Launchers == null ? "" : s.Launchers.SteamRunningAppId.ToString(CultureInfo.InvariantCulture),
+                            s.Launchers == null ? "" : Csv(s.Launchers.SteamRunningAppName),
                             s.Launchers == null ? "" : (s.Launchers.ValorantAntiCheatActive ? "1" : "0"),
-                            top == null ? "0" : top.DedicatedMiB.ToString("0", CultureInfo.InvariantCulture),
+                            s.Launchers == null ? "" : Csv(string.Join(" ", s.Launchers.GameProcesses.ToArray())),
+                            top == null ? "" : top.Pid.ToString(CultureInfo.InvariantCulture),
                             top == null ? "" : Csv(top.Name),
+                            top == null ? "0" : top.DedicatedMiB.ToString("0.0", CultureInfo.InvariantCulture),
                             Csv(a.Policy.Last.ReasonText)
                         }));
                         w.Flush();   // survive a hard reboot mid-game, which is the point
