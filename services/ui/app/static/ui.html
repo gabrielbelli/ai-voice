@@ -227,7 +227,6 @@ label{display:block;font-size:var(--t-label);line-height:1.45;color:var(--dim);
 .card > *:empty{margin-top:0}
 .card > label + *{margin-top:0}
 .card > details{margin-top:var(--s5)}
-.stack-lg > * + *{margin-top:var(--s4)}
 /* The clone sheet's commit row: a hairline and --s5 after the three sources,
    so it reads as three ways in and one way out rather than as six equal
    controls. Carried by spacing alone -- no new heading, no new copy. */
@@ -546,7 +545,7 @@ dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
           — video is fine, the audio is taken out of it</div>
         <div class="row" id="sttrecrow" hidden style="justify-content:center;align-items:center;margin-top:8px">
           <span class="ring tight" id="sttring">0:00</span>
-          <div style="min-width:160px"><div class="meter"><div id="sttlevel"></div></div></div>
+          <div style="min-width:10rem"><div class="meter"><div id="sttlevel"></div></div></div>
           <button class="primary tight" id="sttrecstop" type="button">■ Stop and transcribe</button>
         </div>
         <input type="file" id="file" hidden
