@@ -645,3 +645,62 @@ def test_no_control_refers_to_a_label_that_no_longer_exists():
     for referenced in _re.findall(r"follow (?:the )?([A-Z][A-Za-z ]+?)(?: control)? above", HTML):
         assert referenced.strip() in labels, \
             f"an option points at {referenced!r}, which is not a label on this page"
+
+
+def test_one_term_per_concept_survives_into_the_result_lines():
+    """The control is Vocabulary and the button is Delete. The lines that
+    report what happened used to say Glossary and Removed.
+
+    Both leaked the same way: the internal name is glossary everywhere (the
+    query parameter, the form field, loadGlossaries), and an earlier pass
+    renamed the voice button to Delete for exactly this reason and then missed
+    its own success line. One concept, one word, on the way in and on the way
+    out.
+    """
+    assert "Glossary rewrote" not in HTML
+    assert "Vocabulary rewrote" in HTML
+    assert "Removed <strong>${voice.name}" not in HTML
+    assert "Deleted <strong>${voice.name}" in HTML
+
+
+def test_the_page_says_once_that_a_job_survives_the_tab_closing():
+    """It used to be inside the job row, so three running jobs said it three
+    times. It is one fact about this page, not a property of any one job.
+
+    It now lives above the list and is shown only while something is running,
+    which is the only time it means anything.
+    """
+    assert HTML.count("Close this page if you want") == 1
+    assert "You can close this page. The job runs" not in HTML
+    assert 'id="jobsafe"' in HTML
+    # Above the list, not inside the markup renderJobs assigns.
+    assert HTML.index('id="jobsafe"') < HTML.index('<div id="joblist">')
+    assert '$("jobsafe").hidden = !running;' in HTML
+
+
+def test_no_interaction_word_assumes_a_mouse():
+    """ASD-STE100 bans click, swipe and the directional words with it: the
+    person following the caption highlight may be on a keyboard or a screen
+    reader, and there is nothing to click there.
+    """
+    # visible() leaves JS *code* intact, and addEventListener("click") is not
+    # copy. So this looks for the word where a reader would meet it: opening a
+    # string literal, or opening a text node.
+    # visible() leaves JS *code* intact, and addEventListener("click") is not
+    # copy. The word only becomes an instruction when prose follows it, which
+    # is what this looks for.
+    screen = visible()
+    for word in ("Click", "click", "Swipe", "swipe"):
+        found = re.search(rf"\b{word}\s+[a-z]", screen)
+        assert not found, f"{word!r} is back on the page: {found.group(0)!r}"
+
+
+def test_no_string_explains_a_deployment_state_to_the_reader():
+    """"the metadata probe is off in this image" named nothing the reader can
+    see, used container jargon, and described something they cannot change.
+    The sentence without it says the same useful half: there is no estimate.
+    """
+    screen = visible()
+    assert "metadata probe" not in screen
+    assert "in this image" not in screen, "container jargon is back on the page"
+    assert "No length or size for this link. The estimate is unavailable." in HTML

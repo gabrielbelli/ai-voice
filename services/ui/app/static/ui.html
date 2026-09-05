@@ -1045,6 +1045,11 @@ details>summary:active{opacity:.72}
         </div>
       </div>
 
+      <!-- Hoisted out of the job row: it rendered once per live job, so
+           three running jobs said it three times. It is one fact about this
+           page, not about any one job. -->
+      <div class="hint" id="jobsafe" hidden>Close this page if you want. The job runs on the server.</div>
+
       <div id="joblist"></div>
     </div>
   </section>
@@ -1921,9 +1926,7 @@ function showConfirm(facts) {
   if (!facts.probed) {
     /* MeTube resolves length and size and exposes neither, so with the probe
        off or defeated there is nothing to quote. The fetch itself is fine. */
-    live += `<div class="note flat">No length or size for this link${
-      facts.probe_enabled ? "" : ": the metadata probe is off in this image"}.
-      The estimate is unavailable.</div>`;
+    live += `<div class="note flat">No length or size for this link. The estimate is unavailable.</div>`;
   }
   $("c-live").innerHTML = live;
   if (facts.is_live) $("c-ten") && $("c-ten").addEventListener("click", () => {
@@ -2707,7 +2710,7 @@ function sttPlayback(display, cues, lines) {
   karaoke.lines = video && lines && lines.length ? lines : null;
   karaoke.spans = paint($("transcript"), display, cues);
   $("transcript").className = "out karaoke";
-  $("sttplayhint").textContent = "Click a word to jump there.";
+  $("sttplayhint").textContent = "Select a word to jump there.";
 }
 
 /* A file the browser cannot decode for playback is not a failure worth a red
@@ -2902,7 +2905,7 @@ async function render(response, format) {
      otherwise. */
   if (repaired && repaired.length) {
     $("repaired").hidden = false;
-    $("repaired").innerHTML = "Glossary rewrote: <strong>" +
+    $("repaired").innerHTML = "Vocabulary rewrote: <strong>" +
       repaired.map(esc).join("</strong>, <strong>") + "</strong>";
   } else {
     $("repaired").hidden = true;
@@ -3287,7 +3290,7 @@ $("delvoice").addEventListener("click", async () => {
   try {
     await json("/ui/clips/" + encodeURIComponent(voice.name), { method: "DELETE" });
     await loadVoices();
-    note($("speak-note"), "ok", `Removed <strong>${voice.name}</strong>.`);
+    note($("speak-note"), "ok", `Deleted <strong>${voice.name}</strong>.`);
   } catch (err) { note($("speak-note"), "bad", err.message); }
 });
 $("speed").addEventListener("input", () =>
@@ -3603,7 +3606,7 @@ async function speakNow(voice, text) {
   const ignored = response.headers.get("x-ignored-parameters");
   /* A field that is accepted and ignored is the worst kind, so it is shown. */
   if (ignored) meta.push("ignored: " + ignored);
-  if (response.headers.get("x-speed-clamped")) meta.push("speed was clamped");
+  if (response.headers.get("x-speed-clamped")) meta.push("the server clamped speed");
   play(blob, meta.join(" · "), "speech." + format);
 }
 
@@ -3801,6 +3804,7 @@ function renderJobs() {
      stopping to parse it. The CSS hides the chip when this is "". */
   const running = list.filter(j => j.status === "queued" || j.status === "running").length;
   $("jobcount").textContent = running ? String(running) : "";
+  $("jobsafe").hidden = !running;
 
   if (!list.length) {
     $("joblist").innerHTML = `<div class="hint">No jobs. Cloned voices queue here.</div>`;
@@ -3863,8 +3867,8 @@ function renderJobs() {
           : `${clock(elapsed)} in, ${roughly(budget - elapsed)} left`} · estimate</div>` : ""}
       ${preview ? `<details class="jobtext"${openRows.has(job.id) ? " open" : ""}><summary>${esc(preview)}</summary>
         <div class="body" data-text="${esc(job.id)}">Loading…</div></details>`
-        : job.recovered ? `<div class="hint">Recovered after a restart. The
-            text and voice were not kept.</div>` : ""}
+        : job.recovered ? `<div class="hint">The server recovered this job after a
+            restart. It did not keep the text or the voice.</div>` : ""}
       ${job.status === "failed" ? `<div class="note bad">${esc(job.error || "no reason given")}</div>` : ""}
       ${expired ? `<div class="hint">expired: the audio was deleted after ${TTL / 3600} hours</div>` : ""}
       ${job.realtime_factor ? `<div class="hint">${job.audio_seconds.toFixed(0)} s of audio in
@@ -3878,8 +3882,6 @@ function renderJobs() {
         <button class="small" data-forget="${esc(job.id)}" type="button">${
           audio ? "Delete the audio" : "Forget"}</button>
       </div>
-      ${live ? `<div class="hint">You can close this page. The job runs on the
-        server.</div>` : ""}
     </div>`;
   }).join("");
 
