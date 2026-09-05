@@ -56,7 +56,10 @@
      all and rendered as bold body text. */
   --t-display:1.375rem; --t-title:1.0625rem; --t-body:.875rem;
   --t-label:.75rem; --t-micro:.6875rem;
-  /* SPACING, six steps, replacing 28 inline style="margin-top:Npx". */
+  /* SPACING, six steps. Ten of the page's 28 inline style="margin-top:Npx"
+     were in a `.card > *` position and are gone, replaced by one owl rule; the
+     rest are children of .drop, of a player block, of a details body or of the
+     dialog, which the owl does not reach and must not. */
   --s1:.25rem; --s2:.5rem; --s3:.75rem; --s4:1rem; --s5:1.5rem; --s6:2.5rem;
   /* Was max-width:920px, written out twice. Font-relative so the measure
      grows with the reader's text size rather than cramping it. */
@@ -225,6 +228,11 @@ label{display:block;font-size:var(--t-label);line-height:1.45;color:var(--dim);
 .card > label + *{margin-top:0}
 .card > details{margin-top:var(--s5)}
 .stack-lg > * + *{margin-top:var(--s4)}
+/* The clone sheet's commit row: a hairline and --s5 after the three sources,
+   so it reads as three ways in and one way out rather than as six equal
+   controls. Carried by spacing alone -- no new heading, no new copy. */
+.card > .row.commit{margin-top:var(--s5);padding-top:var(--s5);
+  border-top:1px solid var(--line)}
 /* RECESSED, not a second raised card inside the first. The clone sheet is a
    sub-task within Speak and should read as a well, which is also why its
    inline background:var(--bg) is gone -- the CSS says it now. */
@@ -504,18 +512,32 @@ dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
          container and the header is added server-side, so there is nothing
          here to type. Read app/main.py's module docstring before assuming
          where the trust boundary is — it moved. -->
+    <!-- THE TABS LIVE IN THE HEADER because the header is sticky and they were
+         not: "where am I" scrolled off the screen, on a page whose Transcribe
+         tab is one long scroll. It also gives the sticky bar a reason to exist
+         beyond a wordmark, and reclaims the row the tab strip used to occupy.
+         .bar is flex-wrap:nowrap for this: wrapped, the header would grow to
+         two rows on a phone and eat the space the move gives back.
+
+         role="tablist" was already declared here with no panels to point at,
+         which is a control lying about its own structure. aria-controls,
+         role="tabpanel" and the roving Arrow/Home/End handler below finish
+         what the attribute claimed. -->
+    <nav class="tabs" role="tablist" aria-label="Sections">
+      <button role="tab" id="tab-btn-transcribe" data-tab="transcribe"
+              aria-controls="tab-transcribe" aria-selected="true">Transcribe</button>
+      <button role="tab" id="tab-btn-speak" data-tab="speak"
+              aria-controls="tab-speak" aria-selected="false" tabindex="-1">Speak</button>
+      <button role="tab" id="tab-btn-jobs" data-tab="jobs"
+              aria-controls="tab-jobs" aria-selected="false" tabindex="-1">Jobs <span id="jobcount"></span></button>
+    </nav>
   </div>
 </header>
 
 <div class="wrap">
-  <nav class="tabs" role="tablist">
-    <button role="tab" data-tab="transcribe" aria-selected="true">Transcribe</button>
-    <button role="tab" data-tab="speak" aria-selected="false">Speak</button>
-    <button role="tab" data-tab="jobs" aria-selected="false">Jobs <span id="jobcount"></span></button>
-  </nav>
 
   <!-- ================================================== TRANSCRIBE == -->
-  <section id="tab-transcribe">
+  <section id="tab-transcribe" role="tabpanel" aria-labelledby="tab-btn-transcribe">
     <div class="card">
       <div class="drop" id="drop">
         <div class="big">Drop an audio or video file here</div>
@@ -534,14 +556,24 @@ dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
             <input type="text" id="url" placeholder="…or paste a link (YouTube, podcast, anything yt-dlp knows)">
             <button class="tight" id="resolve" type="button">Resolve</button>
           </div>
-          <div class="hint" id="linkhint"></div>
+          <div class="hint" id="linkhint" aria-live="polite"></div>
         </div>
         <div id="picked" hidden></div>
       </div>
 
-      <div class="row" style="margin-top:14px">
+      <!-- TWO ROWS, NOT ONE. Output, Vocabulary and Transcribe used to sit on
+           a single baseline, so the primary action read as a fourth segment of
+           the control beside it and the two labels floated over a strip of
+           three groups. The fields keep --s2 inside each label+control pair
+           and --s5 between the pairs, which is what says which label owns
+           which control; the action stands on its own line below.
+
+           "Output" was the generic-and-safe failure -- output of what? The
+           three buttons under it produce a transcript in one of three formats,
+           so that is what the label says now. -->
+      <div class="row fields">
         <div class="tight">
-          <label>Output</label>
+          <label>Transcript format</label>
           <div class="seg" id="fmt">
             <button data-fmt="text" aria-pressed="true">Text</button>
             <button data-fmt="srt" aria-pressed="false">Subtitles (SRT)</button>
@@ -558,10 +590,15 @@ dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
           <label>Vocabulary</label>
           <div class="seg" id="gloss"></div>
         </div>
-        <span class="spacer"></span>
-        <button class="primary tight" id="go-stt" type="button" disabled>Transcribe</button>
       </div>
-      <div id="stt-note"></div>
+      <div class="actions">
+        <button class="primary" id="go-stt" type="button" disabled>Transcribe</button>
+      </div>
+      <!-- aria-live because this host is where every status on this tab lands
+           -- extracting, downloading, transcribing, failed -- on an interface
+           whose entire subject is work that takes minutes. polite and not
+           assertive: it is status, and it sometimes contains #stopdl. -->
+      <div id="stt-note" aria-live="polite"></div>
 
       <details id="stt-expert">
         <summary>Expert — transcription</summary>
@@ -652,7 +689,7 @@ dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
     <div class="card" id="result" hidden>
       <div class="row" style="align-items:center">
         <h2 class="tight">Transcript</h2><span class="spacer"></span>
-        <span class="hint tight" id="result-meta"></span>
+        <span class="hint tight" id="result-meta" aria-live="polite"></span>
         <button class="small tight" id="copy" type="button">Copy</button>
         <button class="small tight" id="download" type="button">Download</button>
         <!-- THE SIDECAR, and the reason no burn-in is livable. Every player
@@ -674,7 +711,7 @@ dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
            /ui/media, which relays MeTube's own byte ranges so the element can
            seek. Still hidden for a captions download, where skip_download
            means there is genuinely no media anywhere -- see #sttwhy. -->
-      <div id="sttplay" hidden style="margin-top:10px">
+      <div id="sttplay" hidden>
         <!-- TWO ELEMENTS, ONE VISIBLE AT A TIME. A <video> cannot be an
              <audio>, and the picture is the whole point when the file has
              one: a dropped-in video plays here with the transcript over it,
@@ -701,20 +738,20 @@ dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
           <span class="hint tight" id="sttplayhint"></span>
         </div>
       </div>
-      <div class="hint" id="sttwhy" hidden style="margin-top:10px"></div>
-      <div class="out" id="transcript" style="margin-top:10px"></div>
+      <div class="hint" id="sttwhy" hidden></div>
+      <div class="out" id="transcript"></div>
     </div>
   </section>
 
   <!-- ======================================================= SPEAK == -->
-  <section id="tab-speak" hidden>
+  <section id="tab-speak" role="tabpanel" aria-labelledby="tab-btn-speak" hidden>
     <div class="card">
       <label for="text">Text</label>
       <textarea id="text" placeholder="Type or paste what you want spoken."></textarea>
       <div class="hint"><span id="chars">0</span> / 4096 characters</div>
       <div id="codeswitch"></div>
 
-      <div class="row" style="margin-top:12px">
+      <div class="row">
         <!-- LANGUAGE IS ITS OWN CONTROL, and used not to be. It was carried by
              the voice's first letter (a→en-us, p→pt-br, z→cmn …) and was
              overridable only from the Expert panel, which put two unrelated
@@ -726,14 +763,19 @@ dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
              It defaults to auto-detect because the text is already on screen.
              The page can read it, and asking someone to name a language it can
              see is a question whose answer is already in the room. -->
+        <!-- Language and Voice are SIBLINGS. The Voice block used to open
+             inside the Language block's <div> with closes that did not match
+             the indentation; it rendered by accident. Source order still puts
+             Language first, which is what
+             test_language_comes_before_voice_in_the_markup reads. -->
         <div>
           <label for="lang">Language</label>
           <select id="lang"></select>
-<div>
+        </div>
+        <div>
           <label for="voice">Voice</label>
           <select id="voice"></select>
           <button class="small link" id="delvoice" type="button" hidden>Remove this cloned voice</button>
-        </div>
         </div>
         <div>
           <!-- SYNTHESIS speed, not playback speed. Renamed the day a playback
@@ -751,11 +793,20 @@ dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
            picker's last option is chosen. Recording is primary and uploading
            is the fallback, because the user asked for their own voice and
            sending them to find a file is the expert path. -->
-      <div class="card" id="clone" hidden style="margin-top:12px;background:var(--bg)">
+      <!-- THREE WAYS IN, ONE WAY OUT, and it is carried entirely by spacing:
+           six controls in four flat sibling rows read as six equal choices.
+           The three sources sit close together; a hairline and --s5 separate
+           them from the name-and-save row, which is the commit. No new
+           heading, no new sentence -- one rule and a class.
+
+           .well rather than a second .card material: this is a sub-task inside
+           the Speak card and should read as a recess, not as a stack. Its
+           inline background:var(--bg) is gone with it; the CSS says it now. -->
+      <div class="card well" id="clone" hidden>
         <h2>Use my own voice</h2>
         <div class="hint">10–30 seconds, one speaker, no music, speaking the
           language you intend to synthesise.</div>
-        <div class="row" style="margin-top:10px;align-items:center">
+        <div class="row" style="align-items:center">
           <button class="primary tight" id="rec" type="button">● Record 15 s</button>
           <span class="ring tight" id="ring">15</span>
           <div><div class="meter"><div id="level"></div></div></div>
@@ -765,43 +816,42 @@ dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
         <!-- A LINK IS A THIRD SOURCE, and the cheap one. yt-dlp trims at the
              source, so taking twenty seconds out of a two-hour interview
              downloads twenty seconds. -->
-        <div class="row" style="margin-top:10px">
+        <div class="row">
           <input type="text" id="cliplink" placeholder="…or paste a link to a voice">
           <button class="tight" id="clipresolve" type="button">Resolve</button>
         </div>
-        <div class="row" id="cliprange" hidden style="margin-top:8px">
-          <div class="tight" style="min-width:130px">
+        <div class="row" id="cliprange" hidden>
+          <div class="tight" style="min-width:8.125rem">
             <label for="clipstart">Start at (seconds)</label>
             <input type="number" id="clipstart" min="0" step="1" value="0">
           </div>
-          <div class="tight" style="min-width:130px">
+          <div class="tight" style="min-width:8.125rem">
             <label for="cliplen">Take (seconds)</label>
             <input type="number" id="cliplen" min="3" step="1" value="20">
           </div>
           <button class="primary tight" id="clipimport" type="button">Fetch this bit</button>
         </div>
-        <div class="hint" id="cliplinkhint"></div>
-        <div class="row" style="margin-top:10px">
+        <div class="hint" id="cliplinkhint" aria-live="polite"></div>
+        <div class="row commit">
           <div><label for="clipname">Save this voice as</label>
             <input type="text" id="clipname" placeholder="gabriel"></div>
           <button class="primary tight" id="saveclip" type="button" disabled>Save voice</button>
           <button class="tight" id="cancelclip" type="button">Cancel</button>
         </div>
-        <audio id="clippreview" controls style="width:100%;margin-top:10px" hidden></audio>
-        <div id="clipnote"></div>
+        <audio id="clippreview" controls style="width:100%" hidden></audio>
+        <div id="clipnote" aria-live="polite"></div>
       </div>
 
-      <div id="speak-note"></div>
-      <div class="row" style="margin-top:12px">
-        <span class="spacer"></span>
-        <button class="primary tight" id="go-tts" type="button">Speak</button>
+      <div id="speak-note" aria-live="polite"></div>
+      <div class="actions">
+        <button class="primary" id="go-tts" type="button">Speak</button>
       </div>
       <!-- The spoken text, rendered so it can be highlighted. A <textarea>
            cannot carry spans, so this is a read-only copy that appears with
            the audio and follows it. -->
-      <div class="out karaoke" id="speaktext" hidden style="margin-top:12px"></div>
-      <audio id="player" controls style="width:100%;margin-top:12px" hidden></audio>
-      <div class="row" id="playrow" hidden style="margin-top:8px;align-items:center">
+      <div class="out karaoke" id="speaktext" hidden></div>
+      <audio id="player" controls style="width:100%" hidden></audio>
+      <div class="row" id="playrow" hidden style="align-items:center">
         <div class="tight">
           <label for="playrate">Playback speed</label>
           <select id="playrate" class="rate"></select>
@@ -896,7 +946,7 @@ dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
   </section>
 
   <!-- ======================================================== JOBS == -->
-  <section id="tab-jobs" hidden>
+  <section id="tab-jobs" role="tabpanel" aria-labelledby="tab-btn-jobs" hidden>
     <div class="card">
       <div class="row" style="align-items:center">
         <h2 class="tight">Jobs</h2>
@@ -917,8 +967,8 @@ dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
            Until now a finished job could only be downloaded. There was no
            player on this tab at all, so "add a speed control to the Jobs
            player" meant adding the player. -->
-      <div id="jobplay" hidden style="margin-top:12px">
-        <div class="hint" id="jobplaying"></div>
+      <div id="jobplay" hidden>
+        <div class="hint" id="jobplaying" aria-live="polite"></div>
         <audio id="jobplayer" controls style="width:100%;margin-top:6px"></audio>
         <div class="row" style="margin-top:6px;align-items:center">
           <div class="tight">
@@ -930,7 +980,7 @@ dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
         </div>
       </div>
 
-      <div id="joblist" style="margin-top:12px"></div>
+      <div id="joblist"></div>
     </div>
   </section>
 </div>
