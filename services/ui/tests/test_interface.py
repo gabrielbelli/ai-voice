@@ -425,8 +425,16 @@ def test_the_owl_rule_does_not_open_a_gap_where_nothing_is():
 def test_the_interface_gained_no_new_prose():
     """The user has twice asked, in those words, for interface copy to be cut.
     This pass shortens one string and makes one more specific; it adds none."""
-    assert "<label>Transcript format</label>" in HTML
+    # BOTH NAMES ARE GONE, not just the bad one. "Output" was the
+    # generic-and-safe failure and was renamed to "Transcript format"; the
+    # control under it has since been retired outright, because one
+    # verbose_json run already produces the transcript, the .srt and the .vtt,
+    # so the three buttons were a choice between a default and two worse
+    # versions of it. Prose removed is prose removed.
     assert "<label>Output</label>" not in HTML
+    assert "<label>Transcript format</label>" not in HTML
+    assert 'id="fmt"' not in HTML, "the retired format control is back"
+    assert "data-fmt" not in HTML
     assert '"(" + list.filter' not in HTML, "the job count is a sentence again"
     # The four institutional-memory notes are restyled and not one word of them
     # is changed: they exist so nobody re-adds denoise or re-copies Resemble's

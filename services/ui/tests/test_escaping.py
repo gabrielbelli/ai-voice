@@ -591,9 +591,12 @@ def test_the_button_stops_saying_transcribe_once_the_subtitles_were_taken():
     did not ask for, producing a second and worse transcript of something a
     person had already written.
 
-    The press is kept, because renderCaptions writes the cues into whichever of
-    Text, SRT or VTT is selected -- pressing it again is how the same subtitles
-    come back in the other format.
+    The press is kept, but not for the reason it used to be. renderCaptions
+    wrote the cues into whichever of Text, SRT or VTT was selected, so a second
+    press was how the same subtitles came back in another format; all three
+    come off one press now. What a second press is for is getting the subtitles
+    back into the pane after something else has replaced them, without
+    re-resolving the link -- still two seconds and no compute.
     """
     body = _fn("function syncActionLabel()")
     assert '"Read the subtitles"' in body
@@ -703,18 +706,55 @@ def test_a_link_greys_out_what_ui_fetch_cannot_carry():
 
 def test_a_disabled_response_format_is_not_a_choice():
     """It is greyed out on the native route, and a value left in a control the
-    user can no longer reach must not go on deciding which route is offered."""
-    assert '$("x-rf").disabled ? "" : $("x-rf").value' in _fn("function chosenFormat()")
+    user can no longer reach must not go on deciding which route is offered.
+
+    WHAT THIS ASSERTS NOW. The rule is the same and it has one reader instead
+    of two. It used to live in chosenFormat(), which the retired Transcript
+    format control also fed; formatForTimings() read `$("x-rf").value` raw and
+    so skipped the check entirely, which is the same defect in a second copy.
+    Both go through expertFormat() now, so a greyed field cannot mean one thing
+    to the code that picks the route and another to the code that builds the
+    request.
+    """
+    assert '$("x-rf").disabled ? "" : $("x-rf").value' in _fn("function expertFormat()")
+    for reader in ("function formatForTimings()", "function granularities(format)",
+                   "function updateRouteAvailability()"):
+        assert '$("x-rf").value' not in _code(_fn(reader)), \
+            f"{reader} reads the field raw and can act on a greyed choice"
 
 
 def test_the_native_route_is_not_offered_for_subtitles():
-    """It answers its own JSON shape with no cue timings in it, so render() is
-    called with "text" whatever the Output control says -- choosing SRT and
-    then the native route quietly handed back a .txt."""
+    """It answers its own JSON shape with no cue timings in it, so choosing SRT
+    and then the native route quietly handed back a .txt.
+
+    WHAT THIS ASSERTS NOW. The refusal survived the removal of the Transcript
+    format control rather than going with it. It used to read that control;
+    the conflict it prevents is still reachable through the one setting that
+    can still ask for a subtitle file, so it hangs off the expert
+    response_format instead of being deleted as unreachable.
+    """
     body = _code(_fn("function updateRouteAvailability()"))
-    assert 'const subtitles = wanted === "srt" || wanted === "vtt";' in body
+    assert "const expert = expertFormat();" in body
+    assert 'const subtitles = expert === "srt" || expert === "vtt";' in body
     assert "const ok = sixteen && !subtitles;" in body
     assert "cannot write subtitles" in body
+
+
+def test_the_route_that_has_no_timings_says_it_gives_up_the_sidecar():
+    """The quieter half of the same fact, and the half that has no refusal to
+    carry it.
+
+    A native run has no highlight and no .srt or .vtt, because /transcribe
+    carries no timings at all. That was one of three ways to end up without
+    subtitles while a format control existed. It is the only one left now that
+    every /v1 run offers them, so the hint under the route select has to say
+    so -- a route that silently drops two buttons the last run had is the page
+    taking something away without a word.
+    """
+    hint = HTML[HTML.index('id="x-route-hint"'):]
+    hint = hint[:hint.index("</div>")]
+    assert "no timings" in hint
+    assert ".srt" in hint and ".vtt" in hint
 
 
 def test_stream_format_is_off_on_the_route_that_has_none():

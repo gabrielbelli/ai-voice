@@ -161,7 +161,7 @@ button:active:not(:disabled){transform:scale(.975)}
 button.link:active:not(:disabled){transform:none;opacity:.6}
 button:disabled{opacity:.5;cursor:not-allowed}
 /* STANDING RULE: no selector may ever set display:none or visibility:hidden on
-   a disabled control. chosenFormat(), granularities() and segments() read
+   a disabled control. expertFormat(), granularities() and segments() read
    .disabled and .hidden as the authority for what to send, and a control the
    current route cannot carry is greyed WITH THE REASON beside it -- a control
    that vanishes takes its explanation with it. Fifteen defects of that shape
@@ -577,32 +577,33 @@ details>summary:active{opacity:.72}
         <div id="picked" hidden></div>
       </div>
 
-      <!-- TWO ROWS, NOT ONE. Output, Vocabulary and Transcribe used to sit on
-           a single baseline, so the primary action read as a fourth segment of
-           the control beside it and the two labels floated over a strip of
-           three groups. The fields keep --s2 inside each label+control pair
-           and --s5 between the pairs, which is what says which label owns
-           which control; the action stands on its own line below.
+      <!-- THE TRANSCRIPT FORMAT CONTROL IS GONE, and it went because it was
+           a choice between things that were never alternatives. One
+           verbose_json run carries the prose AND the cue list, so the page
+           already wrote all three files from it: the transcript in the pane,
+           .srt and .vtt on the buttons beside Download. Picking SRT instead
+           asked the SERVER for a subtitle file -- a second run for a format
+           the first one could already write, and one that threw away the
+           word-level timings the karaoke highlight follows, because the cues
+           in a .srt are whole segments. The default was strictly better than
+           the two settings beside it, which is the definition of a setting
+           that should not exist. The page now always asks for the body that
+           carries everything; the expert response_format below is what is
+           left for a caller who wants the API's own answer instead.
 
-           "Output" was the generic-and-safe failure -- output of what? The
-           three buttons under it produce a transcript in one of three formats,
-           so that is what the label says now. -->
-      <div class="row fields">
+           VOCABULARY IS NOT AN EXPERT SETTING. Which words a recording is
+           likely to contain is the thing the person who made it knows and
+           nobody else does, so burying it behind a disclosure triangle put
+           the one control only they could set where they would not find it.
+           Off by default, because a profile whose terms do not occur costs
+           12% WER on Parakeet and 28% on Whisper -- measured.
+
+           IT IS THE ROW ITSELF, not a child of one. With the format control
+           removed it is the only field left on this line, and an empty
+           flex row with a hidden child still takes the margin the owl rule
+           gives it -- a gap above the button with nothing in it. -->
+      <div class="row fields" id="glossbox" hidden>
         <div class="tight">
-          <label>Transcript format</label>
-          <div class="seg" id="fmt">
-            <button data-fmt="text" aria-pressed="true">Text</button>
-            <button data-fmt="srt" aria-pressed="false">Subtitles (SRT)</button>
-            <button data-fmt="vtt" aria-pressed="false">Subtitles (VTT)</button>
-          </div>
-        </div>
-        <!-- VOCABULARY IS NOT AN EXPERT SETTING. Which words a recording is
-             likely to contain is the thing the person who made it knows and
-             nobody else does, so burying it behind a disclosure triangle put
-             the one control only they could set where they would not find it.
-             Off by default, because a profile whose terms do not occur costs
-             12% WER on Parakeet and 28% on Whisper -- measured. -->
-        <div class="tight" id="glossbox" hidden>
           <label>Vocabulary</label>
           <div class="seg" id="gloss"></div>
         </div>
@@ -623,7 +624,7 @@ details>summary:active{opacity:.72}
             <div>
               <label for="x-rf">response_format</label>
               <select id="x-rf">
-                <option value="">follow Transcript format above</option>
+                <option value="">verbose_json — what this page asks for</option>
                 <option value="json">json</option>
                 <option value="text">text</option>
                 <option value="verbose_json">verbose_json</option>
@@ -653,7 +654,9 @@ details>summary:active{opacity:.72}
               </select>
               <div class="hint" id="x-route-hint">The native route returns
                 <code>repaired</code>, <code>audio_seconds</code> and
-                <code>realtime_factor</code>, and refuses anything that is not 16 kHz.</div>
+                <code>realtime_factor</code>, and refuses anything that is not 16 kHz.
+                It carries no timings, so a native run has no highlight and no
+                .srt or .vtt beside the transcript.</div>
             </div>
           </div>
 
@@ -707,7 +710,14 @@ details>summary:active{opacity:.72}
         <h2 class="tight">Transcript</h2><span class="spacer"></span>
         <span class="hint tight" id="result-meta" aria-live="polite"></span>
         <button class="small tight" id="copy" type="button">Copy</button>
-        <button class="small tight" id="download" type="button">Download</button>
+        <!-- IT SAYS WHICH FILE IT WRITES. It read "Download" beside two
+             buttons reading ".srt" and ".vtt", so the row looked like one
+             download and two somethings -- and the file it actually wrote was
+             whichever format the control above had been left on. There are
+             three files off one run now and each button names its own.
+             nameDownload() derives this from lastTranscript.name, so the
+             label cannot drift from the bytes. -->
+        <button class="small tight" id="download" type="button">Download .txt</button>
         <!-- THE SIDECAR, and the reason no burn-in is livable. Every player
              and every upload form takes a subtitle file next to the video, so
              a .srt or a .vtt does the job a re-encode would have done, for
@@ -1450,7 +1460,7 @@ async function toWav(file, targetRate, maxSeconds, startAt) {
 
 /* ==================================================== transcribe tab === */
 const stt = { file:null, prepared:null, rate:null, seconds:null, token:null,
-              facts:null, format:"text",
+              facts:null,
               /* This link was committed as a captions download, so what
                  finishes is a subtitle file and NOT media -- it is read with
                  /ui/captions and never transcribed. Reset wherever token is,
@@ -1577,15 +1587,6 @@ async function loadGlossaries() {
     }));
 }
 
-document.querySelectorAll("#fmt button").forEach(b => b.addEventListener("click", () => {
-  document.querySelectorAll("#fmt button").forEach(o =>
-    o.setAttribute("aria-pressed", String(o === b)));
-  stt.format = b.dataset.fmt;
-  /* Asking for subtitles takes the native route off the menu, because it has
-     no timings to write them from. */
-  updateRouteAvailability();
-}));
-
 async function pick(file) {
   stt.file = file; stt.token = null; stt.prepared = null; stt.facts = null;
   stt.captions = false; stt.noVideo = false; syncActionLabel();
@@ -1653,16 +1654,32 @@ async function pick(file) {
 /* The native route is 16 kHz only, and we know the rate because the browser
    decoded the file. Offering a path that 400s on every MP4 is worse than not
    offering it, so it is disabled with the reason written on it.
+
    AND IT CANNOT WRITE SUBTITLES. /transcribe answers its own JSON shape with
-   no segments and no cue timings in it, so render() is called with "text"
-   whatever the Output control says -- which meant choosing SRT and then the
-   native route quietly handed back a .txt. Same idiom, second reason. */
+   no segments and no cue timings in it, so there is nothing on that route a
+   .srt could be built from.
+
+   WHAT THAT SECOND REFUSAL NOW DEPENDS ON, since the thing it used to read is
+   gone. It hung off the Transcript format control: choosing SRT and then the
+   native route quietly handed back a .txt. Deleting the refusal along with the
+   control would have been the easy reading and the wrong one -- the conflict
+   it prevents is still reachable. It narrows instead, to the one control that
+   can still ask for a subtitle file: an expert response_format of srt or vtt.
+   Set that and the native route is off the menu, with the reason on the
+   option. Leave it alone -- which is everybody -- and the route is offered
+   exactly as often as it was before this change.
+
+   THE QUIETER HALF IS NOT A REFUSAL and is not enforced here. Every native run
+   gives up the highlight and both sidecar buttons, because it carries no
+   timings at all. That was one of three ways to end up without subtitles when
+   there was a control; it is the only one left, so it is no longer something
+   the page can leave unsaid, and #x-route-hint says it beneath the select. */
 function updateRouteAvailability() {
   const select = $("x-route");
   const native = select.querySelector('option[value=native]');
   const sixteen = !!stt.prepared || !stt.file;
-  const wanted = chosenFormat();
-  const subtitles = wanted === "srt" || wanted === "vtt";
+  const expert = expertFormat();
+  const subtitles = expert === "srt" || expert === "vtt";
   const ok = sixteen && !subtitles;
   native.disabled = !ok;
   native.textContent =
@@ -1967,52 +1984,48 @@ async function watchDownload() {
 }
 
 /* ---------------------------------------------------- transcription --- */
-function chosenFormat() {
-  /* Expert wins if it was set; otherwise the plain three-way control. json is
-     what the native route always answers, whatever this says.
-     A DISABLED x-rf IS NOT A CHOICE. syncTranscribeControls disables it on the
-     native route, where nothing reads a response_format at all, and a value
-     left in a control the user can no longer reach must not go on deciding
-     which route is offered -- that is the same rule segments() follows. */
-  const expert = $("x-rf").disabled ? "" : $("x-rf").value;
-  return expert || (stt.format === "text" ? "text" : stt.format);
+/* THE ONLY FORMAT CONTROL LEFT, AND IT IS THE ESCAPE HATCH RATHER THAN A
+   SETTING. It means "send exactly this and render exactly what comes back",
+   for a caller who wants the API's own answer instead of this page's reading
+   of it. Everyone else gets verbose_json, because one verbose_json run is
+   already every format this page offers -- see formatForTimings below.
+
+   A DISABLED x-rf IS NOT A CHOICE. syncTranscribeControls disables it on the
+   native route, where nothing reads a response_format at all, and a value left
+   in a control the user can no longer reach must not go on deciding what is
+   sent or which route is offered -- the same rule segments() follows. That
+   check used to sit here and be skipped by formatForTimings, which read
+   $("x-rf").value raw; both read it through this function now, so a greyed
+   field cannot mean one thing to one caller and something else to the next. */
+function expertFormat() {
+  return $("x-rf").disabled ? "" : $("x-rf").value;
 }
 
-/* WHETHER ANY TIMING THIS RESPONSE CARRIES WILL HAVE SOMETHING TO DRIVE.
-
-   IT USED TO MEAN "is there a file in this browser", and that answer was the
-   reason a link never had a highlight: the media was streamed MeTube -> here
-   -> the gateway server-side and never reached the page, so asking for word
-   timings would have been paying for numbers nothing on screen could use. That
-   is no longer true. A finished link is playable through /ui/media, so the
-   cues have a player to follow — for an audio-only link as much as for a
-   video one, since a karaoke highlight needs a clock and not a picture.
-
-   A captions download is still no: skip_download means no media was fetched at
-   all, and that path never reaches a transcriber anyway. */
-function willFollowAlong() {
-  if (sttAudio()) return true;
-  return !!stt.token && !stt.captions;
-}
-
-/* WHY THIS ASKS FOR verbose_json WHEN THE USER ASKED FOR TEXT.
+/* WHY THIS ALWAYS ASKS FOR verbose_json.
    verbose_json's `text` IS the text format's whole body -- openai_api.py's
    _body() returns result.text for one and puts that same string in the other
    -- so the transcript on screen and the file the Download button writes are
    byte-identical either way, and the extra fields are the word timings the
-   highlight follows. Nothing is given up and nothing is invented.
+   highlight follows and the segments the .srt and .vtt are written from. One
+   run, three files. Nothing is given up and nothing is invented.
 
-   It is asked for only when something on screen can use it, because otherwise
-   it is pure cost. Timestamps are a second decoder pass per segment on
-   Whisper, and asr.py has the measurement for Parakeet: 5.34 s against 5.07 s
-   on a 14.2 s clip, about 5%.
+   IT USED TO BE CONDITIONAL, on a willFollowAlong() that asked whether
+   anything on screen could play the timings back. Timestamps are a second
+   decoder pass per segment on Whisper and about 5% on Parakeet -- asr.py
+   measures 5.34 s against 5.07 s on a 14.2 s clip -- so a run with no player
+   dropped to plain text and saved it.
+
+   THAT GATE WAS ONLY AFFORDABLE WHILE SRT WAS STILL SELECTABLE: someone who
+   wanted a subtitle file and no playback could pick it and get one. With the
+   control retired, verbose_json is the only thing that produces a subtitle
+   file at all, so keeping the gate would have withheld the very feature that
+   replaced the control -- and withheld it precisely from the people who had
+   been using the control. 5% buys the sidecar. willFollowAlong() went with it.
 
    An explicit expert choice is never overridden. Someone who selected srt, or
    json, or verbose_json in the panel gets exactly that. */
-function formatForTimings(wanted) {
-  if ($("x-rf").value) return wanted;
-  if (wanted !== "text") return wanted;      /* srt and vtt carry their own */
-  return willFollowAlong() ? "verbose_json" : "text";
+function formatForTimings() {
+  return expertFormat() || "verbose_json";
 }
 
 /* ONE ANSWER FOR BOTH PATHS, and that is the whole reason it is a function.
@@ -2029,12 +2042,19 @@ function formatForTimings(wanted) {
    so the words stop reconstructing the line. The service takes the field
    repeated (openai_api.py _values) and allows both values.
 
-   A DISABLED x-gran IS NOT A CHOICE, the same rule chosenFormat() follows: a
+   A DISABLED x-gran IS NOT A CHOICE, the same rule expertFormat() follows: a
    value left in a control the user can no longer reach must not go on
-   deciding what is sent. */
-function granularities(format, wanted) {
+   deciding what is sent.
+
+   AND NEITHER IS AN EXPERT verbose_json. The guard used to read
+   `format !== wanted`, which meant "only when the page did the upgrading" --
+   someone who typed verbose_json into the panel and left the granularities
+   alone got verbose_json with no granularities, exactly as asked. `wanted` is
+   gone with the control, so the same rule is now written as the thing it
+   always meant: not when the format came from the escape hatch. */
+function granularities(format) {
   if ($("x-gran").value && !$("x-gran").disabled) return [$("x-gran").value];
-  if (format === "verbose_json" && format !== wanted) return ["word", "segment"];
+  if (format === "verbose_json" && !expertFormat()) return ["word", "segment"];
   return [];
 }
 
@@ -2047,10 +2067,9 @@ async function transcribeToken() {
      carries the granularities too, so the response has the cues the highlight
      is drawn from. Playback is a separate, later, opt-in request to
      /ui/media, made by the element and only once play is pressed. */
-  const wanted = chosenFormat();
-  const format = formatForTimings(wanted);
+  const format = formatForTimings();
   const query = new URLSearchParams({ response_format: format });
-  for (const grain of granularities(format, wanted)) {
+  for (const grain of granularities(format)) {
     query.append("timestamp_granularities", grain);
   }
   const chosen = chosenGlossaries();
@@ -2059,9 +2078,7 @@ async function transcribeToken() {
     const response = await api("/ui/fetch?" + query.toString(), {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ token: stt.token }) });
-    /* `wanted`, not `format`: the Download button must write the .txt that was
-       chosen even when verbose_json was asked for behind the scenes. */
-    await render(response, format, wanted);
+    await render(response, format);
     note($("stt-note"), "", "");
   } catch (err) {
     note($("stt-note"), "bad", "Transcription failed: " + err.message);
@@ -2082,9 +2099,13 @@ async function transcribeToken() {
    does is re-read the subtitle file, which is instant.
 
    Re-reading it is worth keeping and is why this is a relabel rather than a
-   disabled button: renderCaptions writes the file into whichever of Text, SRT
-   or VTT is selected, so pressing it again after changing that control is how
-   the same cues come back in the other format. */
+   disabled button. The reason changed with the format control: it used to be
+   that renderCaptions wrote the file into whichever of Text, SRT or VTT was
+   selected, so a second press was how the same cues came back in another
+   format. All three come off one press now. What a second press is for is
+   getting the subtitles back into the pane after something else has replaced
+   them -- a transcription run, or a failed one -- without re-resolving the
+   link, and it still costs about two seconds and no compute. */
 function syncActionLabel() {
   $("go-stt").textContent = stt.captions ? "Read the subtitles" : "Transcribe";
 }
@@ -2122,25 +2143,33 @@ async function captionsToken() {
 
 function renderCaptions(payload) {
   const lines = parseSubtitles(payload.text);
-  const wanted = chosenFormat();
-  const verbatim = wanted === "srt" || wanted === "vtt";
-  /* WRITTEN INTO THE FORMAT THAT WAS ASKED FOR rather than handed over as it
-     arrived. yt-dlp writes WebVTT unless told otherwise, so someone who chose
-     SubRip and took the subtitles would otherwise get a file named .srt with
-     WebVTT inside it. And someone who chose Text must not be handed timecodes:
-     "Text" is the default and the reason most people press that button.
+  /* PROSE IN THE PANE AND BOTH SUBTITLE FILES BESIDE IT, which is the same
+     answer the transcription path gives now.
 
-     Every one of those comes off the same parse, so the pane, the Download
-     button and the two sidecar buttons cannot disagree about a cue. When the
-     parse finds nothing -- a format this page does not read -- the file is
-     shown exactly as it arrived rather than as an empty pane. */
-  const display = !lines.length ? payload.text
-                : verbatim ? toSubtitles(lines, wanted === "vtt")
-                : lines.map(line => line.text).join("\n");
-  const kind = !lines.length ? payload.format : verbatim ? wanted : "txt";
+     It used to write the file into whichever of Text, SRT or VTT was
+     selected. Both reasons that control existed here are still real and both
+     are still met, the other way round: someone taking a link's subtitles must
+     not be handed timecodes, because a transcript is what they came for -- so
+     the pane gets the text; and a file named .srt must not have WebVTT in it
+     just because that is what yt-dlp happened to write -- so offerSidecar
+     writes both formats from this same parse rather than passing the download
+     through. One parse behind the pane, the Download button and the two
+     sidecar buttons is what stops them disagreeing about a cue.
+
+     IT ALSO NO LONGER READS x-rf, which never had any business here.
+     /ui/captions sends no response_format anywhere -- it reads a file off
+     disk -- so an expert override was changing how a subtitle file got
+     displayed on the strength of a field that route does not have.
+
+     When the parse finds nothing -- a format this page does not read -- the
+     file is shown exactly as it arrived rather than as an empty pane. */
+  const display = lines.length ? lines.map(line => line.text).join("\n")
+                               : payload.text;
+  const kind = lines.length ? "txt" : payload.format;
   const cues = lines.length ? locate(display, lines) : null;
 
   lastTranscript = { text: display, name: "transcript." + kind };
+  nameDownload();
   $("result").hidden = false;
   $("transcript").textContent = display;
   $("result-meta").textContent = lines.length
@@ -2165,7 +2194,6 @@ $("go-stt").addEventListener("click", async () => {
   const form = new FormData();
   form.append("file", file, file.name);
   let path, format;
-  const wanted = chosenFormat();
   if (native) {
     path = "/transcribe"; format = "native";
     /* No `language` field, in either mode. It is a 400 on /v1 and silently
@@ -2178,14 +2206,14 @@ $("go-stt").addEventListener("click", async () => {
     if (nativeChosen.length) form.append("glossary", nativeChosen.join(","));
   } else {
     path = "/v1/audio/transcriptions";
-    format = formatForTimings(wanted);
+    format = formatForTimings();
     /* `model` is required by /v1 validation and does NOT choose an engine —
        Parakeet runs regardless and the response says so in x-stt-engine. */
     form.append("model", "parakeet");
     form.append("response_format", format);
     /* The same rule the link path applies, from the same function, so the two
        cannot drift into asking for different cues. */
-    for (const grain of granularities(format, wanted)) {
+    for (const grain of granularities(format)) {
       form.append("timestamp_granularities[]", grain);
     }
     /* An extension, per ADR 0001: absent by default, and absent entirely when
@@ -2203,7 +2231,7 @@ $("go-stt").addEventListener("click", async () => {
   }
   try {
     const response = await api(path, { method: "POST", body: form });
-    await render(response, format, native ? "text" : wanted);
+    await render(response, format);
     note($("stt-note"), "", "");
   } catch (err) {
     note($("stt-note"), "bad", "Transcription failed: " + (err.message || err));
@@ -2733,6 +2761,18 @@ function offerSidecar(lines) {
   $("dl-srt").hidden = $("dl-vtt").hidden = !lastLines.length;
 }
 
+/* THE LABEL COMES OFF THE FILE, not out of a second place that has to agree
+   with it. The button wrote whichever format the retired control was left on
+   and went on saying the bare word "Download" through all of it; now there are
+   three files off one run and each button names its own -- Download .txt, .srt,
+   .vtt. It is .txt for every ordinary run, and follows the expert
+   response_format when that put a subtitle file in the pane instead. */
+function nameDownload() {
+  const dot = lastTranscript.name.lastIndexOf(".");
+  $("download").textContent =
+    "Download" + (dot < 0 ? "" : " " + lastTranscript.name.slice(dot));
+}
+
 function sidecarName(extension) {
   return lastTranscript.name.replace(/\.[^.]+$/, "") + "." + extension;
 }
@@ -2741,7 +2781,7 @@ $("dl-srt").addEventListener("click", () =>
 $("dl-vtt").addEventListener("click", () =>
   saveText(toSubtitles(lastLines, true), sidecarName("vtt"), "text/vtt"));
 
-async function render(response, format, wanted) {
+async function render(response, format) {
   const type = response.headers.get("content-type") || "";
   if (!response.ok) {
     let payload = null;
@@ -2782,15 +2822,20 @@ async function render(response, format, wanted) {
   }
   if (engine) meta.push("engine: " + engine);
 
-  /* `wanted` and not `format`. The upload path can send verbose_json for a
-     transcript the user asked for as text -- see formatForUpload() -- and the
-     file that comes off the Download button must still be the .txt they chose.
-     The bytes are the same either way: openai_api.py's _body returns
-     result.text for response_format=text and puts that identical string in
-     verbose_json's `text`. */
-  const kind = wanted || format;
-  lastTranscript = { text, name: "transcript." + (kind === "srt" ? "srt"
-                     : kind === "vtt" ? "vtt" : "txt") };
+  /* THE EXTENSION FOLLOWS WHAT THE SERVER WAS ACTUALLY ASKED FOR, and that is
+     now the whole rule. It used to follow a separate `wanted`, because the
+     page sent verbose_json behind a user who had chosen Text and the file had
+     to come off the button as the .txt they picked. Nobody chooses any more:
+     text, json, verbose_json and native all put prose in the pane and all
+     write .txt -- the bytes are identical, openai_api.py's _body() returns
+     result.text for response_format=text and puts that same string in
+     verbose_json's `text` -- and the only way a subtitle file reaches the pane
+     is an expert response_format of srt or vtt, which writes that. The .srt
+     and .vtt buttons are built from the cues instead and do not go through
+     here at all, which is why one run can offer all three. */
+  const kind = format === "srt" ? "srt" : format === "vtt" ? "vtt" : "txt";
+  lastTranscript = { text, name: "transcript." + kind };
+  nameDownload();
   $("result").hidden = false;
   $("transcript").textContent = text;
   $("result-meta").textContent = meta.join(" · ");

@@ -148,32 +148,39 @@ def test_the_job_audio_is_fetched_with_the_key_and_not_put_in_a_src():
 # ------------------------------------------------------- where cues come --
 
 
-def test_word_timings_are_asked_for_only_when_something_can_follow_them():
-    """Otherwise it is pure cost for numbers nothing on screen can use.
+def test_the_cues_are_asked_for_on_every_path_that_can_carry_them():
+    """No state of this page may produce a transcript with no cues in it.
 
-    Timestamps are a second decoder pass per segment on Whisper, and stt's
-    asr.py measures about 5% on Parakeet -- 5.34 s against 5.07 s on a 14.2 s
-    clip.
+    THE ORIGINAL DEFECT, which this test was written for and still guards: a
+    pasted link never had a highlight. The ask was gated on "is there a file in
+    this browser", and a link's media is streamed into the gateway server-side,
+    so sttAudio() was null and the page asked for plain text. The gate was
+    fixed once to let a link through -- /ui/media makes it playable -- and this
+    now removes the gate instead, which cannot be got wrong a third time.
 
-    THE ANSWER USED TO BE "is there a file in this browser", and that is
-    exactly why a link never had a highlight: its media is streamed into the
-    gateway server-side, so sttAudio() is null and the page asked for plain
-    text. A finished link is playable through /ui/media now, so it qualifies --
-    and a captions download still does not, because skip_download means no
-    media was fetched at all.
+    WHY THE GATE WENT RATHER THAN BEING WIDENED AGAIN. It bought about 5%
+    (asr.py: 5.34 s against 5.07 s on a 14.2 s clip; a second decoder pass per
+    segment on Whisper) by dropping to plain text when nothing could play the
+    timings back. That was affordable only while the Transcript format control
+    existed, because someone who wanted a subtitle file and no playback could
+    select SRT and get one. With that control retired, verbose_json is the only
+    thing that writes a subtitle file at all, so the gate would now withhold
+    the feature that replaced the control -- from exactly the people who had
+    been using it. The 5% buys the sidecar.
     """
-    chooser = body_of("function formatForTimings(", "\n\n/* ONE ANSWER FOR BOTH")
-    assert "return willFollowAlong() ? \"verbose_json\" : \"text\";" in chooser
-    predicate = code(body_of("function willFollowAlong()", "\n\n/* WHY THIS ASKS"))
-    assert "if (sttAudio()) return true;" in predicate
-    assert "return !!stt.token && !stt.captions;" in predicate
+    chooser = code(body_of("function formatForTimings()", "\n\n/* ONE ANSWER FOR BOTH"))
+    assert 'return expertFormat() || "verbose_json";' in chooser
+    # Comments stripped: the one above formatForTimings names the retired gate
+    # on purpose, because a reader who does not know it existed cannot know
+    # what the 5% is being spent on.
+    assert "willFollowAlong" not in re.sub(r"/\*.*?\*/", "", HTML, flags=re.S), (
+        "the cost gate is back; a run with no player loses its subtitle files")
 
 
 def test_an_expert_response_format_is_never_silently_overridden():
     """Someone who selected srt in the panel gets srt, not verbose_json."""
-    chooser = body_of("function formatForTimings(", "\n\n/* ONE ANSWER FOR BOTH")
-    first = chooser.index("if ($(\"x-rf\").value) return wanted;")
-    assert first < chooser.index("verbose_json"), (
+    chooser = code(body_of("function formatForTimings()", "\n\n/* ONE ANSWER FOR BOTH"))
+    assert chooser.index("expertFormat()") < chooser.index("verbose_json"), (
         "the expert choice is checked after the swap, so it can be overridden")
 
 
@@ -185,12 +192,19 @@ def test_both_granularities_are_requested_so_there_is_a_fallback():
     the line and locate() refuses them. Without segments in the same response
     the highlight would simply vanish for those files.
     """
-    chooser = code(body_of("function granularities(format, wanted)",
+    chooser = code(body_of("function granularities(format)",
                            "\n\nasync function transcribeToken"))
     assert 'return ["word", "segment"];' in chooser
     # A value left in a control the user cannot reach must not go on deciding
-    # what is sent -- the same rule chosenFormat() follows.
+    # what is sent -- the same rule expertFormat() follows.
     assert '$("x-gran").value && !$("x-gran").disabled' in chooser
+    # AND THE ESCAPE HATCH STAYS EXACT. The guard used to read
+    # `format !== wanted`, meaning "only when the page did the upgrading":
+    # someone who typed verbose_json into the panel and left the granularities
+    # alone got verbose_json with none, which is what they asked for. `wanted`
+    # went with the format control, so the same rule is written as what it
+    # always meant -- not when the format came out of the escape hatch.
+    assert 'format === "verbose_json" && !expertFormat()' in chooser
 
 
 def test_the_link_and_the_upload_ask_for_the_same_cues():
@@ -203,9 +217,9 @@ def test_the_link_and_the_upload_ask_for_the_same_cues():
     """
     upload = HTML[HTML.index('form.append("response_format", format);'):]
     upload = upload[:upload.index("x-logprobs")]
-    assert "for (const grain of granularities(format, wanted))" in upload
+    assert "for (const grain of granularities(format))" in upload
     link = body_of("async function transcribeToken()", "\n\n/* THE CAPTIONS PATH")
-    assert "for (const grain of granularities(format, wanted))" in link
+    assert "for (const grain of granularities(format))" in link
 
 
 def test_a_link_asks_for_the_verbose_body_the_cues_live_in():
@@ -213,24 +227,39 @@ def test_a_link_asks_for_the_verbose_body_the_cues_live_in():
     in this file: /ui/fetch forwarded `model` and `response_format` and nothing
     else, so even asking would not have reached stt. Both had to move."""
     link = code(body_of("async function transcribeToken()", "\n\n/* THE CAPTIONS PATH"))
-    assert "const format = formatForTimings(wanted);" in link
+    assert "const format = formatForTimings();" in link
     assert 'query.append("timestamp_granularities", grain);' in link
-    # `wanted`, so a transcript chosen as text still downloads as .txt even
-    # though verbose_json was asked for behind the scenes.
-    assert "await render(response, format, wanted);" in link
+    assert "await render(response, format);" in link
 
 
-def test_the_download_still_writes_the_format_the_user_asked_for():
-    """The upload path can send verbose_json for a transcript chosen as text.
+def test_the_download_button_names_the_file_it_writes():
+    """THE DEFECT THIS PINNED: the upload path sends verbose_json for what the
+    user chose as Text, and the extension followed the request the page made
+    behind the scenes rather than the choice. The bytes are identical --
+    openai_api.py's _body() returns result.text for response_format=text and
+    puts that same string in verbose_json's `text` -- so it was only ever the
+    name that could be wrong, and it was.
 
-    The bytes are identical -- openai_api.py's _body() returns result.text for
-    response_format=text and puts that same string in verbose_json's `text` --
-    but the file name must not follow the request the page made behind the
-    scenes.
+    WHAT IT ASSERTS NOW. There is no choice to disagree with: the extension
+    follows the format actually sent. text, json, verbose_json and native all
+    put prose in the pane and all write .txt; only an expert response_format of
+    srt or vtt puts a subtitle file there, and that writes it. The .srt and
+    .vtt buttons come off the cues instead and never reach this line, which is
+    how one run offers all three.
+
+    AND THE LABEL SAYS WHICH. The button read the bare word "Download" beside
+    two buttons reading ".srt" and ".vtt", so the row looked like one download
+    and two somethings -- while the file it wrote silently followed a control
+    somewhere above it. It is derived from lastTranscript.name, so it cannot
+    drift from the bytes.
     """
-    render = body_of("async function render(response, format, wanted)", "$(\"copy\")")
-    assert "const kind = wanted || format;" in render
-    assert 'name: "transcript." + (kind ===' in render
+    render = body_of("async function render(response, format)", "$(\"copy\")")
+    assert 'const kind = format === "srt" ? "srt" : format === "vtt" ? "vtt" : "txt";' in render
+    assert 'name: "transcript." + kind' in render
+    assert "nameDownload();" in render
+    label = body_of("function nameDownload()", "\nfunction sidecarName")
+    assert "lastTranscript.name" in label, "the label is not read off the file"
+    assert '<button class="small tight" id="download" type="button">Download .txt<' in HTML
 
 
 def test_the_subtitle_cue_pattern_matches_what_this_stack_writes():
@@ -623,30 +652,49 @@ def test_the_captions_flag_is_cleared_wherever_the_token_is():
         f"each set or clear the token and must each clear this")
 
 
-def test_text_was_asked_for_so_timecodes_are_not_what_comes_back():
-    """Text is the default and it is why most people press that button.
+def test_a_subtitle_file_taken_from_a_link_reaches_the_pane_as_prose():
+    """Handing back a WebVTT file with its cue numbers and arrows in it,
+    because that happens to be what yt-dlp wrote, is the page showing its
+    plumbing. A transcript is what someone pressing that button came for.
 
-    Handing back a WebVTT file with its cue numbers and arrows in it, because
-    that happens to be what yt-dlp wrote, is the page showing its plumbing.
+    IT USED TO BE CONDITIONAL on Text being selected, which it was by default
+    and which is why most people pressed the button. There is nothing to select
+    now, so the good branch is the only branch -- and the two formats the other
+    branches used to produce are on the sidecar buttons beside it, off the same
+    parse.
     """
-    fn = body_of("function renderCaptions(payload)", "\n$(\"go-stt\")")
+    fn = code(body_of("function renderCaptions(payload)", "\n$(\"go-stt\")"))
     assert 'lines.map(line => line.text).join("\\n")' in fn, (
         "the prose branch is missing; the raw subtitle file reaches the pane")
-    assert 'const kind = !lines.length ? payload.format : verbatim ? wanted : "txt";' in fn
+    assert 'const kind = lines.length ? "txt" : payload.format;' in fn
+    assert "toSubtitles" not in fn, "renderCaptions writes timecodes into the pane again"
+    # /ui/captions reads a file off disk and sends no response_format anywhere,
+    # so an expert override has no business deciding how it is displayed.
+    assert "expertFormat" not in fn and "x-rf" not in fn
 
 
-def test_a_subtitle_format_that_was_asked_for_is_the_one_written():
-    """yt-dlp writes WebVTT unless told otherwise, so someone who chose SubRip
-    would otherwise get a file named .srt with WebVTT inside it."""
-    fn = body_of("function renderCaptions(payload)", "\n$(\"go-stt\")")
-    assert 'toSubtitles(lines, wanted === "vtt")' in fn
+def test_a_file_named_srt_can_never_contain_webvtt():
+    """yt-dlp writes WebVTT unless told otherwise, so a caption download passed
+    through as it arrived is a file named .srt with WebVTT inside it.
+
+    IT USED TO BE renderCaptions' job, writing the download into whichever
+    format was selected. Nothing is selected now and nothing is passed through:
+    both sidecar buttons are written by toSubtitles() from the parsed cues, on
+    the captions path exactly as on the transcription path, so the extension
+    and the bytes come from the same place by construction.
+    """
+    fn = code(body_of("function renderCaptions(payload)", "\n$(\"go-stt\")"))
+    assert "offerSidecar(lines)" in fn, "the captions path offers no subtitle files"
+    assert "payload.text" in fn
+    srt = body_of('$("dl-srt").addEventListener', '$("dl-vtt").addEventListener')
+    assert "toSubtitles(lastLines, false)" in srt and 'sidecarName("srt")' in srt
 
 
 def test_an_unparsable_caption_file_is_shown_rather_than_swallowed():
     """A format this page's one pattern does not read is not a reason to draw
     an empty pane over a file that plainly has words in it."""
-    fn = body_of("function renderCaptions(payload)", "\n$(\"go-stt\")")
-    assert "!lines.length ? payload.text" in fn
+    fn = code(body_of("function renderCaptions(payload)", "\n$(\"go-stt\")"))
+    assert ": payload.text;" in fn
 
 
 def test_there_is_exactly_one_subtitle_parser():
@@ -825,7 +873,7 @@ def test_the_sidecar_is_hidden_rather_than_disabled_when_there_are_no_timings():
 def test_every_path_that_draws_a_transcript_also_offers_the_sidecar():
     """A transcript with timings and no way to save them as subtitles is the
     feature half-built."""
-    for fn, ends in (("async function render(response, format, wanted)", '$("copy")'),
+    for fn, ends in (("async function render(response, format)", '$("copy")'),
                      ("function renderCaptions(payload)", '\n$("go-stt")')):
         assert "offerSidecar(" in body_of(fn, ends), f"{fn} does not offer it"
 
