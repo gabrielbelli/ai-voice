@@ -255,19 +255,34 @@ services:
       # SHA-256 to pin here. There is no setting that turns verification off.
       # Use TTS_RUNNER_CA_FILE instead if you have your own certificate authority.
       #
-      # TTS_RUNNER_HOST: "192.0.2.11"          # example only. Your machine, your address.
-      # TTS_RUNNER_PORT: "47600"
-      # TTS_RUNNER_FINGERPRINT: ""             # `idlegpu fingerprint` on the runner
+      # THIS DEPLOYMENT'S RUNNER. Everything here is this machine's, and the
+      # commented block above is what a stranger reads instead.
+      TTS_RUNNER_HOST: "192.168.1.117"
+      TTS_RUNNER_PORT: "47600"
+      # THE TRUST ROOT, and the only one. Verified from this host against the
+      # live listener before it was written down: openssl s_client reported
+      # the same SHA-256 that `idlegpu fingerprint` prints on the runner. It
+      # changes if the certificate is ever reminted, and a mismatch is a
+      # refused connection rather than a warning.
+      TTS_RUNNER_FINGERPRINT: "db3493bff0fd794d9aca37fd0091d86822cf568ed10ac86b579f2735bea5badc"
+      # A FILE, NOT A VALUE. This file is committed and published; the key is
+      # not in it. Mounted read-only below, mode 0400, owned by the uid this
+      # container runs as.
+      TTS_RUNNER_API_KEY_FILE: /run/secrets/runner-key
+      TTS_RUNNER_SERVICE: chatterbox
+      TTS_RUNNER_MAX_WAIT: "900"             # then give up and speak it here
+      TTS_RUNNER_POLL: "2"
       # TTS_RUNNER_CA_FILE: ""                 # or a CA bundle, if you have one
-      # TTS_RUNNER_API_KEY_FILE: /run/secrets/runner-key
-      # TTS_RUNNER_SERVICE: chatterbox
-      # TTS_RUNNER_MAX_WAIT: "900"             # then give up and speak it here
-      # TTS_RUNNER_POLL: "2"
     cpus: 10
     mem_limit: 10g
     volumes:
       - tts-long-models:/models
       - tts-long-out:/output
+      # THE RUNNER'S KEY, read-only, from a host path outside this repository.
+      # TTS_RUNNER_API_KEY_FILE points here. The key is never in this file
+      # because this file is published; the path is not a secret and the file
+      # is 0400 owned by the uid this container runs as.
+      - /mnt/tank/apps/stt-stack/runner-key:/run/secrets/runner-key:ro
       # READ-ONLY, and shared with voice-ui, which is the only writer. One
       # writer means there is no case where two processes race on the same
       # clip, and it means a compromise of the heaviest container in the estate
