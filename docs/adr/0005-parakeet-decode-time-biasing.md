@@ -77,28 +77,82 @@ decode is upstream's code running upstream's arithmetic — byte-identical by
 construction rather than by resemblance. Verified anyway on sixteen real corpus
 clips, across text, tokens, timestamps and logprobs.
 
-## Why it is off by default
+## Why it is off by default — and why the original reason was wrong
 
-ADR 0002 removed an always-on glossary because a glossary whose terms do **not**
-occur in the audio raised WER by **12% on Parakeet and 28% on Whisper** across
-250 conditions. That measurement was taken through decoder biasing, so it is a
-measurement of this feature, and turning this feature on for every request would
-re-create the exact defect ADR 0002 was written to remove — this time inside the
-decode, where post-decode repair cannot undo it.
+This ADR shipped saying the cost of an unused term was **12% WER on Parakeet**,
+citing ADR 0002, and adding: *"That measurement was taken through decoder
+biasing, so it is a measurement of this feature."* It has since been measured
+directly, and **that sentence was false**.
 
-So biasing is a bet on knowing what is in the audio, and the caller who knows is
-the one who places it. A deployment that wants it everywhere sets `STT_BOOST=1`
-and pays that cost knowingly, the same shape as `STT_GLOSSARY_DEFAULT`.
+The 12% comes from `stt-stack/bench/runs/parakeet-vocab.json` against
+`parakeet-plain.json` — 25 conditions, mean WER 0.1443 → 0.1620. Both runs
+report a realtime factor of **63x**, which is `bench.py --engine parakeet`:
+`fluidaudiocli --custom-vocab`, FluidAudio's CoreML implementation on the Neural
+Engine. It is a measurement of *a* decoder biasing, on a different
+implementation and a different runtime from the ONNX-on-CPU path this service
+deploys. Quoting it as the cost of `app/boosting.py` was borrowing a number
+across a boundary it does not cross.
 
-Every default in `boosting.py` was chosen against the terms-**absent** axis
-rather than the terms-present one. `STT_BOOST_START_WEIGHT` is 0 for that
-reason: raising it recovered more terms on a probe *and* inserted a spurious
-word and capitalised two innocent ones.
+The **Whisper** half of that citation does not have this problem and is not
+withdrawn: 28% is `baseline` 0.3208 against `whisper-nohotwords-orko` 0.2499,
+both at rtf 0.8–0.9, which is CTranslate2 `hotwords` — the code path this
+service still uses on Whisper. Absent vocabulary really does cost 28% there.
+Two engines, two biasing implementations, two very different answers, and that
+is the substantive finding: **the cost of an unused term is a property of the
+implementation, not of the idea.**
 
-**No WER number for this feature exists yet.** A 6.6 s synthetic clip
-establishes mechanism and scale, not accuracy. `bench/bench.py` on both axes is
-what has to decide the defaults before any deployment turns this on, and the
-terms-absent run is the one that decides.
+One more correction while in here: both figures come from a **25-cell**
+(source × condition) comparison in those run files. "Across 250 conditions",
+repeated in ADR 0002, the README and both glossary headers, is not supported by
+the surviving data and should be read as 25 until someone produces the run that
+justifies it.
+
+**Measured directly** (`bench/boost_bench.py`, 145 clips, 942 s, four corpora,
+95% paired bootstrap over clips):
+
+| the list sent to the decoder | change vs plain | 95% CI |
+|---|---|---|
+| the shipped `tech`+`dictation` profile, audio containing none of it | **byte-identical**, 0 false fires | — |
+| 200 unrelated phrases (`STT_BOOST_MAX_PHRASES` exactly) | +0.4% | [−0.8, +1.7] |
+| the words that ARE in the audio | −5.2% | [−9.2, −1.3] |
+| those same words, padded to 200 phrases with another language's | −5.2% | [−9.5, −1.4] |
+
+The cost of irrelevant vocabulary here is **zero**, not 12%, and the mechanism
+is the one the design already relied on: at `START_WEIGHT = 0` a phrase must be
+entered on acoustics, and a word that is not in the audio is never entered. The
+last two rows being the same number to four decimal places is the whole point —
+padding a clip's real terms out to the 200-phrase ceiling is free.
+
+**So off-by-default survives, for a better reason.** Not "it costs 12%" but
+**"it buys fourteen words in 2,378, so there is no case for paying anything for
+it by default, and only the caller knows whether they are about to say any of
+the words."** The −5.2% is real — its interval excludes zero — and it is also
+term recall 0.908 → 0.922, about a sixth of what the model already missed. That
+is worth having when you ask for it and is not worth a global switch.
+
+Two defaults are now vindicated by measurement rather than by argument:
+
+- **`STT_BOOST_WEIGHT = 3.0` is the optimum.** The curve peaks there and decays
+  either side (1.0 → −2.6%, 2.0 → −4.1%, 3.0 → −5.2%, 4.5 → −3.7%, 6.0 →
+  −2.2%), and 3.0 is the largest weight whose interval still excludes zero.
+- **`STT_BOOST_START_WEIGHT = 0.0` was the setting that mattered.** Raising it
+  to 1.5 does lift recall, to 0.944 — and on the realistic list shape it costs
+  **+81% WER** [+49, +122]. At 3.0 with the shipped profile, CORAA goes 0.2195 →
+  0.8005. The recall win is an oracle's, available only to a caller who already
+  knows the transcript.
+
+### What is still not measured, and it is the case the feature was built for
+
+**There is no jargon corpus on this machine.** The terms-present axis is a
+proxy — rare words lifted from public corpora, not `Catallaxy` and `Theoria` in
+the voice that says them. And **CORAA moved by nothing at any weight**: 3.4 s
+clips, 10 words, 14 of 40 with no word distinctive enough to boost. The corpus
+closest to real dictation returned a null result for want of testable terms,
+which is a limit of the method, not a finding about the feature.
+
+Recording a jargon suite is the measurement that would actually settle this.
+Until it exists, the honest summary is: **free, mildly useful, and unproven on
+the audio it exists for.**
 
 ## Consequences
 
@@ -115,6 +169,8 @@ terms-absent run is the one that decides.
   caught rather than mis-sliced.
 - Snapshot rollback — rewinding the decoder when a partial match dies — is
   designed and deliberately **not** implemented. It only earns its keep at
-  `STT_BOOST_START_WEIGHT > 0`, its failure mode is a subtly wrong transcript
-  rather than a crash, and no measurement justifies that setting yet. If it is
-  ever raised in anger, that is the thing to build first.
+  `STT_BOOST_START_WEIGHT > 0`, and that setting is now **measured harmful**:
+  +81% WER on a realistic list at 1.5, CORAA 0.2195 → 0.8005 at 3.0. What was
+  "no measurement justifies it yet" is now "the measurement is against it". If
+  it is ever raised in anger, rollback is still the thing to build first — but
+  the case for raising it has got weaker, not stronger.

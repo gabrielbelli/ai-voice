@@ -625,13 +625,53 @@ curl -s http://localhost:8000/v1/audio/transcriptions \
   -F glossary=tech -F boost=true
 ```
 
-**It is off unless you ask, and that is the measurement talking.** A glossary
-whose terms do NOT occur in the audio raised WER by 12% on Parakeet across 250
-conditions. Biasing is a bet on knowing what is in the audio, so the caller who
-knows makes it. `STT_BOOST=1` changes the default for a deployment that wants
-it on everything, at that cost.
+**It is off unless you ask.** Not because it is expensive — it is not, see
+below — but because the thing it buys is small and the caller is the only one
+who knows whether they are about to say any of the words. `STT_BOOST=1` changes
+the default for a deployment that wants it on everything.
 
-Measured on a synthetic probe of this feature — mechanism and scale, not WER:
+#### What it costs and what it buys, measured
+
+`bench/boost_bench.py`, 145 clips and 942 s over CORAA, FLEURS pt-BR,
+LibriSpeech clean and Earnings-22, on Parakeet TDT 0.6B v3 at int8. Pooled
+relative WER against no boosting, 95% paired bootstrap over clips:
+
+| the list you send | WER | change | 95% CI |
+|---|---|---|---|
+| none (plain) | 0.1135 | — | — |
+| **the shipped `tech`+`dictation` profile, on audio containing none of it** | 0.1135 | **byte-identical** | zero false fires |
+| 200 unrelated phrases — `STT_BOOST_MAX_PHRASES` exactly | 0.1140 | +0.4% | [−0.8, +1.7] |
+| the words that ARE in the audio | 0.1077 | **−5.2%** | [−9.2, −1.3] |
+| those same words, padded to 200 phrases with another language's | 0.1077 | −5.2% | [−9.5, −1.4] |
+
+**Irrelevant vocabulary is inert in this decoder.** At
+`STT_BOOST_START_WEIGHT = 0` a phrase has to be entered on acoustics, and a word
+that is not in the audio never is, so carrying it changes nothing. The last two
+rows are the same number to four decimal places: padding a clip's handful of
+real terms out to the full 200-phrase ceiling with words from another language
+costs exactly nothing.
+
+That is **not** true of the other biasing paths this project has measured, and
+the difference is why the number below is worth stating separately. Whisper's
+hotwords cost **+28% WER** when the terms are absent (`baseline` 0.3208 against
+`whisper-nohotwords-orko` 0.2499), and FluidAudio's CoreML `--custom-vocab` on
+Parakeet cost **+12%** (`parakeet-plain` 0.1443 against `parakeet-vocab`
+0.1620). Both are real, both are other implementations, and neither describes
+this one. See ADR 0005.
+
+**And the win is real but small: −5.2% is fourteen words out of 2,378.** Term
+recall goes 0.908 → 0.922, about a sixth of what plain missed. Quote the
+fourteen words alongside the percentage or you are overselling it. Throughput is
+unaffected — 17.8x plain against 18.0x with a full 200-phrase automaton, inside
+a ±8% measurement spread.
+
+Two caveats that belong next to those numbers. **No jargon corpus exists**, so
+the terms-present column is a proxy — rare words from public corpora, not
+`Catallaxy` and `Theoria` in the voice that says them. And **CORAA, the corpus
+closest to real dictation here, moved by nothing at any weight**: its clips are
+3.4 s and 10 words, and 14 of 40 hold no word distinctive enough to boost.
+
+Separately, on a synthetic probe — mechanism, not WER:
 
 | | transcript |
 |---|---|
@@ -639,12 +679,9 @@ Measured on a synthetic probe of this feature — mechanism and scale, not WER:
 | `boost=true` | Anthropic released clode code, and the **Theoria** dashboard uses Ghost Pepper for dictation. |
 | terms absent from the audio | byte-identical to unboosted |
 
-Two things that table does not say, and both matter more than what it does.
-`clode code` was **not** recovered, because a phrase must be entered on
-acoustics — see `STT_BOOST_START_WEIGHT`. And no WER number here is real: a
-6.6 s clip from macOS `say` establishes that the mechanism works, not what it
-costs. **Run `bench/bench.py` on both axes — terms present and terms absent —
-before switching this on for a deployment.**
+`clode code` was **not** recovered, and that is the same fact as the free absent
+axis seen from the other side: a phrase must be entered on acoustics, so
+boosting finishes words it cannot start. See `STT_BOOST_START_WEIGHT`.
 
 A response carries `x-boost-applied` naming the phrases that reached the
 decoder, and nothing when none did. A term can fail to get there three ways:
@@ -662,11 +699,11 @@ another model or quantisation:
 | variable | default | what it does |
 |---|---|---|
 | `STT_BOOST` | `0` | the default for requests that do not send `boost` |
-| `STT_BOOST_WEIGHT` | `3.0` | bonus per character for a token that CONTINUES a match |
-| `STT_BOOST_START_WEIGHT` | `0.0` | bonus on a phrase's FIRST token. At 0 a phrase must be entered on acoustics and is only helped to finish, which is the setting with no measured collateral. Raising it recovered more terms *and* inserted a spurious "The" and capitalised two innocent words |
+| `STT_BOOST_WEIGHT` | `3.0` | bonus per character for a token that CONTINUES a match. **The measured optimum**: the WER curve peaks here and decays either side, and 3.0 is the largest weight whose confidence interval still excludes zero (1.0 → −2.6%, 2.0 → −4.1%, 3.0 → −5.2%, 4.5 → −3.7%, 6.0 → −2.2%) |
+| `STT_BOOST_START_WEIGHT` | `0.0` | bonus on a phrase's FIRST token. At 0 a phrase must be entered on acoustics and is only helped to finish. **Raising it is now measured, and it is the one setting that ruins the transcript**: at 1.5 it lifts term recall 0.908 → 0.944, and on a realistic list — the right terms plus ninety wrong ones — WER goes **+81%** [+49, +122]. At 3.0 with the shipped profile, CORAA goes 0.2195 → 0.8005. The recall win is an oracle's; leave this at 0 |
 | `STT_BOOST_GATE` | `6.0` | a bonus applies only to a token already within this many logits of the winner. **This is the guard, not the weight ceiling** — clamping the weight and leaving the gate open still destroyed a transcript |
 | `STT_BOOST_MAX_WEIGHT` | `6.0` | hard ceiling, clamping all three above |
-| `STT_BOOST_MAX_PHRASES` | `200` | bounds the collateral-damage surface, not the runtime |
+| `STT_BOOST_MAX_PHRASES` | `200` | bounds the collateral-damage surface, not the runtime. A full 200-phrase automaton of words absent from the audio costs +0.4% WER [−0.8, +1.7] and no measurable throughput |
 | `STT_BOOST_MIN_PHRASE_CHARS` | `4` | short terms match constantly; `US` would rewrite "he told us" |
 
 `STT_HOTWORDS=0` switches the whole thing off on both engines, and `boost=true`

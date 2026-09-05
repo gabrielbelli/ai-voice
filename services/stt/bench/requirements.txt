@@ -7,3 +7,12 @@ soundfile==0.13.1
 soxr==1.0.0
 jiwer==4.0.0
 requests==2.32.5
+
+# boost_bench.py drives app.asr.Parakeet IN PROCESS rather than over HTTP, so it
+# needs the service's own runtime as well as the client deps above:
+#
+#     pip install -r requirements.txt -r ../requirements.txt
+#
+# Listing onnx-asr here instead would pin the model runtime in two files, and
+# the benchmark silently measuring a different version from the service is the
+# one failure a benchmark must not have.
