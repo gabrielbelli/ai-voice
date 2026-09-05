@@ -1208,34 +1208,51 @@ let CONFIG = { ingestion:false, probe:false, cloning:false, stt_rtf_seed:8.5,
 let VOICES = { kokoro:{}, clones:[] };
 let HEALTH = null;
 
-/* The measured rate, kept per browser. Seeded conservatively from the server
-   and corrected by every native transcription, because the repository states
-   47-63x (root README), 8.5-10.4x (the gateway, which is what its 900 s
-   timeout was built on) and about 5x (the stt README) for the same model. A
-   number this page measured on this box beats all three. */
+/* EVERY NUMBER HERE WAS MEASURED AGAINST THE DEPLOYED STACK, not quoted from
+   a README. The previous set was quoted, and three of the four were wrong:
+
+     stt     seed 8.5x   measured 8.81x on a 297 s clip   kept
+     kokoro  1.3x        measured 1.83x                   was 41% out
+     clone   0.138x      measured 0.275x                  was 100% out
+
+   The learner that was supposed to correct them could not run. rate.learn()
+   was called from ONE place, inside `if (format === "native")`, and the page
+   stopped using the native route when the format control was retired -- so
+   `store.get("rtf.stt")` returned the seed forever and the exponential
+   average was decoration. It is gone rather than repaired: the seed is 4% out
+   at the length where the answer matters, and a constant that is honest about
+   being a constant beats a learner that never learns.
+
+   Short clips read much slower than long ones -- 4.6x at 3.5 s against 8.81x
+   at 297 s, because the upload and the model warm are fixed costs. That is
+   not corrected for, because roughly() buckets everything under 45 s as "a
+   few seconds" and the two answers are the same sentence. */
 const rate = {
-  stt: () => store.get("rtf.stt", CONFIG.stt_rtf_seed),
-  learn(observed) {
-    if (!(observed > 0) || !isFinite(observed)) return;
-    const prior = store.get("rtf.stt", CONFIG.stt_rtf_seed);
-    store.set("rtf.stt", prior * 0.7 + observed * 0.3);
-  },
-  /* Chatterbox's own EMA, live from /health, seeded 0.21 by the service and
-     corrected by every finished job. Never a constant here. */
+  stt: () => CONFIG.stt_rtf_seed,
+  /* Chatterbox's own EMA, live from /health, corrected by every finished job.
+     The fallback is only reached when /health has not answered yet. */
   clone: () => {
     const h = HEALTH && HEALTH.gateway && HEALTH.gateway.health;
     const f = h && h.backends && h.backends.tts_long && h.backends.tts_long.health
               && h.backends.tts_long.health.realtime_factor;
-    return f > 0 ? f : 0.138;
+    return f > 0 ? f : 0.275;
   },
-  /* The gateway's own figure for tts-stack, from its 300 s timeout comment. */
-  kokoro: () => 1.3,
+  /* A CONSTANT ON PURPOSE, unlike clone() above. tts-stack's /health has no
+     realtime_factor field at all, so there is nothing to read and nothing to
+     learn from; 1.83 is what a 899-character line measured. */
+  kokoro: () => 1.83,
 };
 
-/* chars/15 is the service's own arithmetic (TTS_CHARS_PER_SECOND=15, measured
-   9.8-19.3), so the page and the backend agree about how long the audio will
-   be before either of them agrees about how long it takes to make. */
-const speechSeconds = (text) => (text || "").length / 15;
+/* THE TWO ENGINES DO NOT SPEAK AT THE SAME RATE, and one constant for both
+   was 36% out on one of them. Measured on this stack, same host, same day:
+   Kokoro 899 chars -> 55.3 s (16.3 c/s), Chatterbox 449 chars -> 37.4 s
+   (12.0 c/s). Chatterbox is the slower talker, which is the opposite of the
+   direction a shared 15 erred in for the engine that matters -- a clone job
+   is minutes of compute, so under-predicting its audio length under-predicts
+   the wait twice over. */
+const CHARS_PER_SECOND = { kokoro: 16.3, clone: 12.0 };
+const speechSeconds = (text, engine) =>
+  (text || "").length / (CHARS_PER_SECOND[engine] || CHARS_PER_SECOND.kokoro);
 
 /* ========================================================== the tabs === */
 
@@ -1345,7 +1362,7 @@ scrollEdge();
 /* KEPT, THOUGH THE STATUS PILLS IT USED TO DRAW ARE GONE. HEALTH is not
    decoration: rate.clone() reads tts_long's live realtime_factor out of it,
    and that number is what every Chatterbox estimate on this page is computed
-   from. Without this the estimates would silently fall back to the 0.138
+   from. Without this the estimates would silently fall back to the 0.275
    constant and stop tracking the machine.
 
    A backend being down now surfaces where it matters -- as the error on the
@@ -2847,9 +2864,11 @@ async function render(response, format) {
       meta.push(`${body.audio_seconds.toFixed(1)} s of audio`,
                 `${body.compute_seconds.toFixed(1)} s of compute`,
                 `${body.realtime_factor.toFixed(1)}× realtime`);
-      /* The one place this page learns. Every native transcription corrects
-         the EMA the confirm dialog quotes. */
-      rate.learn(body.realtime_factor);
+      /* THE MEASUREMENT IS SHOWN, NOT LEARNED FROM. This used to feed
+         rate.learn(), which was the only caller -- and it sits inside the
+         native branch, which the page stopped taking when the format control
+         was retired. So the average corrected nothing and the seed was always
+         what rate.stt() returned. See the comment on `rate`. */
     } else {
       text = body.text !== undefined ? body.text : JSON.stringify(body, null, 2);
       if (body.duration) meta.push(clock(body.duration) + " of audio");
@@ -3326,7 +3345,10 @@ function estimate() {
   $("chars").textContent = text.length;
   $("chars").style.color = text.length > 4096 ? "var(--bad)" : "";
   const voice = currentVoice();
-  const audio = speechSeconds(text);
+  /* NOT ONE `audio` FOR BOTH ENGINES ANY MORE. This function quotes a clone
+     time and a Kokoro time side by side, and the two speak at different
+     rates, so a single figure made one of the two comparisons wrong by 36%
+     before either rate was applied. See CHARS_PER_SECOND. */
 
   /* A BUTTON THAT WOULD DO NOTHING SAYS SO. The click handler opened with
      `if (voice.kind === "new") return;` and `if (!text.trim() && !segments())
@@ -3342,7 +3364,7 @@ function estimate() {
     $("go-tts").textContent = "Speak";
     note($("speak-note"), "", "");
   } else {
-    const compute = audio / rate.clone();
+    const compute = speechSeconds(text, "clone") / rate.clone();
     /* THE ETA IS IN THE BUTTON. Nobody presses "Generate (about 36 minutes)"
        by accident, and nobody has to go looking for a warning. Kokoro's button
        just says "Speak"; the asymmetry is the message. */
@@ -3354,7 +3376,7 @@ function estimate() {
       const quick = nearestKokoro();
       note($("speak-note"), "warn",
         `This is ${roughly(compute)} of compute.${quick ? ` <strong>${quick}</strong>
-         would take ${roughly(audio / rate.kokoro())}.` : ""}
+         would take ${roughly(speechSeconds(text, "kokoro") / rate.kokoro())}.` : ""}
          <div class="acts">
            ${quick ? `<button class="small" id="useq" type="button">Use ${quick} instead</button>` : ""}
            <button class="small" id="anyway" type="button">Queue it anyway</button>
@@ -3700,8 +3722,11 @@ $("dl-audio").addEventListener("click", () => {
 
 /* ========================================================== jobs tab === */
 /*
-  0.138× realtime means a five-minute voice note is about thirty-six minutes of
-  compute, so the whole answer here is that THE USER CLOSES THE TAB. The list
+  0.275× realtime -- measured against this stack, where 449 characters took
+  135.7 s of compute for 37.4 s of audio -- means a five-minute voice note is
+  about eighteen minutes of compute, so the whole answer here is that THE USER
+  CLOSES THE TAB. (The figure this line used to quote, 0.138, was half the
+  real rate and came from a README rather than a run.) The list
   is rebuilt from GET /jobs, so it recovers after a reload, after a browser
   restart, and from a different device — and it is reconciled with the ids this
   browser has seen, which costs nothing and covers the window where a 202

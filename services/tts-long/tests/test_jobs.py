@@ -220,3 +220,60 @@ def test_a_segments_only_job_does_not_break_the_whole_listing(speech):
     # And the expandable row, which reads `text` and showed "the text was not
     # kept for this job" for every one of them.
     assert "Second paragraph." in speech.get(f"/jobs/{job['id']}").json()["text"]
+
+
+def test_the_listing_carries_the_estimate_the_202_promised(speech):
+    """The page sizes its progress bar from `job.estimated_seconds` in the
+    LISTING, and the listing never carried the field.
+
+    It was computed inside the POST handler, put in the 202 body and dropped.
+    So `job.estimated_seconds || 0` was 0 for every job read back, and the bar,
+    the elapsed-and-remaining line and the "past the estimate" state rendered
+    nothing at all -- for any client that polled, reloaded, or opened the page
+    on a second device, which is every client after the first render.
+
+    Both halves are asserted: the number is in the listing, and it is the SAME
+    number the caller was promised rather than a fresh reading of a drifting
+    average.
+    """
+    created = speech.post("/jobs", json={"text": "A line long enough to cost "
+                                                 "a measurable moment.",
+                                         "voice": "default",
+                                         "language": "en"}).json()
+    promised = created["estimated_seconds"]
+    assert promised > 0
+
+    listed = {j["id"]: j for j in speech.get("/jobs").json()["jobs"]}[created["id"]]
+    assert listed["estimated_seconds"] == promised, "the bar has a total again"
+    assert speech.get(f"/jobs/{created['id']}").json()["estimated_seconds"] == promised
+
+
+def test_the_estimate_survives_a_restart(speech):
+    """A recovered row is finished, so nothing reads its estimate -- but a
+    restart must not become the one way to lose a number a client was given.
+    """
+    from app import main
+
+    created = speech.post("/jobs", json={"text": "One short line, spoken once.",
+                                         "voice": "default",
+                                         "language": "en"}).json()
+    _wait(speech, created["id"])
+    main.jobs.clear()
+    assert main._recover() == 1
+    assert main.jobs[created["id"]]["estimated_seconds"] == created["estimated_seconds"]
+
+
+def test_chatterbox_is_the_slower_talker_and_the_constant_says_so(speech):
+    """449 characters of ordinary prose measured 37.4 s of Chatterbox audio on
+    the deployed stack: 12.0 chars/s, not the 15 this held.
+
+    15 was the middle of a spread of four samples, chosen when the spread was
+    all there was. It under-predicted the audio by a fifth, and the audio is
+    then divided by a realtime factor near 0.27 to reach the number a reader
+    sees -- so a 20% error arrives as roughly four times that in the wait.
+    """
+    from app import chunking
+
+    assert chunking.CHARS_PER_SECOND == 12.0
+    # The measurement this was taken from, within the rounding of one sample.
+    assert abs(chunking.speech_seconds(449) - 37.4) < 2.0

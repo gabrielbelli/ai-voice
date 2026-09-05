@@ -410,6 +410,11 @@ SIDECAR_KEYS = (
     "created_at", "started_at", "finished_at",
     "audio_seconds", "compute_seconds", "realtime_factor", "usage",
     "offsets", "text",
+    # Kept so a recovered row can still say what it was promised. It is only
+    # read for a live job, and a recovered one is finished by definition, but
+    # dropping it would make a restart the one way to lose the number a client
+    # was given -- exactly the class of loss this sidecar exists to stop.
+    "estimated_seconds",
 )
 
 
@@ -665,6 +670,17 @@ def _enqueue(*, segments: list[tuple[str, float]], language: str,
         "temperature": temperature, "format": fmt, "voice": voice,
         "reference": reference, "cancelled": False, "stream": stream,
         "chunks": len(segments),
+        # ON THE JOB, not only in the 202. It was computed for the POST
+        # response and thrown away, so GET /jobs never carried it -- and the
+        # page reads `job.estimated_seconds || 0` from the LISTING to size its
+        # progress bar. The bar, the elapsed/remaining line and the "past the
+        # estimate" state were therefore dead for every client that polled or
+        # reloaded, which is all of them after the first render.
+        #
+        # Frozen at enqueue rather than recomputed per poll: it is the promise
+        # the caller was given in the 202, and a bar whose total moves under it
+        # as the EMA drifts is worse than one that is a little wrong.
+        "estimated_seconds": _estimate(sum(len(t) for t, _ in segments)),
     }
     # Registered before the job is visible to the worker, or a fast job could
     # finish and find nothing to wake.
@@ -711,9 +727,12 @@ def create_job(req: JobRequest) -> dict[str, object]:
                       exaggeration=req.exaggeration, cfg_weight=req.cfg_weight,
                       temperature=req.temperature, voice=name,
                       reference=reference)
+    # Read back off the job rather than computed a second time, so the 202 and
+    # every later GET /jobs quote the same number. Two calls to _estimate()
+    # either side of a finished job would not.
     return {"id": job_id, "status": "queued", "queued_ahead": queue.qsize() - 1,
             "chunks": len(segments),
-            "estimated_seconds": _estimate(sum(len(t) for t, _ in segments))}
+            "estimated_seconds": jobs[job_id]["estimated_seconds"]}
 
 
 def _segments(text: str | None,

@@ -704,3 +704,55 @@ def test_no_string_explains_a_deployment_state_to_the_reader():
     assert "metadata probe" not in screen
     assert "in this image" not in screen, "container jargon is back on the page"
     assert "No length or size for this link. The estimate is unavailable." in HTML
+
+
+def test_every_rate_on_this_page_is_one_that_was_measured():
+    """Three of the four rates here were quoted from a README rather than
+    measured, and three of them were wrong.
+
+    Against the deployed stack, same host, same day: STT 8.81x on a 297 s clip
+    (the 8.5 seed is 4% out and stays), Kokoro 1.83x where the page said 1.3,
+    Chatterbox 0.275x where the page fell back to 0.138. The last two were 41%
+    and 100% out, and both were quoted from a timeout comment in the gateway.
+    """
+    # Scoped to the rate table. Both old figures still appear elsewhere in the
+    # file, quoted inside comments that record what they were and why they
+    # were wrong -- which is the point of keeping them.
+    table = HTML[HTML.index("const rate = {"):HTML.index("const CHARS_PER_SECOND")]
+    assert "kokoro: () => 1.83" in table, "the measured Kokoro rate"
+    assert "1.3," not in table, "the quoted 1.3 is back in the rate table"
+    assert "return f > 0 ? f : 0.275;" in table, "the measured clone fallback"
+    assert "0.138" not in table, "the old clone fallback is back"
+
+
+def test_the_two_engines_do_not_share_one_speech_rate():
+    """One constant for both was 36% out on one of them: Kokoro measured 16.3
+    chars/s and Chatterbox 12.0 on the same host on the same day.
+
+    It matters most for the clone, where the audio length is then divided by a
+    realtime factor near 0.27 -- so the error reaches the reader multiplied.
+    """
+    assert "const CHARS_PER_SECOND = { kokoro: 16.3, clone: 12.0 };" in HTML
+    # Both call sites name their engine; a bare call would silently take the
+    # Kokoro rate for a Chatterbox job.
+    assert 'speechSeconds(text, "clone")' in HTML
+    assert 'speechSeconds(text, "kokoro")' in HTML
+    assert "speechSeconds(text)" not in HTML, "an unnamed engine takes the wrong rate"
+
+
+def test_the_page_does_not_pretend_to_learn_a_rate_it_cannot_learn():
+    """rate.learn() had exactly one caller, inside `if (format === "native")`.
+
+    The page stopped taking the native route when the Transcript format
+    control was retired, so the average corrected nothing and rate.stt()
+    returned the seed for ever. A learner that never learns is worse than a
+    constant, because the constant does not invite trust it has not earned.
+    """
+    # visible() rather than HTML: the comment on `rate` quotes both names to
+    # record what was removed, and a fence that cannot tell a live call from
+    # its own obituary is not a fence.
+    live = visible()
+    assert "rate.learn" not in live, "the dead learner is back on the page"
+    assert 'store.get("rtf.stt"' not in live
+    assert 'store.set("rtf.stt"' not in live
+    assert "stt: () => CONFIG.stt_rtf_seed," in HTML
