@@ -453,6 +453,68 @@ otherwise target is a GTX 1060 — Pascal, whose FP16 runs at 1/64 rate. It
 would not help even where one exists, and 6.5 GB does not fit in 6 GB of VRAM
 at fp32 regardless.
 
+## Borrowing somebody's GPU, optionally
+
+Chatterbox is the only component in this stack slower than realtime, which is
+the entire reason this section exists. **It is off by default and unset means
+local-only**: with no `TTS_RUNNER_HOST`, every job runs on this CPU and
+`app/remote.py` is imported and never used.
+
+The other end is an [`idlegpu`](https://github.com/) agent: a small program on a
+machine with a spare GPU, most likely somebody's gaming PC, that runs work while
+nobody is using the card and hands it straight back when they are. There is no
+broker and no cluster. This service talks to that machine directly over TLS.
+
+```yaml
+TTS_RUNNER_HOST: "192.0.2.11"      # example only
+TTS_RUNNER_FINGERPRINT: ""         # `idlegpu fingerprint` on that machine
+TTS_RUNNER_API_KEY_FILE: /run/secrets/runner-key
+```
+
+### What it buys, measured
+
+Chatterbox on an RTX 3070: **0.56 to 0.72x realtime**, against **0.275x** on
+this container's eight threads. Two and a half times faster on the slowest thing
+in the stack. Worth having, and deliberately written down rather than rounded up
+to the order of magnitude somebody might assume.
+
+### What it costs
+
+The GPU goes away, several times an evening, whenever its owner sits down. That
+is the runner working correctly rather than failing: it yields in **under three
+seconds**, measured with the model resident, and the job comes back as
+**queued** rather than `failed`. This service waits `TTS_RUNNER_MAX_WAIT` and
+then speaks it on the CPU instead.
+
+`app/synth.py` is therefore never going anywhere. It is the fallback for exactly
+the case the runner is designed to create.
+
+### The three things that stay here
+
+**Encoding**, because `test_wav_differs_only_in_the_two_riff_size_fields` and
+`test_flac_differs_only_inside_streaminfo` are byte-exact facts about *this*
+container's ffmpeg. Moving encoding to a stranger's Windows box would make them
+facts about a build nobody here controls.
+
+**Chunking**, because the 40-second `generate()` ceiling was measured on this
+stack and belongs to it. The runner is sent already-segmented text and carries no
+text policy at all.
+
+**The file write.** `OUT_DIR / f"{job['id']}.{job['format']}"` is what `/jobs`,
+`_recover`, `_discard` and the sweeper all reach through. Nothing the runner says
+about where a file is ever reaches that field.
+
+### And the one that would be easy to get wrong
+
+**The realtime-factor EMA is per backend.** `rate` decides whether an incoming
+request is answered synchronously or handed a 202. A GPU at 0.7x and this CPU at
+0.275x sharing one average describes no machine that exists, and `_sync_budget`
+would then accept a synchronous request the CPU cannot finish — at exactly the
+moment the GPU disappears, because that is when jobs come back here. `/health`
+reports `realtime_factor_by_backend` for the same reason.
+
+`tests/test_remote.py` covers all of this with a fake runner and opens no socket.
+
 ## Shared code
 
 Authentication, the OpenAI error envelope, the `/health` contract, `Segment`,

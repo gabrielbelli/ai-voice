@@ -227,6 +227,42 @@ services:
       # /voices/gabriel.wav and hands it to Chatterbox as audio_prompt_path;
       # there is no per-request reference field on the wire at any layer.
       TTS_VOICE_DIR: /voices
+
+      # ------------------------------------------------- an optional GPU --
+      #
+      # UNSET, AND UNSET IS THE DEFAULT THAT MATTERS. With no TTS_RUNNER_HOST
+      # this service is exactly what it was: every job runs on this CPU, and
+      # app/remote.py is imported and never used. Setting the host is what
+      # turns on the seam at app/main.py's _backend_for.
+      #
+      # The runner is an `idlegpu` agent (its own repository) on a machine with
+      # a spare GPU, most likely somebody's gaming PC. It is NOT a cluster and
+      # there is no broker: this service talks to that machine directly.
+      #
+      # WHAT THIS BUYS, MEASURED, so nobody switches it on expecting magic.
+      # Chatterbox on an RTX 3070 ran at 0.56-0.72x realtime against 0.275x on
+      # this container's eight threads. Two and a half times faster, on the one
+      # component in this stack slower than realtime. Not an order of magnitude.
+      #
+      # AND WHAT IT COSTS. The runner hands its GPU back the instant its owner
+      # touches the machine, so a job can be interrupted several times an
+      # evening. That surfaces as still-queued and a retry, never as a failure,
+      # and after TTS_RUNNER_MAX_WAIT it is spoken here instead. The CPU path in
+      # app/synth.py is never removed and is what makes that safe.
+      #
+      # TLS ALWAYS, VERIFIED ALWAYS. The runner mints a self-signed certificate
+      # into its own directory; `idlegpu fingerprint` on that machine prints the
+      # SHA-256 to pin here. There is no setting that turns verification off.
+      # Use TTS_RUNNER_CA_FILE instead if you have your own certificate authority.
+      #
+      # TTS_RUNNER_HOST: "192.0.2.11"          # example only. Your machine, your address.
+      # TTS_RUNNER_PORT: "47600"
+      # TTS_RUNNER_FINGERPRINT: ""             # `idlegpu fingerprint` on the runner
+      # TTS_RUNNER_CA_FILE: ""                 # or a CA bundle, if you have one
+      # TTS_RUNNER_API_KEY_FILE: /run/secrets/runner-key
+      # TTS_RUNNER_SERVICE: chatterbox
+      # TTS_RUNNER_MAX_WAIT: "900"             # then give up and speak it here
+      # TTS_RUNNER_POLL: "2"
     cpus: 10
     mem_limit: 10g
     volumes:

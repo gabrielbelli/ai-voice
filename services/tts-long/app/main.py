@@ -70,6 +70,7 @@ from voice_common.models import OpenAISpeechRequest, Segment
 from . import voices as voice_registry
 from .chunking import chunk_text, speech_seconds
 from .encoders import MEDIA_TYPES, available_formats, encode, make_encoder
+from .remote import RemoteSynth, RunnerClient, RunnerConfig
 from .synth import (SAMPLE_RATE, SUPPORTED_LANGUAGES, Synth, speech_tokens)
 
 OUT_DIR = Path(os.getenv("TTS_OUTPUT_DIR", "/output"))
@@ -197,6 +198,37 @@ class _Rate:
 
 rate = _Rate(RTF_SEED)
 
+# ONE EMA PER BACKEND, AND THE SEPARATION IS NOT TIDINESS.
+#
+# `rate` drives _estimate, _compute_seconds, _backlog_seconds, _retry_after and
+# _sync_budget: it is the number that decides whether a request is answered
+# synchronously or handed a 202. A GPU runner at 20x realtime and this CPU at
+# 0.275x sharing one average means _sync_budget accepts a synchronous request the
+# CPU can never finish, and it accepts it at exactly the worst moment - the
+# instant somebody sits down at the gaming machine and the GPU goes away. Every
+# estimate this host makes must be an estimate about the host that will actually
+# do the work.
+#
+# _rates["local"] IS `rate`, the same object, so nothing that reads `rate`
+# changes and test_chatterbox_is_the_slower_talker_and_the_constant_says_so
+# still pins what it always pinned.
+_rates: dict[str, _Rate] = {"local": rate}
+_rates_lock = threading.Lock()
+
+
+def rate_for(backend: str) -> _Rate:
+    """The observed realtime factor of one backend, created on first use."""
+    with _rates_lock:
+        r = _rates.get(backend)
+        if r is None:
+            # Seeded from the CPU constant, which is pessimistic for a GPU. The
+            # first finished job corrects it, and being pessimistic first is the
+            # right direction to be wrong in: it defers to a 202 rather than
+            # promising a synchronous answer nothing can deliver.
+            r = _Rate(RTF_SEED)
+            _rates[backend] = r
+        return r
+
 
 def _compute_seconds(chars: int) -> float:
     """Estimated CPU seconds to speak `chars` characters, at the observed rate."""
@@ -227,14 +259,13 @@ def _backlog_seconds() -> float:
 
 
 def _worker() -> None:
-    synth: Synth = state["synth"]  # type: ignore[assignment]
     while True:
         job_id = queue.get()
         if job_id is None:
             return
         job = jobs[job_id]
         try:
-            _run(synth, job)
+            _run(_backend_for(job), job)
         finally:
             # In `finally`, so a failed job wakes its caller with an error
             # rather than leaving it to sit out the whole timeout.
@@ -246,6 +277,53 @@ def _worker() -> None:
                     # on the other end any more, and the audio is on disk.
                     loop.call_soon_threadsafe(event.set)
             queue.task_done()
+
+
+def _backend_for(job: dict):
+    """Which thing speaks this job.
+
+    THE ONE PLACE THAT DECISION IS MADE, and the reason _run is unchanged. _run
+    calls speak_segments on whatever it is handed; RemoteSynth has that method
+    with that signature and nothing else in common with Synth, so the compute
+    can move across a network without a single line of the code around it
+    knowing.
+
+    WITH NO RUNNER CONFIGURED THIS RETURNS THE LOCAL Synth, always, and no
+    remote code runs at all. That is load-bearing rather than a convenience: the
+    whole test suite rests on conftest monkeypatching Synth._speak, so a chooser
+    that bypassed Synth in the unconfigured case would leave every test in this
+    repository quietly exercising nothing.
+
+    The three states the runner reports are kept apart here too. "speech is not
+    installed on that machine" is the owner's to fix and will not change by
+    itself, so there is no point waiting for it; "somebody is gaming" clears on
+    its own in a minute or two, and it is still not worth queueing behind,
+    because the local CPU path exists and finishes. Both fall back. What differs
+    is what gets logged, because only one of them is worth telling somebody about.
+    """
+    local: Synth = state["synth"]  # type: ignore[assignment]
+    client = state.get("runner")
+    if client is None:
+        return local
+    try:
+        ready, why = client.speech_state()
+    except Exception as exc:  # noqa: BLE001 - a runner that is down is not an error here
+        log.info("%s: runner unreachable (%s); speaking locally",
+                 job["id"][:8], exc)
+        return local
+    if not ready:
+        if why in {"not_installed", "not_enabled", "no_such_service"}:
+            # Worth saying out loud once per job: this one will never clear on
+            # its own, and the fix is one command on the runner's own machine.
+            log.warning("%s: the runner has no usable %s service (%s); speaking "
+                        "locally. Fix with `idlegpu service install %s` there.",
+                        job["id"][:8], client.cfg.service, why, client.cfg.service)
+        else:
+            log.info("%s: the runner's GPU is busy (%s); speaking locally",
+                     job["id"][:8], why)
+        return local
+    job["backend"] = "runner"
+    return RemoteSynth(client)
 
 
 def _run(synth: Synth, job: dict) -> None:
@@ -317,7 +395,9 @@ def _run(synth: Synth, job: dict) -> None:
         path.write_bytes(data)
 
         duration = spoken.audio.size / SAMPLE_RATE
-        rate.observe(duration, compute)
+        # PER BACKEND. See _rates: a GPU's 20x must never enter the average that
+        # decides whether the CPU can answer the next request synchronously.
+        rate_for(job.get("backend", "local")).observe(duration, compute)
         usage = {
             "input_tokens": spoken.input_tokens,
             "output_tokens": speech_tokens(spoken.audio.size),
@@ -547,6 +627,15 @@ async def lifespan(app: FastAPI):
                  "downloadable again and the sweeper can now expire them",
                  recovered, OUT_DIR)
     state["synth"] = Synth(idle_timeout=IDLE_TIMEOUT, threads=THREADS)
+    # UNSET MEANS LOCAL ONLY, and that is the default. RunnerConfig.from_env
+    # returns None when TTS_RUNNER_HOST is not set, state["runner"] stays None,
+    # and _backend_for returns the local Synth without importing anything else.
+    runner_cfg = RunnerConfig.from_env()
+    state["runner"] = RunnerClient(runner_cfg) if runner_cfg else None
+    if runner_cfg:
+        log.info("a GPU runner is configured at %s:%d (service %s); jobs go "
+                 "there when it is free and to this CPU when it is not",
+                 runner_cfg.host, runner_cfg.port, runner_cfg.service)
     # One worker on purpose. The model is 6.5 GB and generation is sequential,
     # so a second job would double memory and slow both.
     threading.Thread(target=_worker, daemon=True).start()
@@ -639,6 +728,11 @@ def _health() -> dict[str, object]:
         "queue_capacity": MAX_QUEUE,
         "running": sum(1 for j in list(jobs.values()) if j["status"] == "running"),
         "realtime_factor": round(rate.value, 3),
+        # Named per backend rather than merged, for the same reason the EMAs are
+        # separate: "this host does 0.28x and the runner does 20x" is two facts,
+        # and averaging them describes no machine that exists.
+        "realtime_factor_by_backend": {k: round(v.value, 3) for k, v in _rates.items()},
+        "runner": state.get("runner") is not None,
     }
 
 
