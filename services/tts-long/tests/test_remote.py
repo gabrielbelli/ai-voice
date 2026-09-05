@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -29,7 +31,7 @@ class FakeClient:
     """The six calls RemoteSynth makes, and a script for how to answer them."""
 
     def __init__(self, cfg=None, *, segments=1, yield_after=None,
-                 fail=None, tokens=7):
+                 yield_polls=None, fail=None, tokens=7):
         # poll=0: these tests assert ordering and state transitions, not timing,
         # and a 2 s default would turn the file into a minute of sleeping.
         self.cfg = cfg or RunnerConfig(host="runner.invalid", service="chatterbox", poll=0.0)
@@ -38,6 +40,10 @@ class FakeClient:
         self.cancelled: list[str] = []
         self._segments = segments
         self._yield_after = yield_after
+        # How many polls the runner stays queued once it has handed the GPU
+        # back. None means for ever, which is the owner who games all evening.
+        self._yield_polls = yield_polls
+        self._stalled = 0
         self._fail = fail
         self._tokens = tokens
         self._polls = 0
@@ -56,14 +62,20 @@ class FakeClient:
         return "remote-job-1"
 
     def job(self, job_id):
-        self._polls += 1
-        done = min(self._polls, self._segments)
         if self._fail:
             return {"status": "failed", "artefacts": [], "record": {"error": self._fail}}
-        if self._yield_after is not None and done > self._yield_after:
-            # Artefacts already delivered stay delivered; the status goes back
-            # to queued, which is what the runner really does.
+        # THE YIELD, modelled the way the runner really behaves: the segments
+        # already produced STAY produced and stay listed, the status goes back
+        # to `queued`, and progress freezes until the owner leaves. It does not
+        # start again from zero, which is the whole reason the lease carries an
+        # idempotency key.
+        if (self._yield_after is not None
+                and self._polls >= self._yield_after
+                and (self._yield_polls is None or self._stalled < self._yield_polls)):
+            self._stalled += 1
             return {"status": "queued", "artefacts": self._names(self._yield_after)}
+        self._polls += 1
+        done = min(self._polls, self._segments)
         return {
             "status": "done" if done >= self._segments else "running",
             "artefacts": self._names(done),
@@ -86,6 +98,11 @@ class FakeClient:
 
 def segs(n):
     return [(f"segment {i}", 0.0) for i in range(n)]
+
+
+# The local job id, bound at construction because speak_segments has to keep
+# exactly the signature Synth.speak_segments has. See RemoteSynth.__init__.
+JOB = "the-local-uuid"
 
 
 # --------------------------------------------------- the unconfigured case ---
@@ -227,9 +244,9 @@ def test_each_segment_arrives_separately_so_streaming_still_works():
     """
     client = FakeClient(segments=3)
     seen: list[int] = []
-    spoken = RemoteSynth(client).speak_segments(
+    spoken = RemoteSynth(client, JOB).speak_segments(
         segs(3), "en", 0.5, 0.5, 0.8, None,
-        on_chunk=lambda piece: seen.append(piece.size), job_id="job-1")
+        on_chunk=lambda piece: seen.append(piece.size))
 
     assert len(seen) == 3, f"expected one callback per segment, got {len(seen)}"
     assert spoken.audio.size == sum(seen)
@@ -247,9 +264,9 @@ def test_segments_past_the_ninth_are_not_spoken_out_of_order():
     """
     client = FakeClient(segments=12)
     order: list[float] = []
-    RemoteSynth(client).speak_segments(
+    RemoteSynth(client, JOB).speak_segments(
         segs(12), "en", 0.5, 0.5, 0.8, None,
-        on_chunk=lambda piece: order.append(round(float(piece[0]), 3)), job_id="j")
+        on_chunk=lambda piece: order.append(round(float(piece[0]), 3)))
 
     # The fake makes segment i a constant of 0.1 * (i + 1), so the amplitudes
     # are the segment numbers and out-of-order is visible rather than inferred.
@@ -262,8 +279,8 @@ def test_the_runner_is_sent_text_and_never_a_pause():
     policy and the runner must not learn about it, or two clients with different
     chunking policies would need two runners."""
     client = FakeClient(segments=2)
-    RemoteSynth(client).speak_segments(
-        [("first", 0.4), ("second", 1.2)], "en", 0.5, 0.5, 0.8, None, job_id="j")
+    RemoteSynth(client, JOB).speak_segments(
+        [("first", 0.4), ("second", 1.2)], "en", 0.5, 0.5, 0.8, None)
     params, _ = client.submitted[0]
     assert params["segments"] == ["first", "second"]
     assert "0.4" not in repr(params) and "1.2" not in repr(params)
@@ -274,8 +291,7 @@ def test_the_local_job_id_is_the_idempotency_key():
     Without the key that retry is a second generation, which for speech means
     the same sentence spoken twice into the same file."""
     client = FakeClient()
-    RemoteSynth(client).speak_segments(segs(1), "en", 0.5, 0.5, 0.8, None,
-                                       job_id="the-local-uuid")
+    RemoteSynth(client, JOB).speak_segments(segs(1), "en", 0.5, 0.5, 0.8, None)
     _, key = client.submitted[0]
     assert key == "the-local-uuid"
 
@@ -294,8 +310,7 @@ def test_a_reference_clip_crosses_as_a_digest_and_never_as_a_path(tmp_path):
     clip.write_bytes(b"RIFF....fake wav bytes")
 
     client = FakeClient()
-    RemoteSynth(client).speak_segments(segs(1), "en", 0.5, 0.5, 0.8, str(clip),
-                                       job_id="job-1")
+    RemoteSynth(client, JOB).speak_segments(segs(1), "en", 0.5, 0.5, 0.8, str(clip))
     params, _ = client.submitted[0]
 
     blob = repr(params)
@@ -313,7 +328,7 @@ def test_the_sample_rate_crosses_so_a_mismatch_can_be_caught():
     and silent about it. Telling the runner the rate is what makes it a contract
     rather than an assumption."""
     client = FakeClient()
-    RemoteSynth(client).speak_segments(segs(1), "en", 0.5, 0.5, 0.8, None, job_id="j")
+    RemoteSynth(client, JOB).speak_segments(segs(1), "en", 0.5, 0.5, 0.8, None)
     assert client.submitted[0][0]["sample_rate"] == SAMPLE_RATE
 
 
@@ -325,28 +340,78 @@ def test_a_truncated_segment_is_refused_rather_than_reinterpreted():
     client = FakeClient()
     client.artefact = lambda job_id, name: b"\x00\x01\x02"
     with pytest.raises(RemoteUnavailable, match="float32"):
-        RemoteSynth(client).speak_segments(segs(1), "en", 0.5, 0.5, 0.8, None, job_id="j")
+        RemoteSynth(client, JOB).speak_segments(segs(1), "en", 0.5, 0.5, 0.8, None)
 
 
 # ------------------------------------------------------------- the yield -----
 
 
-def test_a_yield_is_not_a_failure():
-    """THE DEFECT THIS PREVENTS: reporting `failed` when somebody starts a game.
+def test_a_yield_is_waited_out_rather_than_reported_at_all():
+    """THE DEFECT THIS PREVENTS: treating the normal case as an event.
 
-    The runner hands the GPU back the instant its owner touches the machine.
-    That happens several times an evening and is the system working exactly as
-    designed. A distinct exception type is what lets the caller wait, retry or
-    fall back, instead of a caller that sees RuntimeError and marks the job
-    failed for what was a completely normal event.
+    The runner hands the GPU back the instant its owner touches the machine,
+    under six seconds, several times an evening. The lease survives, so the
+    right response is to wait: the job finishes complete and nothing above this
+    line ever learns it happened. Raising here would have made every game launch
+    somebody starts into a failed job or a restart on this host.
     """
-    client = FakeClient(segments=4, yield_after=2)
-    with pytest.raises(RemoteYield) as caught:
-        RemoteSynth(client).speak_segments(segs(4), "en", 0.5, 0.5, 0.8, None, job_id="j")
+    client = FakeClient(segments=4, yield_after=2, yield_polls=3)
+    spoken = RemoteSynth(client, JOB).speak_segments(
+        segs(4), "en", 0.5, 0.5, 0.8, None)
 
-    assert not isinstance(caught.value, RemoteUnavailable), \
-        "a yield must be distinguishable from the runner being broken"
-    assert "2 of 4" in str(caught.value), "say how far it got: " + str(caught.value)
+    assert client._stalled == 3, "the fake did not actually yield"
+    assert spoken.audio.size == 4 * (SAMPLE_RATE // 10), \
+        "the job came back short, so waiting lost the segments it was waiting for"
+    assert client.cancelled == [], "a yield is not a reason to withdraw the lease"
+
+
+def test_the_local_job_reads_queued_again_while_the_owner_is_gaming():
+    """A yield is surfaced as `queued`, which is what it is, rather than left
+    reading `running` for a quarter of an hour with nothing happening. That is
+    the difference between a poller that waits and one whose user concludes the
+    service has hung."""
+    client = FakeClient(segments=3, yield_after=1, yield_polls=2)
+    seen: list[bool] = []
+    RemoteSynth(client, JOB, on_wait=seen.append).speak_segments(
+        segs(3), "en", 0.5, 0.5, 0.8, None)
+
+    assert seen == [True, False], \
+        "expected queued-then-running exactly once, got " + repr(seen)
+
+
+def test_a_segment_made_before_a_yield_is_never_spoken_or_delivered_twice():
+    """THE PROOF THE WHOLE REMOTE PATH RESTS ON, and the reason a yield is
+    waited out instead of retried.
+
+    A retry is the obvious-looking response to the GPU going away, and it is how
+    the same sentence gets spoken twice. Three separate routes to it, all closed
+    here by one behaviour:
+
+      * the runner regenerating what it already made -- closed by submitting
+        once, under an idempotency key that is the local job id;
+      * this client collecting an artefact it already has -- closed by `seen`;
+      * `_run` being re-entered, which rebuilds the encoder and replays every
+        delta into an open SSE stream -- closed by never returning early.
+
+    So the assertions are: one submission, one delivery per segment, in order,
+    and each piece distinct. The fake gives segment i an amplitude of
+    0.1 * (i + 1), so a repeat is visible as a duplicate value rather than
+    having to be inferred from a length.
+    """
+    client = FakeClient(segments=5, yield_after=2, yield_polls=4)
+    pieces: list[np.ndarray] = []
+    spoken = RemoteSynth(client, JOB).speak_segments(
+        segs(5), "en", 0.5, 0.5, 0.8, None, on_chunk=pieces.append)
+
+    assert len(client.submitted) == 1, \
+        "the runner was asked to generate twice: " + repr(client.submitted)
+    assert client.submitted[0][1] == JOB, "the lease was not keyed to the local job"
+
+    amplitudes = [round(float(p[0]), 3) for p in pieces]
+    assert amplitudes == [0.1, 0.2, 0.3, 0.4, 0.5], \
+        "segments were duplicated, dropped or reordered across the yield: " \
+        + repr(amplitudes)
+    assert spoken.audio.size == 5 * (SAMPLE_RATE // 10)
 
 
 def test_a_real_failure_is_still_a_failure():
@@ -354,7 +419,7 @@ def test_a_real_failure_is_still_a_failure():
     passing on a client that had stopped distinguishing anything at all."""
     client = FakeClient(fail="out of VRAM")
     with pytest.raises(RemoteUnavailable, match="out of VRAM"):
-        RemoteSynth(client).speak_segments(segs(1), "en", 0.5, 0.5, 0.8, None, job_id="j")
+        RemoteSynth(client, JOB).speak_segments(segs(1), "en", 0.5, 0.5, 0.8, None)
 
 
 def test_waiting_forever_is_bounded_and_the_job_is_withdrawn():
@@ -364,15 +429,37 @@ def test_waiting_forever_is_bounded_and_the_job_is_withdrawn():
     cfg = RunnerConfig(host="h", max_wait=0.0, poll=0.0)
     client = FakeClient(cfg=cfg, segments=99)
     client.job = lambda job_id: {"status": "queued", "artefacts": []}
-    with pytest.raises(RemoteYield, match="did not start"):
-        RemoteSynth(client).speak_segments(segs(2), "en", 0.5, 0.5, 0.8, None, job_id="j")
+    with pytest.raises(RemoteYield, match="its owner is using the machine") as caught:
+        RemoteSynth(client, JOB).speak_segments(segs(2), "en", 0.5, 0.5, 0.8, None)
     assert client.cancelled == ["remote-job-1"]
+    # Nothing was produced, so nothing has left this host and speaking it
+    # locally is invisible to every client. _worker reads exactly this.
+    assert caught.value.delivered == 0
+
+
+def test_giving_up_says_how_much_had_already_been_streamed():
+    """`delivered` is what decides whether a local re-run is safe, so it has to
+    be the real count. Reporting zero when segments had gone out would let
+    _worker replay a partly-sent SSE stream from the beginning."""
+    cfg = RunnerConfig(host="h", max_wait=0.0, poll=0.0)
+    client = FakeClient(cfg=cfg, segments=9, yield_after=1, yield_polls=None)
+    pieces: list[np.ndarray] = []
+    with pytest.raises(RemoteYield) as caught:
+        RemoteSynth(client, JOB).speak_segments(
+            segs(9), "en", 0.5, 0.5, 0.8, None, on_chunk=pieces.append)
+
+    # Counted against what actually went out rather than against a fixed
+    # number, because that IS the invariant: `delivered` is a promise about how
+    # many pieces a caller has already seen, and a test pinning it to a literal
+    # would keep passing if the two drifted apart.
+    assert caught.value.delivered == len(pieces) > 0, \
+        f"reported {caught.value.delivered} but delivered {len(pieces)}"
 
 
 def test_cancelling_locally_withdraws_the_job_on_the_runner():
     client = FakeClient(segments=99)
-    RemoteSynth(client).speak_segments(segs(2), "en", 0.5, 0.5, 0.8, None,
-                                       cancelled=lambda: True, job_id="j")
+    RemoteSynth(client, JOB).speak_segments(segs(2), "en", 0.5, 0.5, 0.8, None,
+                                            cancelled=lambda: True)
     assert client.cancelled == ["remote-job-1"]
 
 
@@ -435,3 +522,181 @@ def test_a_fingerprint_is_accepted_in_the_form_the_runner_prints_it():
     grouped = ":".join(["AB"] * 32)
     cfg = RunnerConfig.from_env({"TTS_RUNNER_HOST": "h", "TTS_RUNNER_FINGERPRINT": grouped})
     assert cfg.fingerprint == "ab" * 32
+
+
+# ------------------------------------- through the real queue, end to end -----
+#
+# Everything above drives RemoteSynth directly. These drive the actual routes,
+# the actual worker thread and the actual _run, because that is where the seam
+# is wired up and where the two defects below were living: both of them passed
+# every direct-call test in this file while being broken in production.
+
+
+def _wait(client, job_id: str, timeout: float = 30.0) -> dict:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        job = client.get(f"/jobs/{job_id}").json()
+        if job["status"] in {"done", "failed", "cancelled"}:
+            return job
+        time.sleep(0.02)
+    raise AssertionError(f"job {job_id} never finished")
+
+
+@contextmanager
+def runner(client):
+    """Attach a fake runner to the running app for the length of one test."""
+    import app.main as main
+
+    main.state["runner"] = client
+    try:
+        yield main
+    finally:
+        main.state["runner"] = None
+
+
+def test_the_runner_is_keyed_to_the_local_job_id_when_a_real_job_runs(speech):
+    """THE DEFECT THIS PREVENTS, and it had shipped.
+
+    The idempotency key is the only thing standing between a resumed lease and
+    a second generation of the same text. It used to be a `job_id=` keyword on
+    speak_segments -- which `_run` cannot pass, because `_run` calls the method
+    positionally on whichever backend it was handed and the local Synth has no
+    such parameter. So every real job fell through to `anon-<clock>`, a fresh
+    key on every attempt, and the guarantee was off in production while the
+    direct-call test for it passed by handing over the keyword itself.
+
+    This test submits through the route and reads the key off the wire. It is
+    the only shape that could have caught it, which is why it exists.
+    """
+    fake = FakeClient(segments=1)
+    with runner(fake):
+        created = speech.post("/jobs", json={"text": "One short line.",
+                                             "voice": "default"}).json()
+        _wait(speech, created["id"])
+
+    assert fake.submitted, "the runner was never asked to do anything"
+    _, key = fake.submitted[0]
+    assert key == created["id"], (
+        "the lease was keyed to " + repr(key) + " rather than to the local job "
+        "id, so a resumed job would be generated a second time")
+    assert not key.startswith("anon-"), "the anonymous fallback key came back"
+
+
+def test_a_mid_job_yield_finishes_the_job_instead_of_failing_it(speech):
+    """THE NORMAL CASE, end to end: somebody starts a game half way through.
+
+    The job must come back `done`, with audio, having been generated once. A
+    `failed` here would mean this service reports an error every time the owner
+    of that machine sits down at it.
+    """
+    fake = FakeClient(segments=3, yield_after=1, yield_polls=3)
+    with runner(fake):
+        created = speech.post("/jobs", json={"text": "One short line.",
+                                             "voice": "default"}).json()
+        finished = _wait(speech, created["id"])
+
+    assert fake._stalled == 3, "the fake never actually yielded"
+    assert finished["status"] == "done", finished.get("error")
+    assert len(fake.submitted) == 1, "the text was sent for generation twice"
+    assert finished["audio_seconds"] > 0
+
+
+def test_a_runner_that_never_comes_back_is_spoken_once_here_not_twice(speech,
+                                                                     monkeypatch):
+    """THE OTHER HALF OF "never spoken twice", on the path that DOES re-run.
+
+    When the bounded wait runs out the job is spoken on this host instead --
+    that fallback is the whole reason the CPU Synth is never removed. What must
+    not happen is the local run being entered more than once, or being entered
+    on top of audio a client has already been sent.
+
+    `_speak` is counted rather than inferred: one call per segment, once. If
+    _worker ever grew a retry loop around the fallback this is what would fail.
+    """
+    import app.main as main
+    from app import synth as synth_module
+
+    calls: list[str] = []
+    original = synth_module.Synth._speak
+
+    def counting(self, text, *a, **kw):
+        calls.append(text)
+        return original(self, text, *a, **kw)
+
+    monkeypatch.setattr(synth_module.Synth, "_speak", counting)
+
+    # A runner that accepts the job and then never starts it: the owner is at
+    # the machine. max_wait 0 makes the bound fire at once instead of in
+    # fifteen minutes.
+    cfg = RunnerConfig(host="h", max_wait=0.0, poll=0.0)
+    fake = FakeClient(cfg=cfg, segments=99)
+    fake.job = lambda job_id: {"status": "queued", "artefacts": []}
+
+    with runner(fake):
+        created = speech.post("/jobs", json={"text": "One short line.",
+                                             "voice": "default"}).json()
+        finished = _wait(speech, created["id"])
+
+    assert finished["status"] == "done", finished.get("error")
+    assert finished["backend"] == "local", "it did not fall back to this host"
+    assert len(calls) == finished["chunks"] == len(set(calls)), (
+        "the text was spoken more than once locally: " + repr(calls))
+    assert fake.cancelled == ["remote-job-1"], \
+        "the lease was left on the runner for a job nobody is waiting for"
+    assert main.jobs[created["id"]]["status"] == "done"
+
+
+def test_the_local_path_is_untouched_when_no_runner_is_configured(speech,
+                                                                  monkeypatch):
+    """THE ASSERTION THE BRIEF ASKED FOR, made rather than claimed.
+
+    With nothing configured the remote module must not be reached at all: no
+    client, no chooser branch that constructs one, no label on the job. The
+    strong form is to make every entry point into remote.py explode and then run
+    a real job through the real routes; anything that had crept into the local
+    path would raise instead of quietly working.
+    """
+    import app.main as main
+    from app import remote as remote_module
+
+    assert main.state.get("runner") is None
+
+    def forbidden(*_a, **_kw):
+        raise AssertionError("the local path reached into the remote module")
+
+    monkeypatch.setattr(remote_module, "RemoteSynth", forbidden)
+    monkeypatch.setattr(remote_module.RunnerClient, "_request", forbidden)
+    monkeypatch.setattr(main, "RemoteSynth", forbidden)
+
+    created = speech.post("/jobs", json={"text": "One short line, spoken once.",
+                                         "voice": "default"}).json()
+    finished = _wait(speech, created["id"])
+
+    assert finished["status"] == "done"
+    assert "backend" not in finished, \
+        "an unconfigured job labelled itself, so the chooser did something"
+
+
+def test_the_two_backends_speak_through_exactly_the_same_signature():
+    """THE STRUCTURAL PIN, and the one whose absence let the idempotency key be
+    silently unwired for a whole release.
+
+    `_run` calls `speak_segments` positionally on whichever backend it was
+    handed and cannot know which it got. The instant the two signatures differ,
+    either the remote backend has a parameter production can never pass -- which
+    is exactly what happened to `job_id`, and it disabled the no-double-speak
+    guarantee while its own test went on passing -- or `_run` has to grow a
+    branch on backend type, which is the seam collapsing.
+
+    Compared as text so a defaulted extra parameter, the sort that looks
+    harmless, still fails.
+    """
+    import inspect
+
+    from app.synth import Synth
+
+    local = inspect.signature(Synth.speak_segments)
+    remote = inspect.signature(RemoteSynth.speak_segments)
+    assert str(local) == str(remote), (
+        "the backends have drifted apart:\n  local  " + str(local)
+        + "\n  remote " + str(remote))

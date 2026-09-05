@@ -70,7 +70,7 @@ from voice_common.models import OpenAISpeechRequest, Segment
 from . import voices as voice_registry
 from .chunking import chunk_text, speech_seconds
 from .encoders import MEDIA_TYPES, available_formats, encode, make_encoder
-from .remote import RemoteSynth, RunnerClient, RunnerConfig
+from .remote import RemoteSynth, RemoteYield, RunnerClient, RunnerConfig
 from .synth import (SAMPLE_RATE, SUPPORTED_LANGUAGES, Synth, speech_tokens)
 
 OUT_DIR = Path(os.getenv("TTS_OUTPUT_DIR", "/output"))
@@ -263,9 +263,42 @@ def _worker() -> None:
         job_id = queue.get()
         if job_id is None:
             return
-        job = jobs[job_id]
+        job = jobs.get(job_id)
+        if job is None:
+            # Popped between enqueue and here. `jobs[job_id]` would raise
+            # KeyError OUTSIDE the try below, which leaves the while loop and
+            # kills this thread for good: every later job would then sit
+            # `queued` for ever with nothing to run it and no error anywhere.
+            # The sweeper and DELETE both pop, so this is cheap insurance
+            # against a class of defect rather than one known path to it.
+            queue.task_done()
+            continue
         try:
-            _run(_backend_for(job), job)
+            try:
+                _run(_backend_for(job), job)
+            except RemoteYield as yielded:
+                # The GPU's owner has been at their machine longer than the
+                # bound. Speak it here: 0.275x realtime is slow but it finishes,
+                # and it is why the local Synth is never removed.
+                #
+                # SPOKEN ONCE, NOT TWICE. A re-run regenerates the audio, but
+                # the only audio anyone has seen is what went to an SSE stream,
+                # and `delivered` counts exactly that. Zero means nothing left
+                # this host, so re-running is invisible. Above zero means a
+                # client has already been sent part of a file and a second run
+                # would send a second header into the middle of it, so that one
+                # stream is told what happened instead.
+                if yielded.delivered and job.get("stream") is not None:
+                    job.update(status="failed", error=str(yielded),
+                               finished_at=time.time())
+                    job["stream"].put("error", str(yielded))
+                    log.warning("%s: %s, and %d segments were already streamed, "
+                                "so it cannot be restarted", job["id"][:8],
+                                yielded, yielded.delivered)
+                else:
+                    log.info("%s: %s; speaking it locally", job["id"][:8], yielded)
+                    job["backend"] = "local"
+                    _run(state["synth"], job)
         finally:
             # In `finally`, so a failed job wakes its caller with an error
             # rather than leaving it to sit out the whole timeout.
@@ -323,7 +356,21 @@ def _backend_for(job: dict):
                      job["id"][:8], why)
         return local
     job["backend"] = "runner"
-    return RemoteSynth(client)
+
+    def on_wait(waiting: bool) -> None:
+        """Say `queued` again while the runner's owner is at their machine.
+
+        The job really is queued: the lease is sitting on the runner and will
+        resume. Reporting `running` for a quarter of an hour with nothing
+        happening would be a lie a poller cannot see through, and this is the
+        state the whole design calls the NORMAL case rather than an error.
+        """
+        job["status"] = "queued" if waiting else "running"
+
+    # The local job id is the idempotency key, bound here because this is the
+    # one place that has both the job and the client. See RemoteSynth.__init__:
+    # it cannot be a parameter of speak_segments without breaking the local path.
+    return RemoteSynth(client, job["id"], on_wait=on_wait)
 
 
 def _run(synth: Synth, job: dict) -> None:
@@ -418,6 +465,17 @@ def _run(synth: Synth, job: dict) -> None:
                  duration / compute if compute else 0)
         if stream is not None:
             stream.put("done", usage)
+    except RemoteYield:
+        # NOT A FAILURE, so it must not fall into the handler below. The bounded
+        # wait for somebody else's GPU ran out; _worker speaks the job on this
+        # host instead. Re-raised rather than handled here because "which
+        # backend" is _worker's and _backend_for's business, and _run stays a
+        # function that is handed one and uses it.
+        #
+        # The local Synth cannot raise this, so with no runner configured this
+        # clause is unreachable and the path below is byte for byte the one that
+        # ran before any of this existed.
+        raise
     except Exception as exc:  # noqa: BLE001 - surfaced on the job, not raised
         job.update(status="failed", error=str(exc), finished_at=time.time())
         log.exception("%s failed", job["id"][:8])

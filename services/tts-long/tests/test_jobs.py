@@ -277,3 +277,26 @@ def test_chatterbox_is_the_slower_talker_and_the_constant_says_so(speech):
     assert chunking.CHARS_PER_SECOND == 12.0
     # The measurement this was taken from, within the rounding of one sample.
     assert abs(chunking.speech_seconds(449) - 37.4) < 2.0
+
+
+def test_a_job_that_vanished_before_it_ran_does_not_kill_the_worker(speech):
+    """THE DEFECT THIS PREVENTS: one lost id silently stopping every later job.
+
+    `jobs` is read from the event loop and from the worker thread while DELETE
+    and the sweeper both pop from it. The worker used to read `jobs[job_id]`
+    OUTSIDE its try block, so an id whose row had gone raised KeyError straight
+    out of the `while True` loop and ended the only thread that runs anything.
+    Nothing logged it and nothing restarted it: every job submitted afterwards
+    would sit at `queued` for ever, and the service would look alive.
+
+    So the failure is deliberately provoked, and then a real job has to prove
+    the queue still works.
+    """
+    from app import main
+
+    main.queue.put("a-job-id-that-is-not-in-the-dict")
+
+    job = speech.post("/jobs", json={"text": "One short line, spoken once.",
+                                     "voice": "default"}).json()
+    assert _wait(speech, job["id"])["status"] == "done", \
+        "the worker thread died on the missing id and never ran this"

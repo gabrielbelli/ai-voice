@@ -44,12 +44,20 @@ A YIELD IS NOT A FAILURE, AND THIS IS THE PART MOST LIKELY TO BE GOT WRONG
 
 The runner gives the GPU back the instant its owner touches the machine. Under
 six seconds for a known game. That is the NORMAL case, several times an evening,
-and the job comes back as `queued` rather than `failed`. Treating it as an error
-would mean a client that concludes the runner is broken every time somebody
-launches a game.
+and it is not an error at any level: the job is WAITED OUT here, inside
+`speak_segments`, and reported as `queued` on the local job while it waits.
 
-So `RemoteYield` is raised as its own type, and the caller decides. It is not an
-exception in the sense of something going wrong.
+Waiting rather than restarting is what makes "a job is never spoken twice" a
+property rather than a hope, and it closes three separate routes to it at once.
+The lease on the runner survives under the same idempotency key, so segments it
+already produced are not produced again. The `seen` set means segments already
+collected are not collected again. And because the call never returns, `_run` is
+never re-entered, so no encoder is rebuilt and no SSE client receives a second
+file header half way through a stream.
+
+`RemoteYield` is therefore raised for one thing only: the bounded wait running
+out, which means the owner has been at the machine long enough that the local
+CPU would have finished. It says "speak this here instead", not "this failed".
 """
 
 from __future__ import annotations
@@ -80,13 +88,24 @@ class RemoteUnavailable(RuntimeError):
 
 
 class RemoteYield(RuntimeError):
-    """The runner handed the GPU back to its owner mid-job.
+    """The bounded wait for the GPU ran out. Speak it locally instead.
 
-    NOT A FAILURE. The job is still queued on the runner and will resume when
-    the owner leaves; the caller may wait, retry, or fall back to the local CPU
-    path. What it must not do is mark the job failed, because this happens every
-    time somebody sits down at that machine.
+    NOT A FAILURE, and it must never reach a caller as one. A short yield is
+    invisible above this line: it is waited out inside `speak_segments`. This is
+    raised only when the owner has been at their machine for longer than
+    `max_wait`, at which point the right answer is the local CPU path, which is
+    slow but always there.
+
+    `delivered` is how many segments had already been handed to `on_chunk`
+    before giving up, and it is on the exception because it decides whether
+    speaking the job again locally is safe. Zero means nothing has left this
+    host and a local re-run is invisible to everyone. Anything else means an SSE
+    client has already been sent audio that a re-run would send again.
     """
+
+    def __init__(self, message: str, delivered: int = 0) -> None:
+        super().__init__(message)
+        self.delivered = delivered
 
 
 @dataclass(frozen=True)
@@ -337,8 +356,30 @@ class RemoteSynth:
     benefit to the remote one.
     """
 
-    def __init__(self, client: RunnerClient) -> None:
+    def __init__(self, client: RunnerClient, job_id: str,
+                 on_wait: Callable[[bool], None] | None = None) -> None:
+        """The job id is bound HERE, not passed to speak_segments.
+
+        THE DEFECT THIS PREVENTS, and it is the one that silently disarms the
+        whole no-double-speak guarantee. `speak_segments` must have byte for
+        byte the signature `Synth.speak_segments` has, because `_run` calls it
+        positionally and knows nothing about which backend it got. An extra
+        `job_id=` keyword therefore CANNOT be supplied by `_run` without
+        breaking the local path, so it was never supplied: every real job fell
+        through to an `anon-<clock>` idempotency key that was different on every
+        attempt. The tests passed because they called the method directly and
+        handed it the keyword that production had no way to pass.
+
+        Binding it to the instance is what makes the key the local job id in the
+        one place that has both: `_backend_for`, which is handed the job.
+        """
         self._client = client
+        self._job_id = job_id
+        # Called with True when the runner hands the GPU back and this client
+        # starts waiting, and False when it resumes. It is how a local job can
+        # read `queued` again while somebody plays a game, rather than sitting
+        # at `running` for a quarter of an hour with nothing happening.
+        self._on_wait = on_wait
 
     @property
     def loaded(self) -> bool:
@@ -354,16 +395,20 @@ class RemoteSynth:
                        temperature: float,
                        reference: str | None = None,
                        on_chunk: Callable[[np.ndarray], None] | None = None,
-                       cancelled: Callable[[], bool] | None = None,
-                       job_id: str | None = None) -> Spoken:
+                       cancelled: Callable[[], bool] | None = None) -> Spoken:
         """Speak on the runner, delivering each segment as it lands.
 
         The chunking already happened. `segments` is the output of `chunk_text`,
         which knows about the 40-second `generate()` ceiling measured on this
         stack; the runner carries no text policy at all and must not learn any.
+
+        The signature is exactly `Synth.speak_segments`. Nothing may be added to
+        it, including something as harmless-looking as a job id: `_run` calls it
+        positionally on whichever backend it was handed, so a parameter the
+        local Synth does not have is a parameter production can never pass.
         """
         cfg = self._client.cfg
-        key = job_id or f"anon-{time.time_ns():x}"
+        key = self._job_id
 
         params: dict = {
             # TEXT ONLY. The pauses stay here, and that is the whole reason
@@ -392,6 +437,7 @@ class RemoteSynth:
         parts: list[np.ndarray] = []
         total_tokens = 0
         pauses = [pause for _, pause in segments]
+        waiting = False
 
         while True:
             if cancelled is not None and cancelled():
@@ -432,19 +478,44 @@ class RemoteSynth:
                     f"the runner failed the job: {record.get('error', 'no reason given')}")
             if status == "cancelled":
                 break
-            if status == "queued" and parts:
-                # Was running, is queued again: the owner came back and the
-                # runner handed the GPU over. The NORMAL case. The lease is
-                # still there and will resume, but this host has to decide
-                # whether to wait, and that is not a decision for this method.
-                raise RemoteYield(
-                    f"the runner yielded the GPU after {len(parts)} of "
-                    f"{len(segments)} segments; the job is still queued")
+
+            # WAS RUNNING, IS QUEUED AGAIN: the owner came back and the runner
+            # handed the GPU over inside six seconds. THE NORMAL CASE, several
+            # times an evening, and it is waited out rather than raised.
+            #
+            # Waiting is what makes "a job cannot be spoken twice" true rather
+            # than aspirational. The lease on the runner is still there under
+            # the same idempotency key, so the segments it already produced are
+            # not produced again; `seen` means the ones already collected are
+            # not collected again; and because this call never returns, `_run`
+            # is never re-entered, so no encoder is rebuilt and no SSE client is
+            # sent a second RIFF header half way through a stream. Every one of
+            # those would have been a way to speak something twice.
+            #
+            # Restarting on a yield would have been the natural-looking choice
+            # and is wrong in all three of those ways at once.
+            if status == "queued" and parts and not waiting:
+                waiting = True
+                log.info("the runner yielded the GPU after %d of %d segments; "
+                         "waiting for its owner to finish", len(parts), len(segments))
+                if self._on_wait is not None:
+                    self._on_wait(True)
+            elif status == "running" and waiting:
+                waiting = False
+                if self._on_wait is not None:
+                    self._on_wait(False)
+
             if time.monotonic() > deadline:
+                # THE BOUND, and the only thing that still raises. Waiting out a
+                # six-second yield is right; waiting out an entire evening of
+                # gaming is not, because the local CPU would have finished long
+                # ago at 0.275x realtime. Withdraw the lease on the way out so
+                # the runner is not left holding a job nobody is waiting for.
                 self._client.cancel(remote_id)
                 raise RemoteYield(
-                    f"the runner did not start within {cfg.max_wait:.0f}s; "
-                    "its owner is probably using the machine")
+                    f"the runner produced {len(parts)} of {len(segments)} "
+                    f"segments within {cfg.max_wait:.0f}s; its owner is using "
+                    "the machine", delivered=len(parts))
             time.sleep(cfg.poll)
 
         audio = splice([(p, 0.0) for p in parts]) if parts else np.zeros(0, dtype=np.float32)

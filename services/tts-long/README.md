@@ -489,6 +489,21 @@ then speaks it on the CPU instead.
 `app/synth.py` is therefore never going anywhere. It is the fallback for exactly
 the case the runner is designed to create.
 
+### Nothing is ever spoken twice
+
+The obvious response to the GPU going away is to retry, and it is how the same
+sentence gets generated twice. A short yield is **waited out** rather than
+retried, which closes the three routes to that at once: the lease on the runner
+survives under an idempotency key that is the local job id, so it does not
+regenerate what it already made; the client does not collect an artefact it
+already holds; and `_run` is never re-entered, so no encoder is rebuilt and no
+open SSE stream is sent a second file header half way through.
+
+Only the bounded wait running out ends the remote attempt, and the local re-run
+that follows happens **only when nothing has been sent to a stream yet**. A job
+that had already streamed audio is told what happened instead of being replayed
+from the beginning.
+
 ### The three things that stay here
 
 **Encoding**, because `test_wav_differs_only_in_the_two_riff_size_fields` and
