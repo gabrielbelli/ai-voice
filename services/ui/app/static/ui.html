@@ -23,8 +23,17 @@
 -->
 <style>
 /* ------------------------------------------------------------- tokens -- */
+/* THE PAGE WAS NOT UGLY, IT WAS UNRANKED. Five font sizes one pixel apart
+   (15/14/13/12/11), one leading for everything, letter-spacing declared twice
+   in the whole sheet, and one surface treatment doing seven jobs. Nothing said
+   what mattered more than what else, so the eye had to read every string to
+   find the one it wanted -- and the transcript, the entire product of the
+   Transcribe tab, rendered SMALLER than the drop-zone prompt above it.
+   What follows is one type scale, one spacing scale, and three surface
+   weights. Every dimension is in rem so a larger OS text setting scales the
+   layout with the text instead of overflowing it. */
 :root{
-  --bg:#f6f7f9; --panel:#fff; --line:#dfe3e8; --ink:#14181d; --dim:#5b6672;
+  --bg:#f6f7f9; --panel:#fff; --line:#dfe3e8; --ink:#14181d; --dim:#525c68;
   --accent:#2f6fed; --accent-ink:#fff; --warn:#8a5300; --warn-bg:#fff5e0;
   --bad:#a3231d; --bad-bg:#fdeceb; --good:#1c6b3f; --good-bg:#e8f5ed;
   /* The karaoke highlight, which is deliberately NOT --accent: --accent is
@@ -34,35 +43,95 @@
   --mark-bg:#ffe9a8; --mark-ink:#14181d;
   --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   --radius:10px;
+  /* SURFACE 1, light: carried by a soft two-stop shadow and no border. In the
+     dark block below it is carried by a border and an inset top highlight
+     instead, because a drop shadow does not read on #1b1f26 and pretending it
+     does is why dark modes look flat. One .card rule, two materials. */
+  --card-line:transparent;
+  --lift:0 1px 2px rgba(0,0,0,.04), 0 1px 0 rgba(0,0,0,.02);
+  --scrim:rgba(0,0,0,.4);
+  /* TYPE SCALE: 22 / 17 / 14 / 12 / 11. The old scale was 15/14/13/12/11 --
+     four of its five steps one pixel apart, which is not a hierarchy, it is a
+     rounding error. --t-display is the brand, which had no size of its own at
+     all and rendered as bold body text. */
+  --t-display:1.375rem; --t-title:1.0625rem; --t-body:.875rem;
+  --t-label:.75rem; --t-micro:.6875rem;
+  /* SPACING, six steps, replacing 28 inline style="margin-top:Npx". */
+  --s1:.25rem; --s2:.5rem; --s3:.75rem; --s4:1rem; --s5:1.5rem; --s6:2.5rem;
+  /* Was max-width:920px, written out twice. Font-relative so the measure
+     grows with the reader's text size rather than cramping it. */
+  --measure:57.5rem;
+  /* ONE SPRING, CRITICALLY DAMPED (damping 1.0, response .35 s), sampled from
+     x(t)=1-(1+wt)e^(-wt) at thirteen points. Damping 1.0 and no bounce
+     anywhere on this page, deliberately: nothing here is dragged, flicked or
+     swiped, so no gesture carries momentum to project forward, and overshoot
+     on a control that was merely clicked is the misuse the reference warns
+     about. */
+  --spring:linear(0, .1804, .4553, .6712, .8123, .8967, .9445, .9708, .9848,
+    .9922, .996, .998, 1);
 }
 @media (prefers-color-scheme:dark){
   :root{
-    --bg:#14171c; --panel:#1b1f26; --line:#2c323b; --ink:#e6eaef; --dim:#98a3b0;
+    --bg:#14171c; --panel:#1b1f26; --line:#2c323b; --ink:#e6eaef; --dim:#a2adba;
     --accent:#5a8dff; --accent-ink:#0b1220; --warn:#ffce7a; --warn-bg:#3a2f16;
     --bad:#ff9d97; --bad-bg:#3a1f1d; --good:#8ee0ae; --good-bg:#16301f;
     --mark-bg:#54450f; --mark-ink:#ffeeb8;
+    --card-line:var(--line);
+    --lift:inset 0 1px 0 rgba(255,255,255,.04);
+    --scrim:rgba(0,0,0,.55);
   }
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);
-  font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  font:var(--t-body)/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  font-optical-sizing:auto}
+/* TRACKING IS SIZE-SPECIFIC, which this sheet used to have essentially none
+   of: negative on display type, zero on body, positive on small. Leading runs
+   the other way -- 1.15 display, 1.25 title, 1.55 body, 1.45 label, 1.3 micro
+   -- with body deliberately looser than the 12px labels, because 14px is the
+   size read continuously and a hint is one or two lines. */
 h1,h2,h3{margin:0;font-weight:600}
-h2{font-size:15px}
-h3{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}
+h2{font-size:var(--t-title);line-height:1.25;letter-spacing:-.011em}
+h3{font-size:var(--t-label);line-height:1.3;color:var(--dim);
+  text-transform:uppercase;letter-spacing:.07em}
 a{color:var(--accent)}
 code,.num{font-family:var(--mono)}
-.wrap{max-width:920px;margin:0 auto;padding:0 16px 64px}
+/* The dictation clock and the clone countdown both repaint every 100 ms, and
+   proportional digits made them jitter sideways as the glyphs changed width. */
+.num,.ring,.job .id,.facts dd,.slider output{font-variant-numeric:tabular-nums}
+.wrap{max-width:var(--measure);margin:0 auto;padding:var(--s5) var(--s4) var(--s6)}
 
 /* ------------------------------------------------------------- header -- */
-header{position:sticky;top:0;z-index:5;background:var(--panel);
-  border-bottom:1px solid var(--line)}
-.bar{max-width:920px;margin:0 auto;padding:10px 16px;display:flex;
-  gap:12px;align-items:center;flex-wrap:wrap}
-.brand{font-weight:700;letter-spacing:-.01em}
-.brand small{font-weight:400;color:var(--dim);margin-left:6px}
+/* THE ONE PLACE backdrop-filter EARNS ITS KEEP. The header is already sticky
+   and the tabs now live in it, so content genuinely scrolls underneath. The
+   opaque declaration comes FIRST on purpose: an engine without color-mix drops
+   the second line and keeps a solid bar, where the other order would leave a
+   fully transparent sticky header over moving text. Nothing else on this page
+   gets a backdrop-filter -- stacked translucency is where legibility dies. */
+header{position:sticky;top:0;z-index:5;
+  background:var(--panel);
+  background:color-mix(in srgb, var(--bg) 72%, transparent);
+  -webkit-backdrop-filter:blur(20px) saturate(180%);
+  backdrop-filter:blur(20px) saturate(180%);
+  transition:box-shadow .2s ease}
+/* A SCROLL EDGE, NOT A DIVIDER: the line exists only while something is
+   actually underneath it. Toggled from a passive scroll listener at 4px. */
+body.scrolled header{box-shadow:0 1px 0 var(--line),
+  0 8px 24px -16px rgba(0,0,0,.25)}
+/* nowrap, and the brand truncates: .bar used to wrap, and with the tabs in it
+   a narrow viewport would grow the sticky header to two rows and eat the
+   space this change exists to give back. */
+.bar{max-width:var(--measure);margin:0 auto;padding:var(--s2) var(--s4);
+  display:flex;gap:var(--s3);align-items:center;flex-wrap:nowrap}
+.brand{font-size:var(--t-display);font-weight:700;line-height:1.15;
+  letter-spacing:-.021em;min-width:0;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis}
+.brand small{font-size:var(--t-label);font-weight:400;color:var(--dim);
+  margin-left:var(--s2);letter-spacing:.005em}
 .spacer{flex:1}
-.pills{display:flex;gap:6px;flex-wrap:wrap}
-.pill{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);
+.pills{display:flex;gap:var(--s1);flex-wrap:wrap}
+.pill{font-size:var(--t-micro);line-height:1.3;letter-spacing:.02em;
+  padding:2px 8px;border-radius:999px;border:1px solid var(--line);
   background:var(--bg);color:var(--dim);white-space:nowrap}
 .pill.ok{background:var(--good-bg);color:var(--good);border-color:transparent}
 .pill.bad{background:var(--bad-bg);color:var(--bad);border-color:transparent}
@@ -72,108 +141,242 @@ header{position:sticky;top:0;z-index:5;background:var(--panel);
 input,select,textarea,button{font:inherit;color:inherit}
 input[type=text],input[type=password],input[type=number],select,textarea{
   background:var(--bg);border:1px solid var(--line);border-radius:8px;
-  padding:7px 9px;width:100%}
-textarea{resize:vertical;min-height:120px;font-family:inherit}
+  padding:.4375rem .5625rem;width:100%}
+textarea{resize:vertical;min-height:7.5rem;font-family:inherit;line-height:1.55}
 button{background:var(--panel);border:1px solid var(--line);border-radius:8px;
-  padding:7px 13px;cursor:pointer}
+  padding:.4375rem .8125rem;cursor:pointer;
+  transition:transform .12s var(--spring),border-color .12s ease,opacity .12s ease}
 button:hover:not(:disabled){border-color:var(--accent)}
+/* FEEDBACK ON PRESS, NOT ON RELEASE. :active fires on pointerdown, which is
+   the whole of the reference's response rule for three lines of CSS. The page
+   had none: every button was visually inert until its handler finished. */
+button:active:not(:disabled){transform:scale(.975)}
+/* .seg{overflow:hidden} clips a scaling child, so a pressed segment would eat
+   its own edge inside the shared border. */
+.seg button:active:not(:disabled){transform:none}
+/* A .link is inline text inside a sentence; scaling it reads as a wobble. */
+button.link:active:not(:disabled){transform:none;opacity:.6}
 button:disabled{opacity:.5;cursor:not-allowed}
-button.primary{background:var(--accent);color:var(--accent-ink);border-color:transparent;
-  font-weight:600}
-button.small{padding:3px 9px;font-size:12px}
-button.link{background:none;border:none;color:var(--accent);padding:2px 4px;
-  text-decoration:underline}
-label{display:block;font-size:12px;color:var(--dim);margin-bottom:4px}
-.row{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
-.row>*{flex:1;min-width:130px}
+/* STANDING RULE: no selector may ever set display:none or visibility:hidden on
+   a disabled control. chosenFormat(), granularities() and segments() read
+   .disabled and .hidden as the authority for what to send, and a control the
+   current route cannot carry is greyed WITH THE REASON beside it -- a control
+   that vanishes takes its explanation with it. Fifteen defects of that shape
+   were fixed once; this is the fence. */
+input:disabled,select:disabled,textarea:disabled{opacity:.5;cursor:not-allowed;
+  background:var(--bg)}
+/* A GREYED CONTROL GREYS AS A WHOLE FIELD. syncTranscribeControls disables the
+   control and left its label and hint at full strength above it, which reads
+   as "the label is live and the control is broken" rather than as one
+   unavailable thing. Pure CSS; the :disabled floor above still greys the
+   control on its own if this markup nesting is ever restructured. */
+.grid2 > div:has(:disabled) > label,
+.grid2 > div:has(:disabled) > .hint{opacity:.55}
+/* The page had NO :focus-visible styling at all and relied on whatever the UA
+   drew over a 1px border, which is close to invisible in several browsers.
+   :where() so it costs no specificity, and scoped by tag so it can never reach
+   .cue -- those transcript spans are deliberately not focusable. */
+:where(button,select,input,textarea,summary,[role=tab]):focus-visible{
+  outline:2px solid var(--accent);outline-offset:2px}
+label{display:block;font-size:var(--t-label);line-height:1.45;color:var(--dim);
+  margin-bottom:var(--s1);letter-spacing:.005em}
+.row{display:flex;gap:var(--s2) var(--s3);align-items:flex-end;flex-wrap:wrap}
+.row>*{flex:1;min-width:8.125rem}
 .row>.tight{flex:0 0 auto;min-width:0}
-.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
-.seg button{border:none;border-radius:0;background:var(--panel);padding:6px 14px}
+/* GROUPING: two field-level controls and one primary action used to sit on one
+   baseline, so Transcribe read as a fourth segment of the control beside it.
+   The fields are their own row now, --s2 inside each label+control pair and
+   --s5 between the pairs, so proximity says which label owns which control;
+   the action stands alone below. */
+.row.fields{gap:var(--s5);align-items:flex-start}
+.row.fields label{margin-bottom:var(--s2)}
+.actions{display:flex;gap:var(--s2);flex-wrap:wrap;align-items:center}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;
+  overflow:hidden}
+.seg button{border:none;border-radius:0;background:var(--panel);
+  padding:.375rem .875rem}
 .seg button[aria-pressed=true]{background:var(--accent);color:var(--accent-ink)}
-.tabs{display:flex;gap:4px;margin:16px 0 12px}
-.tabs button{border-radius:999px}
+.tabs{display:flex;gap:var(--s1);flex:0 0 auto}
+.tabs button{border-radius:999px;background:transparent;border-color:transparent;
+  padding:var(--s1) var(--s3);font-size:var(--t-label);letter-spacing:.005em}
+.tabs button:active:not(:disabled){transform:scale(.96)}
 .tabs button[aria-selected=true]{background:var(--accent);color:var(--accent-ink);
   border-color:transparent;font-weight:600}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
-  padding:14px;margin-bottom:12px}
-.hint{font-size:12px;color:var(--dim);margin-top:6px}
-.note{font-size:12px;border-radius:8px;padding:8px 10px;margin-top:8px}
+/* The running-job count, readable from the other two tabs without stopping to
+   parse a parenthesis. :not(:empty) because renderJobs writes "" when nothing
+   is queued and an empty chip is a dot that means nothing. */
+#jobcount:not(:empty){display:inline-block;min-width:1.35em;margin-left:.35em;
+  padding:0 .3em;border-radius:999px;background:var(--accent);
+  color:var(--accent-ink);font-size:var(--t-micro);line-height:1.4;
+  letter-spacing:.02em;text-align:center;font-variant-numeric:tabular-nums}
+.tabs button[aria-selected=true] #jobcount:not(:empty){
+  background:var(--accent-ink);color:var(--accent)}
+/* SURFACE 1. No border in the light theme: the shadow does the separating,
+   and a 1px line plus a shadow is two mechanisms for one job. */
+.card{background:var(--panel);border:1px solid var(--card-line);
+  border-radius:var(--radius);padding:var(--s4);margin-bottom:var(--s3);
+  box-shadow:var(--lift)}
+/* ONE OWL RULE replacing the inline margin-tops. The :empty guard is not
+   optional: #stt-note, #speak-note, #codeswitch and #clipnote are empty most
+   of the time and would otherwise open a gap where nothing is. The label guard
+   keeps a label welded to the control it names. */
+.card > * + *{margin-top:var(--s3)}
+.card > *:empty{margin-top:0}
+.card > label + *{margin-top:0}
+.card > details{margin-top:var(--s5)}
+.stack-lg > * + *{margin-top:var(--s4)}
+/* RECESSED, not a second raised card inside the first. The clone sheet is a
+   sub-task within Speak and should read as a well, which is also why its
+   inline background:var(--bg) is gone -- the CSS says it now. */
+.card.well{background:var(--bg);border:1px solid var(--line);box-shadow:none}
+.hint{font-size:var(--t-label);line-height:1.45;letter-spacing:.005em;
+  color:var(--dim);margin-top:var(--s2)}
+.note{font-size:var(--t-label);line-height:1.45;letter-spacing:.005em;
+  border-radius:8px;padding:var(--s2) var(--s3);margin-top:var(--s2)}
 .note.warn{background:var(--warn-bg);color:var(--warn)}
 .note.bad{background:var(--bad-bg);color:var(--bad)}
 .note.ok{background:var(--good-bg);color:var(--good)}
-.note.flat{background:var(--bg);color:var(--dim)}
-.note .acts{margin-top:8px;display:flex;gap:8px;flex-wrap:wrap}
+/* MARGINALIA, NOT AN ALERT. The four institutional-memory notes in the STT
+   panel are there so nobody re-adds denoise or re-copies Resemble's slider
+   ranges. As filled boxes they read as four warnings about something being
+   wrong; as a left rule they read as what they are. Not one word is changed. */
+.note.flat{background:none;color:var(--dim);border-left:2px solid var(--line);
+  border-radius:0;padding:var(--s1) 0 var(--s1) var(--s3)}
+.note .acts{margin-top:var(--s2);display:flex;gap:var(--s2);flex-wrap:wrap}
 [hidden]{display:none !important}
 
 /* ------------------------------------------------------------- expert -- */
-details{border:1px solid var(--line);border-radius:var(--radius);margin-top:12px;
-  background:var(--panel)}
-details>summary{cursor:pointer;padding:9px 12px;font-size:13px;font-weight:600;
-  list-style:none}
+/* THE EXPERT PANELS STOP COMPETING. They used to be full cards -- panel
+   background, border, radius -- which gave the advanced path the same visual
+   weight as the primary one. Same information, same one click away; it just no
+   longer looks like the point of the tab. The primary path sits on a raised
+   surface, the advanced path sits on the page itself. */
+details{border:0;border-top:1px solid var(--line);border-radius:0;
+  background:none;margin-top:var(--s5)}
+details>summary{cursor:pointer;padding:var(--s3) 0;font-size:var(--t-label);
+  font-weight:600;color:var(--dim);letter-spacing:.005em;list-style:none}
 details>summary::-webkit-details-marker{display:none}
-details>summary::before{content:"▸ ";color:var(--dim)}
-details[open]>summary::before{content:"▾ "}
-details .body{padding:0 12px 12px;border-top:1px solid var(--line);padding-top:12px}
+/* ONE GLYPH THAT TURNS, rather than two different characters swapped. A
+   rotation is an affordance -- it says the thing moves; a character swap is
+   two states with nothing between them. Kept under reduced motion: a 1em
+   glyph rotating in place is non-vestibular, and it IS the affordance. */
+details>summary::before{content:"\203A";display:inline-block;width:1em;
+  color:var(--dim);transition:transform .18s var(--spring)}
+details[open]>summary{color:var(--ink)}
+details[open]>summary::before{transform:rotate(90deg)}
+details .body{padding:0 0 var(--s4)}
 /* The job's text, inside a job row rather than at the bottom of a tab: lighter
    than the Expert panels, and its summary is the preview itself rather than a
    heading, so the row identifies itself while collapsed. Normal weight for the
    same reason -- it is a quotation, not a label. */
-details.jobtext{margin-top:8px;background:transparent;border-color:var(--line)}
-details.jobtext>summary{font-weight:400;color:var(--dim);font-size:12px;
-  padding:6px 10px}
-details.jobtext .body{padding:8px 10px 10px;font-size:13px;white-space:pre-wrap;
-  max-height:14em;overflow:auto}
-.slider{display:grid;grid-template-columns:1fr auto;gap:6px;align-items:center}
+details.jobtext{margin-top:var(--s2);border-top:0;background:transparent}
+details.jobtext>summary{font-weight:400;color:var(--dim);
+  font-size:var(--t-label);padding:var(--s1) 0}
+details.jobtext .body{padding:var(--s2) 0 var(--s2) var(--s3);
+  border-left:2px solid var(--line);font-size:var(--t-body);line-height:1.7;
+  white-space:pre-wrap;max-height:14em;overflow:auto}
+.slider{display:grid;grid-template-columns:1fr auto;gap:var(--s2);
+  align-items:center}
 .slider input[type=range]{width:100%}
-.slider output{font-family:var(--mono);font-size:12px;color:var(--dim)}
-.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+.slider output{font-family:var(--mono);font-size:var(--t-label);color:var(--dim)}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(12.5rem,1fr));
+  gap:var(--s3)}
 
 /* ---------------------------------------------------------- drop zone -- */
-.drop{border:2px dashed var(--line);border-radius:var(--radius);padding:22px 14px;
-  text-align:center;background:var(--panel);transition:border-color .12s}
+/* .drop.over swapped the background as well as the border but only the border
+   was in the transition list, so the drag state half-changed. */
+.drop{border:2px dashed var(--line);border-radius:var(--radius);
+  padding:var(--s5) var(--s3);text-align:center;background:var(--panel);
+  transition:border-color .12s ease,background-color .12s ease}
 .drop.over{border-color:var(--accent);background:var(--bg)}
-.drop .big{font-weight:600;margin-bottom:4px}
-.filechip{display:inline-flex;gap:8px;align-items:center;background:var(--bg);
-  border:1px solid var(--line);border-radius:999px;padding:4px 6px 4px 12px;
-  font-size:13px;margin-top:10px}
+.drop .big{font-weight:600;margin-bottom:var(--s1)}
+.filechip{display:inline-flex;gap:var(--s2);align-items:center;
+  background:var(--bg);border:1px solid var(--line);border-radius:999px;
+  padding:4px 6px 4px 12px;font-size:var(--t-body);margin-top:var(--s2)}
 
 /* ---------------------------------------------------------- progress --- */
-.bar-track{height:6px;border-radius:999px;background:var(--line);overflow:hidden;
-  margin:8px 0 4px}
-.bar-fill{height:100%;background:var(--accent);width:0;transition:width .4s linear}
-.job{border:1px solid var(--line);border-radius:var(--radius);padding:11px 12px;
-  margin-bottom:8px;background:var(--panel)}
+.bar-track{height:6px;border-radius:999px;background:var(--line);
+  overflow:hidden;margin:var(--s2) 0 var(--s1)}
+/* transform, NOT width. Progress animated a layout property on a two-second
+   timer; scaleX moves it to the compositor. Both write sites are template
+   literals inside an innerHTML string -- renderJobs() and the MeTube download
+   bar -- and the 95% cap is now a 0.95 cap. */
+.bar-fill{height:100%;width:100%;background:var(--accent);
+  transform:scaleX(0);transform-origin:left}
+.job{border:1px solid var(--line);border-radius:var(--radius);
+  padding:var(--s3);margin-bottom:var(--s2);background:var(--panel)}
 .job.expired{opacity:.55}
-.job .top{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
-.job .id{font-family:var(--mono);font-size:11px;color:var(--dim)}
-.job .acts{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
-.status{font-size:11px;padding:1px 7px;border-radius:999px;background:var(--bg);
+.job .top{display:flex;gap:var(--s2);align-items:baseline;flex-wrap:wrap}
+.job .id{font-family:var(--mono);font-size:var(--t-micro);letter-spacing:.02em;
+  color:var(--dim)}
+.job .acts{display:flex;gap:var(--s1);margin-top:var(--s2);flex-wrap:wrap}
+.status{font-size:var(--t-micro);line-height:1.3;letter-spacing:.02em;
+  padding:1px 7px;border-radius:999px;background:var(--bg);
   border:1px solid var(--line)}
 .status.running{background:var(--warn-bg);color:var(--warn);border-color:transparent}
 .status.done{background:var(--good-bg);color:var(--good);border-color:transparent}
 .status.failed{background:var(--bad-bg);color:var(--bad);border-color:transparent}
 
 /* -------------------------------------------------------------- modal -- */
+/* SURFACE 2, and the only one. This is the page's one blocking task, so it is
+   the only thing that gets a dimming scrim -- and the scrim is blurred rather
+   than flat black, so the surface MATERIALISES: blur and scale move together
+   on the way in, which is what makes it read as a pane of glass arriving
+   rather than a rectangle fading up. Written as longhands because the
+   transition shorthand carrying `allow-discrete` is dropped whole by older
+   parsers; without @starting-style a browser gets today's instant dialog. */
 dialog{border:1px solid var(--line);border-radius:14px;background:var(--panel);
-  color:var(--ink);padding:0;max-width:520px;width:calc(100% - 32px)}
-dialog::backdrop{background:rgba(0,0,0,.45)}
-dialog .head{padding:16px 18px 0}
-dialog .body{padding:12px 18px}
-dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-end;
-  flex-wrap:wrap}
-.facts{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:13px;
-  margin:10px 0}
+  color:var(--ink);padding:0;max-width:32.5rem;width:calc(100% - 2rem);
+  box-shadow:0 24px 64px -24px rgba(0,0,0,.45);
+  opacity:0;transform:scale(.96);
+  transition-property:opacity,transform,overlay,display;
+  transition-duration:.28s;transition-timing-function:var(--spring);
+  transition-behavior:allow-discrete}
+dialog[open]{opacity:1;transform:none}
+@starting-style{dialog[open]{opacity:0;transform:scale(.96)}}
+dialog::backdrop{background-color:rgba(0,0,0,0);
+  -webkit-backdrop-filter:blur(0px);backdrop-filter:blur(0px);
+  transition-property:background-color,backdrop-filter,overlay,display;
+  transition-duration:.28s;transition-behavior:allow-discrete}
+dialog[open]::backdrop{background-color:var(--scrim);
+  -webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+@starting-style{dialog[open]::backdrop{background-color:rgba(0,0,0,0);
+  -webkit-backdrop-filter:blur(0px);backdrop-filter:blur(0px)}}
+dialog .head{padding:var(--s4) var(--s5) 0}
+dialog .body{padding:var(--s3) var(--s5)}
+dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
+  justify-content:flex-end;flex-wrap:wrap}
+.facts{display:grid;grid-template-columns:auto 1fr;gap:var(--s1) var(--s4);
+  font-size:var(--t-body);margin:var(--s3) 0}
 .facts dt{color:var(--dim)}
 .facts dd{margin:0;font-family:var(--mono)}
 
 /* --------------------------------------------------------- transcript -- */
+/* PROMOTED FROM 13px TO 14px, which corrects an inversion: the longest
+   continuously-read text on the page, and the entire product of the tab, was
+   the second-smallest thing on it. 1.7 leading and not the body's 1.55 for a
+   specific reason -- .cue.on carries a 2px underline at a 2px offset, and at
+   1.55 that underline sat in the descenders of the line below, on the one
+   surface where losing your place costs a five-thousand-word transcript.
+   max-height in em rather than px so the pane holds a constant number of lines
+   and grows with the reader's text setting, as details.jobtext .body already
+   did. */
 .out{white-space:pre-wrap;word-break:break-word;background:var(--bg);
-  border:1px solid var(--line);border-radius:8px;padding:11px;min-height:60px;
-  max-height:420px;overflow:auto;font-size:13px}
+  border:1px solid var(--line);border-radius:8px;padding:var(--s3);
+  min-height:3.75rem;max-height:26em;overflow:auto;font-size:var(--t-body);
+  line-height:1.7;letter-spacing:.003em}
+/* transform, not width, for the same reason as .bar-fill -- but more so: this
+   is written from a 100 ms interval on a signal that moves faster than that,
+   and it was a layout property every tick. Painted from rAF, with instant
+   attack and exponential release. Deliberately NOT a spring: a level meter
+   that overshoots reports a peak that was never in the signal, which is a
+   control telling a lie about the microphone. */
 .meter{height:8px;border-radius:999px;background:var(--line);overflow:hidden;
-  margin-top:8px}
-.meter div{height:100%;background:var(--good);width:0}
-.ring{font-family:var(--mono);font-size:26px;font-weight:700}
+  margin-top:var(--s2)}
+.meter div{height:100%;width:100%;background:var(--good);
+  transform:scaleX(0);transform-origin:0 50%}
+.ring{font-family:var(--mono);font-size:1.625rem;line-height:1.15;
+  font-weight:700;letter-spacing:-.021em}
 
 /* ------------------------------------------------------ playback ------ */
 /* The playback-speed picker is a SELECT and not a range, unlike the synthesis
@@ -183,7 +386,7 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
    otherwise create -- so they are given different shapes as well as different
    names. The second is that listening rates are chosen from a short list;
    nobody wants 1.07x, and a range invites it. */
-.rate{width:auto;min-width:96px;padding-right:6px}
+.rate{width:auto;min-width:6rem;padding-right:6px}
 
 /* -------------------------------------------------------- karaoke ----- */
 /* THREE REDUNDANT CHANNELS, NOT ONE: background, weight, and an underline.
@@ -228,10 +431,59 @@ dialog .foot{padding:12px 18px 16px;display:flex;gap:8px;justify-content:flex-en
    useful about what it needs to be readable against -- the contrast partner is
    whatever frame is behind it, which is why the plate is opaque rather than
    the text merely coloured. box-decoration-break keeps the plate around each
-   wrapped line instead of one rectangle behind the whole block. */
+   wrapped line instead of one rectangle behind the whole block. The size stays
+   a literal 15px and must NOT become a token: it is sized against the picture,
+   not against the page's text setting. Weight and tracking are up a step
+   because small white type over a moving frame needs both. */
 .band span{background:rgba(0,0,0,.74);color:#fff;font-size:15px;
+  font-weight:500;letter-spacing:.01em;
   padding:2px 8px;border-radius:4px;
   -webkit-box-decoration-break:clone;box-decoration-break:clone}
+
+/* -------------------------------------------------- the three signals -- */
+/* EVERY NEW REDUCED-MOTION RULE LIVES HERE, in a second block, because
+   test_reduced_motion_removes_the_motion_and_not_the_information asserts the
+   one above byte for byte -- including the single spaces inside its braces.
+   Gentler, not none: the dialog keeps its opacity and its backdrop blur and
+   loses only the scale, a press keeps feedback and loses only the movement,
+   and the karaoke highlight is untouched because it is information. The tab
+   change reads the same media query in JS, at call time, exactly as follow()
+   does, so an OS change mid-session takes effect. */
+@media (prefers-reduced-motion:reduce){
+  button:active:not(:disabled){transform:none;opacity:.65}
+  .tabs button:active:not(:disabled){transform:none;opacity:.65}
+  dialog{transform:none}
+  dialog[open]{transform:none}
+  @starting-style{dialog[open]{transform:none}}
+  .drop{transition:background-color .12s ease}
+}
+@media (prefers-reduced-transparency:reduce){
+  header{background:var(--panel);
+    -webkit-backdrop-filter:none;backdrop-filter:none}
+  dialog::backdrop,dialog[open]::backdrop{
+    -webkit-backdrop-filter:none;backdrop-filter:none}
+  dialog[open]::backdrop{background-color:rgba(0,0,0,.7)}
+}
+@media (prefers-contrast:more){
+  :root{--line:#8a939e;--dim:#3d4650;--card-line:#8a939e}
+  header{background:var(--panel);
+    -webkit-backdrop-filter:none;backdrop-filter:none;
+    border-bottom:1px solid var(--line)}
+  .card,.job{border:1px solid var(--line)}
+  details{border:1px solid var(--line);border-radius:var(--radius);
+    padding:0 var(--s3)}
+  .note.flat{border:1px solid var(--line);border-left-width:2px;
+    border-radius:8px;padding:var(--s2) var(--s3)}
+}
+@media (prefers-contrast:more) and (prefers-color-scheme:dark){
+  :root{--line:#7b8592;--dim:#d3dae2;--card-line:#7b8592}
+}
+/* The brand's tagline is the first thing to go when the sticky header runs out
+   of room: the tabs are wayfinding and must not wrap to a second row. */
+@media (max-width:30rem){
+  .brand small{display:none}
+  .tabs button{padding:var(--s1) var(--s2)}
+}
 </style>
 </head>
 <body>
