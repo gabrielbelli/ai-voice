@@ -1241,14 +1241,24 @@ let HEALTH = null;
    at 297 s, because the upload and the model warm are fixed costs. That is
    not corrected for, because roughly() buckets everything under 45 s as "a
    few seconds" and the two answers are the same sentence. */
+/* WHERE tts-long's HEALTH ACTUALLY LIVES, in one place.
+   /ui/health is the UI's own document and it WRAPS the gateway's:
+   gateway.health.backends.tts_long.health. The runner panel was written
+   against the gateway's /health instead, read HEALTH.backends.tts_long, found
+   undefined, and hid itself on a machine with a runner sitting right there
+   answering. Two readers, two spellings, one of them wrong. */
+function ttsLongHealth() {
+  const g = HEALTH && HEALTH.gateway && HEALTH.gateway.health;
+  const b = g && g.backends && g.backends.tts_long;
+  return (b && b.health) || {};
+}
+
 const rate = {
   stt: () => CONFIG.stt_rtf_seed,
   /* Chatterbox's own EMA, live from /health, corrected by every finished job.
      The fallback is only reached when /health has not answered yet. */
   clone: () => {
-    const h = HEALTH && HEALTH.gateway && HEALTH.gateway.health;
-    const f = h && h.backends && h.backends.tts_long && h.backends.tts_long.health
-              && h.backends.tts_long.health.realtime_factor;
+    const f = ttsLongHealth().realtime_factor;
     return f > 0 ? f : 0.275;
   },
   /* A CONSTANT ON PURPOSE, unlike clone() above. tts-stack's /health has no
@@ -1398,9 +1408,7 @@ async function poll() {
 function paintRunner() {
   const box = $("runnerbox");
   if (!box) return;
-  const h = HEALTH && HEALTH.backends && HEALTH.backends.tts_long
-            && HEALTH.backends.tts_long.health;
-  const r = h && h.runner;
+  const r = ttsLongHealth().runner;
   if (!r) { box.hidden = true; return; }
   box.hidden = false;
 

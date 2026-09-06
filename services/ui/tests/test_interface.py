@@ -796,7 +796,19 @@ def test_the_runner_panel_asks_the_three_questions_separately():
     # Drawn from the health poll the page already runs. A second request would
     # be a second thing to fail and a second thing to disagree with.
     assert "  paintRunner();" in HTML
-    assert 'HEALTH.backends.tts_long' in HTML
+    # THE PATH, PINNED. /ui/health is the UI's own document and it WRAPS the
+    # gateway's, so tts-long sits at gateway.health.backends.tts_long.health.
+    # The panel was written against the gateway's /health, read one level too
+    # shallow, found undefined and hid itself on a machine with a runner
+    # answering beside it. Both readers go through one accessor now.
+    assert "function ttsLongHealth()" in HTML
+    assert "HEALTH.gateway.health" in HTML.replace("HEALTH && HEALTH.gateway && HEALTH.gateway.health",
+                                                   "HEALTH.gateway.health")
+    assert "const r = ttsLongHealth().runner;" in HTML
+    assert "ttsLongHealth().realtime_factor" in HTML, "the rate reader drifted off the accessor"
+    # visible(), not HTML: the comment above the accessor quotes the wrong
+    # path deliberately, to record what it was.
+    assert "HEALTH.backends" not in visible(), "the shallow path is back"
     # Hidden completely when no runner is configured: a panel that always says
     # "none" is furniture.
     assert "if (!r) { box.hidden = true; return; }" in HTML
