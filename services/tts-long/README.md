@@ -498,6 +498,31 @@ this container's eight threads. Two and a half times faster on the slowest thing
 in the stack. Worth having, and deliberately written down rather than rounded up
 to the order of magnitude somebody might assume.
 
+### The runner sells its processor too, so one boolean is not the answer
+
+A game takes the card and leaves twelve threads idle. A compile takes every
+thread and leaves the card at five per cent. So the runner prices the two
+separately, and this side asks it one question rather than working the answer
+out.
+
+`GET /v1/services` carries a per-service `available` field, already resolved
+against the right gate: the GPU detector for a GPU service, the runner's own
+state ladder for a CPU one, and the free-memory check for both. This service
+reads that and nothing else. It does **not** read the machine-wide
+`gpu_available` and reason from a device name, because that would be this side
+reimplementing a decision the runner already makes correctly, including a memory
+headroom check that is invisible from here.
+
+A runner that predates the split publishes no `available` at all, and a missing
+field is not a `false`: the machine-wide flag is the fallback, because refusing a
+perfectly good older runner for ever is a worse failure than being slightly
+conservative.
+
+The status panel shows what the runner is currently willing to give up, because
+a job that takes four times as long while its owner is at their desk is the
+system working, not a fault, and a panel that cannot say so sends people looking
+for one.
+
 ### What it costs
 
 The GPU goes away, several times an evening, whenever its owner sits down. That
@@ -505,6 +530,13 @@ is the runner working correctly rather than failing: it yields in **under three
 seconds**, measured with the model resident, and the job comes back as
 **queued** rather than `failed`. This service waits `TTS_RUNNER_MAX_WAIT` and
 then speaks it on the CPU instead.
+
+Since the runner started selling its processor, "the GPU went away" is no longer
+the only reason it declines, and neither is it always the end of the job there:
+while somebody is at their machine the runner throttles rather than stopping, so
+the work continues at a tenth of the speed instead of coming back. That is why
+the fallback log says "the runner is not free" and quotes the runner's own
+reason, rather than asserting a game is running.
 
 `app/synth.py` is therefore never going anywhere. It is the fallback for exactly
 the case the runner is designed to create.

@@ -387,7 +387,13 @@ def _backend_for(job: dict):
                         "locally. Fix with `idlegpu service install %s` there.",
                         job["id"][:8], client.cfg.service, why, client.cfg.service)
         else:
-            log.info("%s: the runner's GPU is busy (%s); speaking locally",
+            # THE RUNNER'S OWN WORDS, not our guess at them. This used to say
+            # "the runner's GPU is busy" for every reason that was not a missing
+            # service, which was true while the runner only sold its card. It now
+            # also declines when somebody is at the keyboard and the CPU row says
+            # nothing, and when there is not enough free memory to start a 6.5 GiB
+            # model, and both of those read as a lie in a log that says GPU.
+            log.info("%s: the runner is not free (%s); speaking locally",
                      job["id"][:8], why)
         job["fell_back"] = True
         job["fell_back_reason"] = why

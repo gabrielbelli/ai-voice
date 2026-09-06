@@ -146,6 +146,12 @@ def test_an_unset_host_means_local_only_not_a_disabled_client():
     ((False, "not_enabled"), True),
     ((False, "no_such_service"), True),
     ((False, "gpu_busy"), False),
+    # THE NEW ONE. A runner that declines because somebody is at the keyboard,
+    # or because there is not enough free memory to start a 6.5 GiB model, is in
+    # the same class as a busy GPU: temporary, nobody's to fix, and not worth
+    # waking anyone up about. It must not be logged like a missing service.
+    ((False, "machine_busy: signed in and using the machine"), False),
+    ((False, "machine_busy"), False),
 ])
 def test_not_installed_is_not_the_same_answer_as_gpu_busy(speech, caplog, state,
                                                           expect_warning):
@@ -779,3 +785,131 @@ def test_a_job_queued_before_it_ever_ran_says_so():
         "expected queued-then-running with nothing delivered yet, got " + repr(seen)
     assert spoken.audio.size == 2 * (SAMPLE_RATE // 10), \
         "reporting the wait cost the job its segments"
+
+
+# ----------------------------------------- the runner sells two resources ---
+#
+# These drive the real RunnerClient.speech_state and RunnerClient.snapshot
+# against a canned /v1/services and /v1/status document. Nothing opens a socket:
+# _request is replaced, which is the same seam every other test in this file
+# uses, one layer lower.
+
+
+def _client_answering(doc, path="/v1/services"):
+    """A real RunnerClient whose one HTTP call returns `doc`."""
+    import json as _json
+
+    from app.remote import RunnerClient
+
+    c = RunnerClient(RunnerConfig(host="runner.invalid", service="chatterbox",
+                                  fingerprint="ab" * 32))
+
+    def fake(method, p, body=None, headers=None, timeout=None):
+        assert p == path, p
+        return 200, {}, _json.dumps(doc).encode()
+
+    c._request = fake            # type: ignore[method-assign]
+    return c
+
+
+def test_a_busy_gpu_does_not_hide_a_free_processor():
+    """THE DEFECT THIS PREVENTS: walking away from a runner that would have
+    spoken.
+
+    A game takes the card and leaves twelve threads idle. Reading the
+    machine-wide `gpu_available` would have made this side fall back to the NAS
+    CPU at 0.275x realtime, for a machine that was about to do the work.
+    """
+    ok, why = _client_answering({
+        "gpu_available": False,
+        "machine_state": "busy",
+        "services": [{"id": "chatterbox", "installed": True, "enabled": True,
+                      "device": "cpu", "available": True}],
+    }).speech_state()
+    assert ok is True, why
+    assert why == ""
+
+
+def test_the_runner_saying_no_is_believed_even_when_the_gpu_looks_free():
+    """And the other way round, which is the one that costs somebody their work.
+
+    `gpu_available` can be true while the service still cannot start: not enough
+    free memory for a 6.5 GiB model, or a CPU service in a state whose row is
+    zero. Trusting the machine-wide flag would submit a job the runner is not
+    going to run.
+    """
+    ok, why = _client_answering({
+        "gpu_available": True,
+        "machine_state": "lightuse",
+        "machine_state_reason": "signed in and using the machine",
+        "services": [{"id": "chatterbox", "installed": True, "enabled": True,
+                      "device": "cpu", "available": False,
+                      "unavailable_reason": "only 3,100 MiB of memory is free"}],
+    }).speech_state()
+    assert ok is False
+    assert why.startswith("machine_busy")
+    # The runner's own words, not ours. A caller told "gpu busy" would go looking
+    # for a game that is not running.
+    assert "3,100 MiB" in why
+
+
+def test_an_older_runner_without_the_field_is_not_declared_busy_for_ever():
+    """A runner that predates the split publishes no `available` at all.
+
+    Treating a missing field as false would make this side refuse a perfectly
+    good older runner permanently, which is a worse failure than being slightly
+    conservative. The machine-wide flag is the fallback.
+    """
+    doc = {"gpu_available": True,
+           "services": [{"id": "chatterbox", "installed": True, "enabled": True}]}
+    assert _client_answering(doc).speech_state() == (True, "")
+    doc["gpu_available"] = False
+    ok, why = _client_answering(doc).speech_state()
+    assert (ok, why) == (False, "gpu_busy")
+
+
+def test_not_installed_still_wins_over_a_free_machine():
+    """Order matters. A service that is not installed is the owner's to fix and
+    says so, whatever the machine is doing; reporting it as busy would have
+    somebody waiting for a state that never arrives."""
+    ok, why = _client_answering({
+        "gpu_available": True,
+        "services": [{"id": "chatterbox", "installed": False, "enabled": True,
+                      "available": True}],
+    }).speech_state()
+    assert (ok, why) == (False, "not_installed")
+
+
+def test_the_status_panel_can_say_what_the_runner_is_giving_up():
+    """A job that takes four times as long because the owner is at their desk is
+    not a fault, and a panel that cannot say so sends people looking for one."""
+    snap = _client_answering({
+        "state": "available",
+        "machine_state": "lightuse",
+        "machine_state_reason": "signed in and using the machine",
+        "limits": {"gpu": True, "cpu_pct": 10, "priority": "idle",
+                   "working_set_mib": 8192, "min_free_mib": 6144},
+        "cpu": {"machine_pct": 12.5, "own_pct": 9.8, "foreign_pct": 2.7,
+                "logical_processors": 16},
+        "memory": {"total_mib": 32670, "available_mib": 24513, "load_pct": 24},
+        "services": [{"id": "chatterbox", "running": True, "queued": 0,
+                      "device": "cpu", "available": True}],
+    }, path="/v1/status").snapshot(max_age=0.0)
+    assert snap["machine_state"] == "lightuse"
+    assert snap["limits"]["cpu_pct"] == 10
+    assert snap["cpu"]["foreign_pct"] == 2.7
+    assert snap["memory"]["available_mib"] == 24513
+    assert snap["services"][0]["device"] == "cpu"
+
+
+def test_an_older_runner_reports_no_limits_rather_than_zero_ones():
+    """Absent is not zero. A panel that renders a missing cap as "0%" tells the
+    reader the runner will do nothing, which is the opposite of the truth."""
+    snap = _client_answering({
+        "state": "available",
+        "services": [],
+    }, path="/v1/status").snapshot(max_age=0.0)
+    assert snap["machine_state"] is None
+    assert snap["limits"] is None
+    assert snap["cpu"] is None
+    assert snap["memory"] is None

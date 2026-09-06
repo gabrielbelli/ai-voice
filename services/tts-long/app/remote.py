@@ -260,13 +260,27 @@ class RunnerClient:
         """(will it speak for us, why not).
 
         THE THREE STATES, KEPT APART. The runner answers "known", "installed"
-        and "ready" for the service, and "gpu_available" for the machine, and
-        the reason those are four fields rather than one boolean is exactly this
-        function. `not_installed` is the owner's to fix and will not change on
-        its own; `gpu_busy` is nobody's to fix and clears in a minute or two. A
-        caller that cannot tell them apart either retries for ever against a
-        runner with no speech service, or gives up on one that was about to be
-        free.
+        and "ready" for the service, and separately whether the machine is free,
+        and the reason those are separate fields is exactly this function.
+        `not_installed` is the owner's to fix and will not change on its own;
+        `machine_busy` is nobody's to fix and clears in a minute or two. A caller
+        that cannot tell them apart either retries for ever against a runner with
+        no speech service, or gives up on one that was about to be free.
+
+        WHY THE PER-SERVICE `available` FIELD IS PREFERRED. The runner sells its
+        processor as well as its card now, and one boolean cannot answer "will
+        you work for me" any more. A game takes the GPU and leaves twelve threads
+        idle; a compile takes every thread and leaves the card at five per cent.
+        Reading the machine-wide `gpu_available` would walk away from a runner
+        that was about to speak on the CPU, and working it out here from a device
+        name and two booleans would be this side reimplementing a decision the
+        runner already makes correctly, including the memory headroom check we
+        cannot see from here.
+
+        `gpu_available` IS STILL READ, as the fallback, because a runner that
+        predates the split does not publish `available` at all and answering
+        "busy" for ever against a perfectly good older runner is a worse failure
+        than being slightly conservative.
         """
         status, _, data = self._request("GET", "/v1/services")
         if status != 200:
@@ -279,8 +293,18 @@ class RunnerClient:
                 return False, "not_installed"
             if not svc.get("enabled"):
                 return False, "not_enabled"
-            if not doc.get("gpu_available"):
-                return False, "gpu_busy"
+            available = svc.get("available")
+            if available is None:
+                # An older runner, or one answering without an agent behind it.
+                if not doc.get("gpu_available"):
+                    return False, "gpu_busy"
+                return True, ""
+            if not available:
+                # The runner's own words when it has them. "somebody is gaming"
+                # and "there is not enough memory free to start a 6.5 GiB model"
+                # are both temporary and both worth telling a person apart.
+                why = svc.get("unavailable_reason") or doc.get("machine_state_reason")
+                return False, f"machine_busy: {why}" if why else "machine_busy"
             return True, ""
         return False, "no_such_service"
 
@@ -308,6 +332,8 @@ class RunnerClient:
             else:
                 doc = json.loads(data)
                 gpu = doc.get("gpu") or {}
+                cpu = doc.get("cpu") or {}
+                mem = doc.get("memory") or {}
                 snap = {
                     "reachable": True,
                     "state": doc.get("state"),
@@ -318,13 +344,31 @@ class RunnerClient:
                     "job_running": doc.get("job_running"),
                     "running_service": doc.get("running_service"),
                     "yields": doc.get("yields"),
+                    # WHAT THE RUNNER IS CURRENTLY WILLING TO GIVE UP, not only
+                    # whether it will run. A job that takes four times as long
+                    # because the owner is at their desk is not a fault, and a
+                    # status panel that cannot say "capped to 10 per cent while
+                    # somebody is using that machine" sends people looking for one.
+                    # Absent on a runner that predates the split, and absent is
+                    # not the same as zero, so these stay None rather than 0.
+                    "machine_state": doc.get("machine_state"),
+                    "machine_state_reason": doc.get("machine_state_reason"),
+                    "limits": doc.get("limits"),
+                    "cpu": {k: cpu.get(k) for k in
+                            ("machine_pct", "own_pct", "foreign_pct", "logical_processors")
+                            if k in cpu} or None,
+                    "memory": {k: mem.get(k) for k in
+                               ("total_mib", "available_mib", "load_pct")
+                               if k in mem} or None,
                     "gpu": {k: gpu.get(k) for k in
                             ("healthy", "util_gpu", "mem_used_mib", "mem_total_mib",
                              "temperature_c", "power_w", "name")
                             if k in gpu},
                     "services": [{"id": x.get("id"),
                                   "running": x.get("running"),
-                                  "queued": x.get("queued")}
+                                  "queued": x.get("queued"),
+                                  "device": x.get("device"),
+                                  "available": x.get("available")}
                                  for x in (doc.get("services") or [])],
                 }
         except Exception as exc:  # noqa: BLE001 - the failure IS the status
