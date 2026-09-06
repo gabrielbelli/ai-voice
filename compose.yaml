@@ -233,9 +233,20 @@ services:
       - "8001"
     environment:
       TTS_LANGUAGE: en-us
-      TTS_THREADS: "4"
+      # 8, NOT 4. Kokoro is the only engine in this stack that genuinely
+      # parallelises: measured across a thread sweep on this host it went
+      # 0.65x realtime at 2 threads, 1.30x at 4, 2.66x at 8 and 4.09x at 12,
+      # with per-thread efficiency flat the whole way. Parakeet and Chatterbox
+      # both flatten off well before that. It was the one engine here that was
+      # starved.
+      TTS_THREADS: "8"
       TTS_VOICE: bm_george
-    cpus: 6
+    # 8, MATCHING TTS_THREADS ABOVE, and both halves are required. ONNX Runtime
+    # sizes its pool from the HOST core count, not the cgroup, so a limit on its
+    # own leaves the threads fighting for a slice they are not allowed: more
+    # threads than allotted CPU is slower than fewer, not merely capped. See
+    # services/tts/README.md, "Limiting CPU use".
+    cpus: 8
     mem_limit: 2g
     volumes:
       - tts-models:/models
