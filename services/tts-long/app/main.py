@@ -175,6 +175,9 @@ JOB_TTL = float(os.getenv("TTS_JOB_TTL", "86400"))
 # a job ahead of it in the queue, or for a long sentence — does not look dead
 # to a proxy or trip a read timeout.
 SSE_KEEPALIVE = float(os.getenv("TTS_SSE_KEEPALIVE", "10"))
+# Whether hanging up on a stream cancels the work behind it. Off, because the
+# page promises the opposite in as many words. See the comment where it is read.
+CANCEL_ON_DISCONNECT = os.getenv("TTS_SSE_CANCEL_ON_DISCONNECT", "0") not in {"0", "false", "no"}
 
 # The same one line of configuration this always had, plus the TTS_LOG_LEVEL
 # switch it never had: getting DEBUG out of a running container used to mean
@@ -1823,9 +1826,28 @@ async def _sse_events(job_id: str, stream: Stream) -> AsyncIterator[str]:
     finally:
         job = jobs.get(job_id)
         if job is not None and job["status"] in {"queued", "running"}:
-            # The client hung up. Cancel rather than spend ten more minutes of
-            # one CPU on audio nobody is holding a socket for; what has already
-            # been generated is still written to disk and still collectable
-            # from /jobs.
-            job["cancelled"] = True
-            log.info("%s client disconnected, cancelling", job_id[:8])
+            # THE JOB SURVIVES THE SOCKET, and it used not to.
+            #
+            # Hanging up cancelled the work, on the reasoning that ten more
+            # minutes of one CPU for audio nobody is holding a socket for is
+            # waste. That is true of a client that has gone away for good, and
+            # false of the only client this service actually has: the Jobs tab
+            # says "Close this page if you want. The job runs on the server."
+            # That promise was already false for anything streamed, and the
+            # cheapest way to find out was to close a tab and lose ten minutes.
+            #
+            # It matters more now that the page streams a cloned voice, which
+            # is the longest work here: a reader who starts listening, hears
+            # enough and closes the tab would have thrown away the file they
+            # were about to be able to download.
+            #
+            # TTS_SSE_CANCEL_ON_DISCONNECT=1 restores the old behaviour for
+            # anyone whose clients really are throwaway. The sweeper still
+            # bounds the cost: an abandoned job is finished, written, and
+            # expired by JOB_TTL like any other.
+            if CANCEL_ON_DISCONNECT:
+                job["cancelled"] = True
+                log.info("%s client disconnected, cancelling", job_id[:8])
+            else:
+                log.info("%s client disconnected; the job keeps running and "
+                         "its audio will be collectable from /jobs", job_id[:8])

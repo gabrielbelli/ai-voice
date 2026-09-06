@@ -4383,7 +4383,21 @@ $("go-tts").addEventListener("click", async () => {
   speakHeld = false;
   $("go-tts").disabled = true;
   try {
-    if (voice.kind === "clone") await queueJob(voice.name, text);
+    /* A CLONE STREAMS TOO NOW, and it did not, which is the third time this
+       was reported as "I still have to wait for the whole thing".
+
+       It went to POST /jobs, which answers a job id and nothing audible until
+       the file is finished. The reasoning for that was the underrun
+       arithmetic: Chatterbox at 0.23x realtime needs more lead than the audio
+       is long, so a continuous stream cannot be kept fed.
+
+       That reasoning answered a question nobody asked. Not stalling is worth
+       less than hearing the first sentence, and the honest shape is a player
+       that plays every segment the moment it exists and WAITS VISIBLY when it
+       runs out, rather than one that waits invisibly for all of them. The
+       arithmetic still decides whether playback is continuous; it no longer
+       decides whether you get to listen. */
+    if (voice.kind === "clone") await speakNow(voice.name, text, "chatterbox");
     else await speakNow(voice.name, text);
   } catch (err) {
     note($("speak-note"), "bad", err.message || String(err));
@@ -4731,7 +4745,7 @@ $("speak-stop").addEventListener("click", () => { if (speakSink) speakSink.silen
    forgetting this is the most likely audible bug in the design. */
 $("player").addEventListener("play", () => { if (speakSink) speakSink.silence(); });
 
-async function speakNow(voice, text) {
+async function speakNow(voice, text, engine) {
   /* THE MODE IS DECIDED BEFORE THE REQUEST IS BUILT, so a browser with no
      usable AudioContext never asks for pcm and the format the reader chose is
      honoured. openAudio() runs here, in the task the click started and before
@@ -4759,9 +4773,25 @@ async function speakNow(voice, text) {
      goes to POST /jobs and never reaches here at all, which is right, because
      Chatterbox at 0.23x would need three minutes of lead per minute of
      audio. */
-  const useV1 = $("x-troute").value === "v1";
-  const streamed = useV1 && $("x-stream").value === "sse";
-  const plan = streamed ? speechPlan("kokoro", text) : null;
+  /* A clone has no route control -- its Expert panel is the Chatterbox one --
+     so it is not asking the Kokoro controls anything. It always takes /v1 and
+     it always streams, because the whole point is hearing segment one. */
+  const clone = engine === "chatterbox";
+  const useV1 = clone || $("x-troute").value === "v1";
+  const streamed = clone || (useV1 && $("x-stream").value === "sse");
+  /* A CLONE PLAYS AS IT ARRIVES, WHATEVER THE ARITHMETIC SAYS.
+     speechPlan puts Chatterbox in "text" mode because its rate is under
+     STREAM.minRate, and that mode shows progress without sound. That is the
+     right answer to "can playback be continuous" and the wrong answer to
+     "when can I start listening", which is the question that was actually
+     asked. Forced to "audio" here, and only here: every other caller still
+     gets the arithmetic's answer.
+
+     What this buys is the first segment as soon as it exists. What it costs
+     is that playback will catch up and wait, on a 0.23x backend roughly every
+     segment. The sink shows that wait rather than hiding it. */
+  const plan = streamed ? speechPlan(clone ? "clone" : "kokoro", text) : null;
+  if (clone && plan) plan.mode = "audio";
   const ctx = plan && plan.mode === "audio" ? openAudio() : null;
   const sink = !streamed ? null : ctx ? audioSink(ctx, plan) : textSink(plan);
   if (speakSink) speakSink.silence();
@@ -4787,8 +4817,14 @@ async function speakNow(voice, text) {
        read below. It has no segments and no per-segment voice, so choosing
        this route means giving those up. */
     path = "/v1/audio/speech";
-    body = { model:"kokoro", input:text, voice, response_format:format, speed };
-    if ($("x-stream").value === "sse") body.stream_format = "sse";
+    /* `model` is what the gateway routes on: chatterbox reaches tts-long and
+       kokoro reaches tts-stack. A clone sends no `speed`, which Chatterbox
+       answers with a 400. */
+    body = clone
+      ? { model:"chatterbox", input:text, voice, response_format:format,
+          stream_format:"sse" }
+      : { model:"kokoro", input:text, voice, response_format:format, speed };
+    if (!clone && $("x-stream").value === "sse") body.stream_format = "sse";
   } else {
     /* /speak is extra="forbid": an unknown field is a 422, so nothing
        speculative is sent. The field is `format`, not `response_format`. */
