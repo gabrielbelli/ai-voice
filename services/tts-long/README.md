@@ -523,6 +523,51 @@ a job that takes four times as long while its owner is at their desk is the
 system working, not a fault, and a panel that cannot say so sends people looking
 for one.
 
+### Three places can speak, and one function chooses
+
+`_backend_for` is still the only place the decision is made. There are three
+rungs now, offered in the order `TTS_BACKEND_ORDER` gives:
+
+| rung | what it is | measured |
+|---|---|---|
+| `runner` | the runner's card, an RTX 3070 | 0.70x realtime |
+| `local` | this container, eight Xeon threads | 0.23x realtime |
+| `runner_cpu` | the runner's processor, a Ryzen 7 5700X3D | 0.24x realtime |
+
+**The third number is not the flattering one and it is not a typo.** The
+hypothesis was that a 2022 desktop part with a large cache would beat a 2016
+server part at this work by two or three times. It beats it by about five per
+cent, because Chatterbox is autoregressive at batch one and is therefore bound
+by single-thread latency rather than by throughput. The runner's processor is a
+fallback for when its card is busy, not a faster machine, and it is priced that
+way: the shipped order puts it below `local`, which is always willing, so on a
+quiet stack it is never reached at all.
+
+Two rules make it reachable when it should be, and only then.
+
+**Route on the published cap, not on the boolean.** The runner publishes the
+matrix row in force, so `available: true` while it is giving a hundred per cent
+of a sixteen-thread machine and `available: true` while it is giving five are
+the same field and a twenty to one difference in delivered speech. A router
+reading only the boolean hands a ten-minute job to a machine that will take over
+an hour, on somebody's desktop, while they are sitting at it, and nothing
+anywhere reports a fault. `TTS_RUNNER_CPU_MIN_PCT` is the floor, and the
+comparison behind it is deliberately pessimistic: delivered rate is taken as the
+measured rate times the cap, which is worse than the measured curve. In practice
+it means the processor is sold when nobody is signed in or the desktop is
+locked, and effectively never while somebody is at the keyboard.
+
+**A queue here is what earns it its first job.** 0.24x starting now beats 0.23x
+starting four minutes from now, so a backlog deeper than
+`TTS_RUNNER_CPU_WHEN_BACKLOG_S` promotes the rung above `local`. This is also
+the only escape from a self-fulfilling refusal: a rung that is never chosen is
+never measured, so its seed would become permanent.
+
+**A yield steps to the next rung rather than to the bottom.** The fallback used
+to be one line, because this host was the only other place there was. A job can
+now go card, then processor, then here, and `fell_back_from` records the chain
+because `fell_back` alone cannot.
+
 ### What it costs
 
 The GPU goes away, several times an evening, whenever its owner sits down. That
@@ -579,6 +624,22 @@ request is answered synchronously or handed a 202. A GPU at 0.7x and this CPU at
 would then accept a synchronous request the CPU cannot finish — at exactly the
 moment the GPU disappears, because that is when jobs come back here. `/health`
 reports `realtime_factor_by_backend` for the same reason.
+
+**And each has its own seed, with the count of what is behind it.** Every
+backend used to start from the local CPU constant. For a GPU that is pessimistic
+and self-corrects on the first finished job; for the runner's processor it is
+indistinguishable from `local`, so the rung is never chosen, never measured, and
+the seed is permanent. `/health` publishes `backend_observations` beside the
+rates: a count of zero says the figure next to it is a documented measurement
+from another machine rather than this stack's own.
+
+**The estimate stays a local estimate, and it stays conservative.**
+`estimated_seconds` is frozen at enqueue from `_rates["local"]`, whatever ends up
+running the job. That is still the safe direction with three rungs: the card is
+three times faster, and the processor rung is only taken when the arithmetic
+says it will finish sooner than this host would have. A job routed away from
+here therefore finishes early against the number its caller was given, never
+late.
 
 `tests/test_remote.py` covers all of this with a fake runner and opens no socket.
 

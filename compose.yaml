@@ -322,6 +322,56 @@ services:
       TTS_RUNNER_MAX_WAIT: "900"             # then give up and speak it here
       TTS_RUNNER_POLL: "2"
       # TTS_RUNNER_CA_FILE: ""                 # or a CA bundle, if you have one
+
+      # ------------------------------------ and that machine's processor --
+      #
+      # THE SAME MACHINE, ITS OTHER SERVICE. The runner sells its card and its
+      # processor as two service ids over one host, one port, one certificate
+      # and one key, so this is a service name and not a second address. The
+      # reason it is worth having at all is that they are not the same offer:
+      # a game takes the card and leaves twelve threads idle, and a job that
+      # walked away from those threads would be crossing the LAN to a machine
+      # three times slower for work the runner was about to do.
+      #
+      # MEASURED, AND THE ANSWER IS NOT THE FLATTERING ONE. Chatterbox on the
+      # runner's Ryzen 7 5700X3D ran at 0.24x realtime against 0.23x on this
+      # container's eight Xeon threads: about five per cent, not the two or
+      # three times the core counts suggest. It is autoregressive at batch one,
+      # so it is bound by single-thread latency rather than by throughput. The
+      # runner's processor is therefore a FALLBACK for when its card is busy,
+      # not a faster machine, and the shipped order below says so.
+      #
+      # Set to "" to switch the rung off entirely and get exactly the
+      # two-backend behaviour that shipped before it existed.
+      TTS_RUNNER_CPU_SERVICE: chatterbox-cpu
+      # Every line below is its documented default, written out because the
+      # numbers are the routing policy and a reader should not have to open
+      # app/main.py to find them.
+      #
+      # Where work is offered, in order. The card first because it is three
+      # times anything else; this host second because it is the floor and is
+      # always willing; the runner's processor last, which makes it reachable
+      # only when a queue forms here -- see TTS_RUNNER_CPU_WHEN_BACKLOG_S.
+      # TTS_BACKEND_ORDER: "runner,local,runner_cpu"
+      # How much of its machine the runner has to be selling before its
+      # processor is worth a network hop. The runner publishes the matrix row
+      # in force, so `available` at 100% and at 5% are the same boolean and a
+      # twenty to one difference in delivered speech. In practice this means it
+      # sells processor time when nobody is signed in or the desktop is locked.
+      # TTS_RUNNER_CPU_MIN_PCT: "50"
+      # ... and the one thing that outranks the comparison: a slower machine
+      # that can start now beats a faster one four minutes deep in a queue.
+      # TTS_RUNNER_CPU_WHEN_BACKLOG_S: "120"
+      # Shorter than the card's 900. The rung below the card is about as fast
+      # as the card's machine, so waiting out a game is worth it; the rung
+      # below the processor is no slower than the processor, so it is not.
+      # TTS_RUNNER_CPU_MAX_WAIT: "300"
+      # The seeds each rate starts from, until a finished job replaces them.
+      # /health publishes backend_observations beside them: a count of zero
+      # says the figure next to it is one of these and not a measurement.
+      # TTS_REALTIME_FACTOR_LOCAL: "0.21"        # this container, 8 threads
+      # TTS_REALTIME_FACTOR_RUNNER: "0.70"       # an RTX 3070
+      # TTS_REALTIME_FACTOR_RUNNER_CPU: "0.24"   # a Ryzen 7 5700X3D, 8 threads
     cpus: 10
     mem_limit: 10g
     volumes:

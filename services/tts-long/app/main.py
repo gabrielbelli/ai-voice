@@ -70,7 +70,8 @@ from voice_common.models import OpenAISpeechRequest, Segment
 from . import voices as voice_registry
 from .chunking import chunk_text, speech_seconds
 from .encoders import MEDIA_TYPES, available_formats, encode, make_encoder
-from .remote import RemoteSynth, RemoteYield, RunnerClient, RunnerConfig
+from .remote import (RemoteSynth, RemoteUnavailable, RemoteYield, RunnerClient,
+                     RunnerConfig)
 from .synth import (SAMPLE_RATE, SUPPORTED_LANGUAGES, Synth, speech_tokens)
 
 OUT_DIR = Path(os.getenv("TTS_OUTPUT_DIR", "/output"))
@@ -94,6 +95,53 @@ MAX_INPUT_CHARS = 4096
 # 60% — which is how a request UNDER the documented synchronous threshold used
 # to turn into a 202 with no explanation.
 RTF_SEED = float(os.getenv("TTS_REALTIME_FACTOR", "0.21"))
+
+# ONE SEED PER PLACE THE WORK CAN GO, and the third one is why they exist.
+#
+# Every backend used to be seeded from RTF_SEED, the local CPU constant. For a
+# GPU that is pessimistic and self-corrects on the first finished job. For the
+# RUNNER'S PROCESSOR it is a self-fulfilling refusal: the seed is
+# indistinguishable from local's, so a chooser comparing rates never picks it,
+# so it never finishes a job, so it is never measured, so the seed becomes
+# permanent. `backend_observations` in /health is the other half of the fix --
+# a count of zero says out loud that the figure beside it is a hypothesis.
+#
+# The numbers are measurements, and each names the machine it came from:
+#   local       0.23x  the NAS, Xeon E5-2697 v4, Chatterbox at 8 threads
+#   runner      0.70x  a desktop RTX 3070, midpoint of a measured 0.644-0.746
+#   runner_cpu  0.24x  the same desktop's Ryzen 7 5700X3D, 8 threads, uncapped
+# The third is the unflattering one and it is not a typo: Chatterbox is
+# autoregressive at batch one, so it is bound by single-thread latency and a
+# 2022 desktop part beats a 2016 server part by about five per cent rather than
+# by the two or three times the core counts suggest. The runner's processor is
+# a fallback for when its card is busy, not a faster machine.
+RTF_SEED_LOCAL = float(os.getenv("TTS_REALTIME_FACTOR_LOCAL") or RTF_SEED)
+RTF_SEED_RUNNER = float(os.getenv("TTS_REALTIME_FACTOR_RUNNER") or 0.70)
+RTF_SEED_RUNNER_CPU = float(os.getenv("TTS_REALTIME_FACTOR_RUNNER_CPU") or 0.24)
+
+# WHERE THE WORK IS OFFERED, IN ORDER, and the default is the whole routing
+# policy in one line. The card first because it is three times anything else;
+# this host second because it is the floor and is always willing; the runner's
+# processor last because it is no faster than the floor and lives across a
+# network. Setting it to "runner,local" restores exactly the two-backend
+# behaviour that shipped before the processor rung existed.
+BACKEND_ORDER = tuple(x.strip() for x in
+                      (os.getenv("TTS_BACKEND_ORDER") or "runner,local,runner_cpu").split(",")
+                      if x.strip())
+
+# HOW MUCH OF THE MACHINE THE RUNNER HAS TO BE SELLING before its processor is
+# worth a network hop at all. The runner publishes the matrix row in force, so
+# `available: true` at 100 per cent and `available: true` at 5 per cent are the
+# same boolean and a twenty to one difference in delivered speech. In practice
+# this threshold means the processor is sold when nobody is signed in or the
+# desktop is locked, and effectively never while somebody is at the keyboard --
+# which is both the honest answer and the one that keeps the owner's promise.
+RUNNER_CPU_MIN_PCT = int(os.getenv("TTS_RUNNER_CPU_MIN_PCT") or 50)
+# ... and the one thing that outranks the comparison: a slower machine that can
+# start now beats a faster one four minutes deep in a queue. This is also the
+# only way an unmeasured processor rung ever gets its first job, which is what
+# stops its seed from becoming permanent.
+RUNNER_CPU_WHEN_BACKLOG_S = float(os.getenv("TTS_RUNNER_CPU_WHEN_BACKLOG_S") or 120)
 # What a cold start costs the caller who triggers it: 6.5 GB off disk, or a
 # ~3 GB download on a truly cold image. Counted against the synchronous
 # budget rather than ignored, because it lands inside whatever the caller is
@@ -187,6 +235,11 @@ class _Rate:
 
     def __init__(self, seed: float) -> None:
         self.value = seed
+        # HOW MANY JOBS ARE BEHIND THE NUMBER. Zero means the value is the seed
+        # and nothing has ever measured this backend, which is the question a
+        # router and a person reading /health both have and neither could ask.
+        # It is published as `backend_observations` beside the rates.
+        self.count = 0
         self._lock = threading.Lock()
 
     def observe(self, audio_seconds: float, compute_seconds: float) -> None:
@@ -194,9 +247,10 @@ class _Rate:
             return
         with self._lock:
             self.value += 0.3 * (audio_seconds / compute_seconds - self.value)
+            self.count += 1
 
 
-rate = _Rate(RTF_SEED)
+rate = _Rate(RTF_SEED_LOCAL)
 
 # ONE EMA PER BACKEND, AND THE SEPARATION IS NOT TIDINESS.
 #
@@ -215,17 +269,21 @@ rate = _Rate(RTF_SEED)
 _rates: dict[str, _Rate] = {"local": rate}
 _rates_lock = threading.Lock()
 
+# The documented seed for each place work can go. A backend that is not in here
+# falls back to the local constant, which is pessimistic for anything remote and
+# is the right direction to be wrong in: it defers to a 202 rather than
+# promising a synchronous answer nothing can deliver.
+_SEEDS = {"local": RTF_SEED_LOCAL,
+          "runner": RTF_SEED_RUNNER,
+          "runner_cpu": RTF_SEED_RUNNER_CPU}
+
 
 def rate_for(backend: str) -> _Rate:
     """The observed realtime factor of one backend, created on first use."""
     with _rates_lock:
         r = _rates.get(backend)
         if r is None:
-            # Seeded from the CPU constant, which is pessimistic for a GPU. The
-            # first finished job corrects it, and being pessimistic first is the
-            # right direction to be wrong in: it defers to a 202 rather than
-            # promising a synchronous answer nothing can deliver.
-            r = _Rate(RTF_SEED)
+            r = _Rate(_SEEDS.get(backend, RTF_SEED))
             _rates[backend] = r
         return r
 
@@ -236,7 +294,14 @@ def _compute_seconds(chars: int) -> float:
 
 
 def _job_chars(job: dict) -> int:
-    return sum(len(text) for text, _ in job["segments"])
+    """How much text a job is, in characters.
+
+    `.get`, because this is now asked on the way IN to a job as well as about
+    jobs already accepted: `_order_for` sizes the work before choosing a
+    backend for it. A job with no segments is zero characters, which is the
+    true answer and not a missing one.
+    """
+    return sum(len(text) for text, _ in (job.get("segments") or ()))
 
 
 def _backlog_seconds() -> float:
@@ -275,38 +340,23 @@ def _worker() -> None:
             continue
         try:
             try:
-                _run(_backend_for(job), job)
+                _speak(job)
             except RemoteYield as yielded:
-                # The GPU's owner has been at their machine longer than the
-                # bound. Speak it here: 0.275x realtime is slow but it finishes,
-                # and it is why the local Synth is never removed.
-                #
-                # SPOKEN ONCE, NOT TWICE. A re-run regenerates the audio, but
-                # the only audio anyone has seen is what went to an SSE stream,
-                # and `delivered` counts exactly that. Zero means nothing left
-                # this host, so re-running is invisible. Above zero means a
-                # client has already been sent part of a file and a second run
-                # would send a second header into the middle of it, so that one
-                # stream is told what happened instead.
-                if yielded.delivered and job.get("stream") is not None:
-                    job.update(status="failed", error=str(yielded),
-                               finished_at=time.time())
-                    job["stream"].put("error", str(yielded))
-                    log.warning("%s: %s, and %d segments were already streamed, "
-                                "so it cannot be restarted", job["id"][:8],
-                                yielded, yielded.delivered)
-                else:
-                    log.info("%s: %s; speaking it locally", job["id"][:8], yielded)
-                    job["backend"] = "local"
-                    # It STARTED on the runner and finished here, which is a
-                    # different history from one that never left, and the row
-                    # used to look identical to a job that ran locally all
-                    # along. `realtime_factor` then describes the CPU while
-                    # nothing records that a GPU was tried and lost.
-                    job["fell_back"] = True
-                    job["fell_back_reason"] = str(yielded)
-                    job["segments_from_runner"] = yielded.delivered
-                    _run(state["synth"], job)
+                # THE END OF THE LADDER, and the only way one is reached. _speak
+                # steps down to the next backend on every yield it can act on
+                # and raises only this case: a client has already been sent part
+                # of a file over SSE, and a second run would send a second
+                # header into the middle of it. `delivered` counts exactly the
+                # segments that left this host, so zero means a re-run is
+                # invisible to everyone and is handled below rather than here.
+                job.update(status="failed", error=str(yielded),
+                           finished_at=time.time())
+                stream = job.get("stream")
+                if stream is not None:
+                    stream.put("error", str(yielded))
+                log.warning("%s: %s, and %d segments were already streamed, "
+                            "so it cannot be restarted", job["id"][:8],
+                            yielded, yielded.delivered)
             except Exception as exc:  # noqa: BLE001 - see below
                 # THE SAME CLASS THE KeyError GUARD ABOVE IS ABOUT, and it was
                 # only half covered. _run catches its own failures and marks
@@ -337,7 +387,142 @@ def _worker() -> None:
             queue.task_done()
 
 
-def _backend_for(job: dict):
+def _speak(job: dict) -> None:
+    """Run this job, stepping to the next backend each time one hands it back.
+
+    THE LADDER, and it used to be one rung deep with the bottom hard coded. A
+    yield off the runner's card jumped straight to this host, which was the only
+    other place there was. There are three places now, and the next rung after
+    the card may be the processor beside it on the same machine: a game takes
+    the card and leaves twelve threads idle, and walking past those threads to a
+    machine three times slower is exactly the decision this service exists to
+    get right.
+
+    A yield IS NOT A FAILURE. It means the runner's owner came back and the
+    lease was handed over, which is the case the whole design calls normal. The
+    one yield that cannot be stepped over is one that has already streamed audio
+    to a client, and that is re-raised for `_worker` to fail, because a second
+    run would send a second header into the middle of somebody's file.
+
+    Bounded by the number of rungs. The local Synth cannot raise RemoteYield, so
+    the loop always terminates on it in practice; the bound is here so that a
+    future backend which CAN cannot turn this into a job that is spoken for ever.
+    """
+    tried: list[str] = []
+    for _ in range(len(BACKEND_ORDER) + 1):
+        synth = _backend_for(job, exclude=tuple(tried))
+        here = job["backend"]
+        tried.append(here)
+        try:
+            _run(synth, job)
+            return
+        except RemoteYield as yielded:
+            if yielded.delivered and job.get("stream") is not None:
+                raise
+            log.info("%s: %s; trying the next backend", job["id"][:8], yielded)
+            # WHICH ONE IT LEFT, which a single `fell_back` flag could not say
+            # once there was more than one place to leave. A job that went card,
+            # then processor, then here has a history, and the row used to
+            # record only that something had gone wrong somewhere.
+            prior = job.get("fell_back_from")
+            job["fell_back_from"] = f"{prior}, {here}" if prior else here
+            _refused(job, here, str(yielded))
+            # ACCUMULATED, NOT ASSIGNED. Each rung delivers its own segments
+            # before giving up, and with two remote rungs a plain assignment
+            # would report only the last one -- a job that had ten segments
+            # spoken on the card and two on the processor would claim two.
+            job["segments_from_runner"] = (job.get("segments_from_runner", 0)
+                                           + yielded.delivered)
+    # Every rung in the order handed it back. Nothing left to try, and the
+    # local Synth is the only backend that cannot do this, so reaching here
+    # means the order does not contain one.
+    raise RemoteUnavailable("every configured backend handed this job back")
+
+
+def _order_for(job: dict) -> tuple[list[str], float]:
+    """The rungs, in the order this job should be offered to them.
+
+    BACKEND_ORDER is the policy and this is the one thing that bends it. The
+    runner's processor sits BELOW the local one in the default order, and local
+    is always willing, so on a quiet host the processor rung is never reached --
+    which is right, because it is no faster than here and it is across a
+    network. The moment a queue forms that stops being true: 0.24x starting now
+    beats 0.23x starting four minutes from now, and the deeper the queue the
+    less close it is.
+
+    Returns the order and the BACKLOG IN FRONT OF THIS JOB, because the second
+    is what the arithmetic in `_cpu_rung_worth_it` compares against and
+    computing it twice would let the two disagree.
+    """
+    order = list(BACKEND_ORDER)
+    # This job is queued and therefore counted; the wait it faces is everything
+    # else. Clamped because the two walks of `jobs` are not one atomic read.
+    backlog = max(0.0, _backlog_seconds() - _compute_seconds(_job_chars(job)))
+    if "runner_cpu" in order and "local" in order:
+        i_cpu, i_local = order.index("runner_cpu"), order.index("local")
+        if i_cpu > i_local and backlog > RUNNER_CPU_WHEN_BACKLOG_S:
+            order.insert(i_local, order.pop(i_cpu))
+    return order, backlog
+
+
+def _cpu_rung_worth_it(offer, job: dict, backlog: float) -> tuple[bool, str]:
+    """Will the runner's processor finish this job sooner than this host will.
+
+    ROUTED ON THE PUBLISHED CAP, NOT ON THE BOOLEAN, and this is the whole
+    reason `offer()` carries one. `available: true` while the runner is giving
+    a hundred per cent of a sixteen thread machine and `available: true` while
+    it is giving five are the same field and a twenty to one difference in
+    delivered speech. A router that reads only the boolean will cheerfully hand
+    a ten minute job to a machine that will take two hours over it, and nothing
+    anywhere will report a fault.
+
+    THE DERATE IS DELIBERATELY PESSIMISTIC. Delivered rate is taken as the
+    measured rate times the cap, which assumes the work scales with the share of
+    the machine. It does not: Chatterbox is autoregressive at batch one, so the
+    measured curve is much flatter than linear (0.230x at 8 threads to 0.285x at
+    16 on the NAS, per-thread efficiency halving). Being wrong in this direction
+    costs a job that could have gone there and did not. Being wrong in the other
+    costs somebody a job that takes hours, on a machine whose owner is at the
+    keyboard. In practice the threshold means the processor is sold when nobody
+    is signed in or the desktop is locked, and effectively never otherwise.
+
+    AN UNKNOWN CAP IS A REFUSAL, and it is the one place this file fails closed
+    on a missing field rather than open. Everywhere else a runner that does not
+    publish something is given the benefit of the doubt, because the cost is a
+    fallback to a CPU that works. Here the cost is a job nobody can see going
+    slowly on a machine we cannot see, which is the failure that does not
+    announce itself.
+    """
+    pct = offer.cpu_pct
+    if pct is None:
+        return False, "it does not say how much of its processor it is selling"
+    if pct < RUNNER_CPU_MIN_PCT:
+        return False, f"only {pct}% of that machine is on offer"
+    audio = speech_seconds(_job_chars(job))
+    there = audio / max(rate_for("runner_cpu").value * pct / 100.0, 1e-3)
+    here = backlog + audio / max(rate_for("local").value, 1e-3)
+    if there >= here:
+        return False, (f"{there:.0f}s there against {here:.0f}s here"
+                       + (f" behind {backlog:.0f}s of queue" if backlog else ""))
+    return True, ""
+
+
+def _refused(job: dict, backend: str, why: str) -> None:
+    """Record that a rung was offered this job and would not take it.
+
+    ACCUMULATED, not overwritten. With one remote rung the last refusal was the
+    only refusal; with two, a job that ends up local was turned down twice and a
+    record that keeps only the second one cannot say whether the card was busy
+    or missing. The reasons are what a person reads when they ask why a job that
+    should have gone to a fast machine ran here instead.
+    """
+    job["fell_back"] = True
+    said = f"{backend}: {why}" if why else backend
+    prior = job.get("fell_back_reason")
+    job["fell_back_reason"] = f"{prior}; {said}" if prior else said
+
+
+def _backend_for(job: dict, exclude: tuple[str, ...] = ()):
     """Which thing speaks this job.
 
     THE ONE PLACE THAT DECISION IS MADE, and the reason _run is unchanged. _run
@@ -351,6 +536,18 @@ def _backend_for(job: dict):
     whole test suite rests on conftest monkeypatching Synth._speak, so a chooser
     that bypassed Synth in the unconfigured case would leave every test in this
     repository quietly exercising nothing.
+
+    THREE RUNGS NOW, ON TWO MACHINES. The runner sells its card and its
+    processor as two services over one host, and they are two different offers:
+    a game takes the card and leaves twelve threads idle, a compile takes every
+    thread and leaves the card at five per cent. `exclude` is how `_worker`
+    walks down the ladder after a rung hands the job back, so a yield off the
+    card can step to the processor beside it rather than jumping straight to
+    this host.
+
+    LOCAL IS A RUNG AND IT IS ALWAYS WILLING, so anything ordered after it is
+    unreachable unless `_order_for` promotes it. That is deliberate: it is the
+    property that makes the floor a floor.
 
     The three states the runner reports are kept apart here too. "speech is not
     installed on that machine" is the owner's to fix and will not change by
@@ -368,24 +565,52 @@ def _backend_for(job: dict):
     # could not answer "where did this run", which is the first thing anybody
     # asks once there is more than one machine.
     job["backend"] = "local"
-    client = state.get("runner")
-    if client is None:
-        return local
+    order, backlog = _order_for(job)
+    for name in order:
+        if name in exclude:
+            continue
+        if name == "local":
+            return local
+        client = state.get(name)
+        if client is None:
+            continue
+        chosen = _remote_rung(name, client, job, backlog)
+        if chosen is not None:
+            return chosen
+    # Every rung declined or was already tried. The floor is still the floor,
+    # even when the order does not name it.
+    job["backend"] = "local"
+    return local
+
+
+def _remote_rung(name: str, client, job: dict, backlog: float):
+    """Offer one job to one remote rung, or return None and say why not."""
     try:
-        ready, why = client.speech_state()
+        offer = client.offer()
     except Exception as exc:  # noqa: BLE001 - a runner that is down is not an error here
-        log.info("%s: runner unreachable (%s); speaking locally",
-                 job["id"][:8], exc)
-        job["fell_back"] = True
-        job["fell_back_reason"] = "unreachable: " + type(exc).__name__
-        return local
-    if not ready:
-        if why in {"not_installed", "not_enabled", "no_such_service"}:
-            # Worth saying out loud once per job: this one will never clear on
-            # its own, and the fix is one command on the runner's own machine.
-            log.warning("%s: the runner has no usable %s service (%s); speaking "
-                        "locally. Fix with `idlegpu service install %s` there.",
-                        job["id"][:8], client.cfg.service, why, client.cfg.service)
+        log.info("%s: %s unreachable (%s); trying the next backend",
+                 job["id"][:8], name, exc)
+        _refused(job, name, "unreachable: " + type(exc).__name__)
+        return None
+    if not offer.ready:
+        if offer.why in {"not_installed", "not_enabled", "no_such_service"}:
+            if name == "runner":
+                # Worth saying out loud once per job: this one will never clear
+                # on its own, the fix is one command on the runner's own
+                # machine, and somebody set TTS_RUNNER_HOST expecting it to work.
+                log.warning("%s: the runner has no usable %s service (%s); "
+                            "speaking elsewhere. Fix with `idlegpu service "
+                            "install %s` there.", job["id"][:8],
+                            client.cfg.service, offer.why, client.cfg.service)
+            else:
+                # NOT A WARNING FOR THE PROCESSOR RUNG. A machine that sells its
+                # card and not its threads is an ordinary configuration, not a
+                # mistake, and a warning per job telling its owner to install
+                # something they may have decided against is how people learn
+                # to ignore this log.
+                log.info("%s: the runner does not offer %s (%s); set "
+                         "TTS_RUNNER_CPU_SERVICE='' if it never will.",
+                         job["id"][:8], client.cfg.service, offer.why)
         else:
             # THE RUNNER'S OWN WORDS, not our guess at them. This used to say
             # "the runner's GPU is busy" for every reason that was not a missing
@@ -393,12 +618,17 @@ def _backend_for(job: dict):
             # also declines when somebody is at the keyboard and the CPU row says
             # nothing, and when there is not enough free memory to start a 6.5 GiB
             # model, and both of those read as a lie in a log that says GPU.
-            log.info("%s: the runner is not free (%s); speaking locally",
+            log.info("%s: %s is not free (%s)", job["id"][:8], name, offer.why)
+        _refused(job, name, offer.why)
+        return None
+    if name == "runner_cpu":
+        worth, why = _cpu_rung_worth_it(offer, job, backlog)
+        if not worth:
+            log.info("%s: the runner would speak on its processor but %s",
                      job["id"][:8], why)
-        job["fell_back"] = True
-        job["fell_back_reason"] = why
-        return local
-    job["backend"] = "runner"
+            _refused(job, name, why)
+            return None
+    job["backend"] = name
     job["runner_host"] = "%s:%d" % (client.cfg.host, client.cfg.port)
     job["runner_service"] = client.cfg.service
 
@@ -642,6 +872,13 @@ SIDECAR_KEYS = (
     # restart.
     "backend", "runner_host", "runner_service",
     "fell_back", "fell_back_reason", "segments_from_runner",
+    # WHICH RUNG IT LEFT, once there is more than one to leave. `fell_back`
+    # says something went wrong somewhere and `backend` says where it ended
+    # up; neither can say a job started on the card, moved to the processor
+    # beside it and finished here. A restart used to lose that history along
+    # with everything else, which is the class of loss this sidecar exists to
+    # stop.
+    "fell_back_from",
     "queued_seconds",
     # Set when the audio was deleted on purpose and the record kept. Without
     # it a restart cannot tell "somebody freed the disk" from "the sweeper
@@ -816,10 +1053,18 @@ async def lifespan(app: FastAPI):
     # and _backend_for returns the local Synth without importing anything else.
     runner_cfg = RunnerConfig.from_env()
     state["runner"] = RunnerClient(runner_cfg) if runner_cfg else None
+    # THE SAME MACHINE'S OTHER SERVICE, and a second client rather than a second
+    # host. It shares the certificate pin, the key and the port; only the
+    # service id and the wait differ. None when the runner has no processor rung
+    # configured, which is what TTS_RUNNER_CPU_SERVICE="" says.
+    cpu_cfg = runner_cfg.for_cpu() if runner_cfg else None
+    state["runner_cpu"] = RunnerClient(cpu_cfg) if cpu_cfg else None
     if runner_cfg:
-        log.info("a GPU runner is configured at %s:%d (service %s); jobs go "
-                 "there when it is free and to this CPU when it is not",
-                 runner_cfg.host, runner_cfg.port, runner_cfg.service)
+        log.info("a runner is configured at %s:%d; its card is service %s and "
+                 "its processor is %s. Work is offered in this order: %s.",
+                 runner_cfg.host, runner_cfg.port, runner_cfg.service,
+                 cpu_cfg.service if cpu_cfg else "not offered",
+                 ", ".join(BACKEND_ORDER))
     # One worker on purpose. The model is 6.5 GB and generation is sequential,
     # so a second job would double memory and slow both.
     threading.Thread(target=_worker, daemon=True).start()
@@ -916,6 +1161,16 @@ def _health() -> dict[str, object]:
         # separate: "this host does 0.28x and the runner does 20x" is two facts,
         # and averaging them describes no machine that exists.
         "realtime_factor_by_backend": {k: round(v.value, 3) for k, v in _rates.items()},
+        # HOW MANY JOBS ARE BEHIND EACH OF THOSE FIGURES. A rate with zero
+        # observations is the seed and nothing else -- a documented measurement
+        # from another machine, published so that a router which has not tried a
+        # backend yet can tell a hypothesis from a fact. Without this the third
+        # backend is a number nobody can weigh, and the first thing anybody does
+        # with an unweighable number is trust it.
+        "backend_observations": {k: v.count for k, v in _rates.items()},
+        # The order work is offered in, so the page and a person reading /health
+        # can see the policy rather than infer it from where jobs ended up.
+        "backend_order": list(BACKEND_ORDER),
         # WAS A BOOLEAN, AND A BOOLEAN ANSWERED THE WRONG QUESTION. "A runner is
         # configured" is not what anybody wants to know; "is it up, is it free,
         # and if not why not" is. The page draws this, so it is the whole

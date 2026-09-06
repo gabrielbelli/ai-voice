@@ -70,7 +70,7 @@ import os
 import ssl
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -130,12 +130,39 @@ class RunnerConfig:
     ca_file: str = ""
     api_key: str = ""
     service: str = "chatterbox"
+    # THE SECOND RUNG ON THE SAME MACHINE. The runner sells its processor as
+    # well as its card, as two service ids over one host, port, pin and key --
+    # so the CPU client is `dataclasses.replace(cfg, service=cfg.cpu_service)`
+    # and nothing else. Set TTS_RUNNER_CPU_SERVICE to "" to switch the rung off
+    # and get exactly the two-backend behaviour that shipped before it existed.
+    cpu_service: str = "chatterbox-cpu"
     timeout: float = 30.0
     # How long a job may sit queued on the runner while its owner is gaming
     # before this host gives up and speaks it locally. Longer than one game, and
     # shorter than an evening.
     max_wait: float = 900.0
+    # SHORTER FOR THE PROCESSOR RUNG, and the asymmetry is the point. A job
+    # waiting on the card falls back to a machine that is roughly as fast
+    # (0.230x here against 0.70x there, measured), so waiting out a game is
+    # usually cheaper than giving up. A job waiting on the runner's processor
+    # falls back to a machine that is no slower than it was going to be
+    # anyway, so a long wait buys nothing at all.
+    cpu_max_wait: float = 300.0
     poll: float = 2.0
+
+    def for_cpu(self) -> "RunnerConfig | None":
+        """The same machine, its other service, or None when it has none.
+
+        One host, one port, one pin, one key, one certificate: the processor
+        rung differs from the card by a service id and by how long it is worth
+        waiting for. Building it by `replace` rather than by hand is what stops
+        the two from drifting apart the day a field is added to one of them --
+        a second constructor call is a second place to forget the fingerprint,
+        and forgetting the fingerprint is not an error anybody would see.
+        """
+        if not self.cpu_service or self.cpu_service == self.service:
+            return None
+        return replace(self, service=self.cpu_service, max_wait=self.cpu_max_wait)
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "RunnerConfig | None":
@@ -164,8 +191,15 @@ class RunnerConfig:
             ca_file=(e.get("TTS_RUNNER_CA_FILE") or "").strip(),
             api_key=key,
             service=(e.get("TTS_RUNNER_SERVICE") or "chatterbox").strip(),
+            # Unset means the documented default, which is the id the runner
+            # ships. An explicitly EMPTY value is a different answer -- "this
+            # runner has no processor rung" -- and `or` would have collapsed
+            # the two, so the presence of the variable is what decides.
+            cpu_service=(e["TTS_RUNNER_CPU_SERVICE"].strip()
+                         if "TTS_RUNNER_CPU_SERVICE" in e else "chatterbox-cpu"),
             timeout=float(e.get("TTS_RUNNER_TIMEOUT") or 30.0),
             max_wait=float(e.get("TTS_RUNNER_MAX_WAIT") or 900.0),
+            cpu_max_wait=float(e.get("TTS_RUNNER_CPU_MAX_WAIT") or 300.0),
             poll=float(e.get("TTS_RUNNER_POLL") or 2.0),
         )
 
@@ -203,6 +237,68 @@ def _pinned_context(cfg: RunnerConfig) -> ssl.SSLContext:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
     return ctx
+
+
+@dataclass(frozen=True)
+class RunnerOffer:
+    """What the runner will do for ONE service, in its own words.
+
+    `speech_state()` reduces this to (ready, why) and is what the chooser used
+    while there was one remote rung. There are two now, on one machine, and the
+    difference between them is not whether they will run but HOW MUCH OF THE
+    MACHINE each is being given: `available: true` at a hundred per cent and
+    `available: true` at five per cent are the same boolean and a twenty to one
+    difference in delivered speech. The cap is therefore carried out of here
+    rather than reduced away, because the router needs it to decide whether a
+    network hop is worth taking at all.
+
+    `cpu_pct` is None when the runner does not publish `limits` -- an older
+    build, or one answering without an agent behind it. NONE IS NOT A HUNDRED.
+    A missing cap means the delivered rate is unknowable from here, and the
+    chooser refuses the processor rung rather than guessing, because guessing
+    high turns a ten minute job into a two hour one and nothing reports a fault.
+    """
+
+    ready: bool
+    why: str = ""
+    # "gpu" | "cpu" | "", from the runner's own per-service field.
+    device: str = ""
+    # The share of the WHOLE machine the matrix row in force allows, 0-100.
+    cpu_pct: int | None = None
+    # The named posture in force, for a person reading the panel.
+    machine_state: str = ""
+    machine_state_reason: str = ""
+
+
+def _project(src: dict, names: dict[str, str]) -> dict:
+    """{our name: their value} for the keys they actually sent.
+
+    A missing key is LEFT OUT rather than set to None, because a panel that
+    tests `if (g.util_gpu !== undefined)` is asking "did the machine say", and
+    an invented null answers a question nobody asked.
+    """
+    return {ours: src[theirs] for ours, theirs in names.items() if theirs in src}
+
+
+def _services_of(status_doc: dict, services_doc: dict) -> list[dict]:
+    """One row per service, from the two documents that each hold half of it.
+
+    /v1/status knows what is running and how deep the queue is. /v1/services
+    knows what device a service wants and whether this machine will take it
+    right now, already resolved. Neither knows both, and the page needs both on
+    one line, so they are joined here on the id rather than on the page.
+    """
+    resolved = {x.get("id"): x for x in (services_doc.get("services") or [])}
+    rows = []
+    for x in status_doc.get("services") or []:
+        r = resolved.get(x.get("id")) or {}
+        rows.append({"id": x.get("id"),
+                     "running": x.get("running"),
+                     "queued": x.get("queued"),
+                     "device": r.get("device"),
+                     "available": r.get("available"),
+                     "unavailable_reason": r.get("unavailable_reason") or None})
+    return rows
 
 
 class RunnerClient:
@@ -259,6 +355,17 @@ class RunnerClient:
     def speech_state(self) -> tuple[bool, str]:
         """(will it speak for us, why not).
 
+        The reduction of `offer()` to the pair the chooser has always taken,
+        kept because it is the whole answer for the card: the GPU rung is
+        either given or it is not, and there is no dial on it. The processor
+        rung has a dial, so anything choosing between the two calls `offer()`.
+        """
+        o = self.offer()
+        return o.ready, o.why
+
+    def offer(self) -> RunnerOffer:
+        """What this runner will give this service, right now.
+
         THE THREE STATES, KEPT APART. The runner answers "known", "installed"
         and "ready" for the service, and separately whether the machine is free,
         and the reason those are separate fields is exactly this function.
@@ -281,32 +388,47 @@ class RunnerClient:
         predates the split does not publish `available` at all and answering
         "busy" for ever against a perfectly good older runner is a worse failure
         than being slightly conservative.
+
+        NOT CACHED, deliberately, while `snapshot()` is. This answer decides
+        where one job goes and is asked once per job; that one is drawn on a
+        page that polls. Five seconds of staleness costs a page nothing and
+        costs a job the difference between the runner it was promised and the
+        runner it got.
         """
         status, _, data = self._request("GET", "/v1/services")
         if status != 200:
             raise RemoteUnavailable(f"GET /v1/services returned {status}")
         doc = json.loads(data)
+        limits = doc.get("limits") or {}
+        pct = limits.get("cpu_pct")
+        common = {
+            "cpu_pct": int(pct) if isinstance(pct, (int, float)) else None,
+            "machine_state": doc.get("machine_state") or "",
+            "machine_state_reason": doc.get("machine_state_reason") or "",
+        }
         for svc in doc.get("services", []):
             if svc.get("id") != self.cfg.service:
                 continue
+            device = svc.get("device") or ""
             if not svc.get("installed"):
-                return False, "not_installed"
+                return RunnerOffer(False, "not_installed", device, **common)
             if not svc.get("enabled"):
-                return False, "not_enabled"
+                return RunnerOffer(False, "not_enabled", device, **common)
             available = svc.get("available")
             if available is None:
                 # An older runner, or one answering without an agent behind it.
                 if not doc.get("gpu_available"):
-                    return False, "gpu_busy"
-                return True, ""
+                    return RunnerOffer(False, "gpu_busy", device, **common)
+                return RunnerOffer(True, "", device, **common)
             if not available:
                 # The runner's own words when it has them. "somebody is gaming"
                 # and "there is not enough memory free to start a 6.5 GiB model"
                 # are both temporary and both worth telling a person apart.
                 why = svc.get("unavailable_reason") or doc.get("machine_state_reason")
-                return False, f"machine_busy: {why}" if why else "machine_busy"
-            return True, ""
-        return False, "no_such_service"
+                return RunnerOffer(False, f"machine_busy: {why}" if why else "machine_busy",
+                                   device, **common)
+            return RunnerOffer(True, "", device, **common)
+        return RunnerOffer(False, "no_such_service", "", **common)
 
     def snapshot(self, max_age: float = 5.0) -> dict:
         """What the runner is doing, for a person to look at.
@@ -331,6 +453,17 @@ class RunnerClient:
                 snap = {"reachable": False, "error": f"HTTP {status}"}
             else:
                 doc = json.loads(data)
+                # BEST EFFORT, AND ON ITS OWN. A runner that answers /v1/status
+                # and not /v1/services is still a reachable runner with a live
+                # load figure worth drawing, so a failure here loses the
+                # per-service half of the panel rather than the whole card.
+                offered: dict = {}
+                try:
+                    st2, _, d2 = self._request("GET", "/v1/services")
+                    if st2 == 200:
+                        offered = json.loads(d2)
+                except Exception as exc:  # noqa: BLE001 - see above
+                    log.debug("runner /v1/services did not answer: %s", exc)
                 gpu = doc.get("gpu") or {}
                 cpu = doc.get("cpu") or {}
                 mem = doc.get("memory") or {}
@@ -360,22 +493,51 @@ class RunnerClient:
                     "memory": {k: mem.get(k) for k in
                                ("total_mib", "available_mib", "load_pct")
                                if k in mem} or None,
-                    "gpu": {k: gpu.get(k) for k in
-                            ("healthy", "util_gpu", "mem_used_mib", "mem_total_mib",
-                             "temperature_c", "power_w", "name")
-                            if k in gpu},
-                    "services": [{"id": x.get("id"),
-                                  "running": x.get("running"),
-                                  "queued": x.get("queued"),
-                                  "device": x.get("device"),
-                                  "available": x.get("available")}
-                                 for x in (doc.get("services") or [])],
+                    # THE RUNNER'S OWN FIELD NAMES, TRANSLATED HERE, and this
+                    # is a bug fix rather than a rename. The projection asked
+                    # for util_gpu, mem_used_mib, power_w and name; the runner
+                    # publishes utilisation_pct, memory_used_mib and
+                    # power_watts, and publishes no temperature and no card
+                    # name at all. The intersection of the two lists was
+                    # {"healthy"}, which the page does not draw, so the GPU
+                    # detail line has been permanently empty on a working stack
+                    # and nothing anywhere said so. The translation belongs on
+                    # this side: the page reads names, the runner publishes
+                    # names, and one of the two has to speak the other's.
+                    #
+                    # temperature_c, name and mem_total_mib are simply absent
+                    # from the runner and are therefore left out rather than
+                    # invented. The page already draws only the bits it has.
+                    "gpu": _project(gpu, {"healthy": "healthy",
+                                          "util_gpu": "utilisation_pct",
+                                          "mem_used_mib": "memory_used_mib",
+                                          "power_w": "power_watts",
+                                          "pstate": "pstate"}),
+                    # WHAT IT WILL TAKE, PER SERVICE, and it does not come from
+                    # /v1/status. That document lists services with their pids
+                    # and queue depths and says nothing about device or
+                    # availability; those live on /v1/services, which is the
+                    # document that resolves them. Asking for both is two small
+                    # requests every five seconds to a desktop on the LAN, and
+                    # it is the difference between a panel that can say "the
+                    # card has gone to a game, the processor is still selling"
+                    # and one that shows two nulls.
+                    "services": _services_of(doc, offered),
+                    "gpu_available": offered.get("gpu_available"),
+                    "cpu_available": offered.get("cpu_available"),
+                    "gpu_contended": offered.get("gpu_contended"),
+                    "cpu_contended": offered.get("cpu_contended"),
+                    "profile": offered.get("profile"),
+                    "profile_label": offered.get("profile_label"),
                 }
         except Exception as exc:  # noqa: BLE001 - the failure IS the status
             snap = {"reachable": False, "error": type(exc).__name__}
         snap["host"] = self.cfg.host
         snap["port"] = self.cfg.port
         snap["service"] = self.cfg.service
+        # Which of the listed services is the processor rung, so a panel can
+        # label the two without matching on a name it made up.
+        snap["cpu_service"] = self.cfg.cpu_service
         self._snap, self._snap_at = snap, now
         return snap
 
@@ -618,8 +780,13 @@ class RemoteSynth:
             if status == "queued" and not waiting:
                 waiting = True
                 if parts:
-                    log.info("the runner yielded the GPU after %d of %d "
-                             "segments; waiting for its owner to finish",
+                    # "the machine", not "the GPU". The same code drives the
+                    # processor rung, where a yield is a throttle rather than a
+                    # handover of a card, and a log line naming hardware the
+                    # service never asked for sends people looking for a game
+                    # that is not running.
+                    log.info("the runner paused %s after %d of %d segments; "
+                             "waiting for its owner to finish", cfg.service,
                              len(parts), len(segments))
                 else:
                     log.info("the runner has not started this job; it is "
@@ -648,9 +815,9 @@ class RemoteSynth:
                 self._client.cancel(remote_id)
                 raise RemoteYield(
                     f"the runner produced {len(parts)} of {len(segments)} "
-                    f"segments and then had the GPU taken back for "
-                    f"{waited:.0f}s of the {cfg.max_wait:.0f}s allowed; its "
-                    "owner is using the machine", delivered=len(parts))
+                    f"segments on {cfg.service} and then had the machine taken "
+                    f"back for {waited:.0f}s of the {cfg.max_wait:.0f}s "
+                    "allowed; its owner is using it", delivered=len(parts))
             time.sleep(cfg.poll)
 
         audio = splice([(p, 0.0) for p in parts]) if parts else np.zeros(0, dtype=np.float32)

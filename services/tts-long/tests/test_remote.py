@@ -48,9 +48,22 @@ class FakeClient:
         self._tokens = tokens
         self._polls = 0
         self.state = (True, "")
+        # WHAT THE RUNNER IS SELLING, not only whether it will sell. The chooser
+        # reads the cap for the processor rung, because `available: true` at a
+        # hundred per cent and at five per cent are the same boolean and a
+        # twenty to one difference in delivered speech.
+        self.device = "gpu"
+        self.cpu_pct = 100
 
     def speech_state(self):
         return self.state
+
+    def offer(self):
+        # Through speech_state, so a subclass that overrides that one method --
+        # the runner that is switched off, below -- still behaves like one.
+        from app.remote import RunnerOffer
+        ready, why = self.speech_state()
+        return RunnerOffer(ready, why, device=self.device, cpu_pct=self.cpu_pct)
 
     def ensure_asset(self, path):
         raw = Path(path).read_bytes()
@@ -438,7 +451,9 @@ def test_waiting_forever_is_bounded_and_the_job_is_withdrawn():
     cfg = RunnerConfig(host="h", max_wait=0.0, poll=0.0)
     client = FakeClient(cfg=cfg, segments=99)
     client.job = lambda job_id: {"status": "queued", "artefacts": []}
-    with pytest.raises(RemoteYield, match="its owner is using the machine") as caught:
+    # "using it", not "using the machine": the same wait now serves the
+    # processor rung, where nothing about a card is involved.
+    with pytest.raises(RemoteYield, match="its owner is using it") as caught:
         RemoteSynth(client, JOB).speak_segments(segs(2), "en", 0.5, 0.5, 0.8, None)
     assert client.cancelled == ["remote-job-1"]
     # Nothing was produced, so nothing has left this host and speaking it
@@ -552,15 +567,22 @@ def _wait(client, job_id: str, timeout: float = 30.0) -> dict:
 
 
 @contextmanager
-def runner(client):
-    """Attach a fake runner to the running app for the length of one test."""
+def runner(client, cpu=None):
+    """Attach a fake runner to the running app for the length of one test.
+
+    Two clients now, because the runner sells two things over one host. `cpu` is
+    the processor rung; leaving it None is a machine that offers only its card,
+    which is what TTS_RUNNER_CPU_SERVICE="" configures.
+    """
     import app.main as main
 
     main.state["runner"] = client
+    main.state["runner_cpu"] = cpu
     try:
         yield main
     finally:
         main.state["runner"] = None
+        main.state["runner_cpu"] = None
 
 
 def test_the_runner_is_keyed_to_the_local_job_id_when_a_real_job_runs(speech):
@@ -694,6 +716,11 @@ def test_the_local_path_is_untouched_when_no_runner_is_configured(speech,
     assert finished["backend"] == "local", "an unconfigured job must say local"
     assert "runner_host" not in finished, "nothing remote was involved"
     assert "fell_back" not in finished, "there was nothing to fall back from"
+    # AND THE SECOND CLIENT IS NOT CONSTRUCTED EITHER. The processor rung is a
+    # second RunnerClient over the same host, so a chooser that built one
+    # unconditionally would open a socket on a stack that has no runner at all
+    # -- and would do it from the module every other test depends on being inert.
+    assert main.state.get("runner_cpu") is None
 
 
 def test_the_two_backends_speak_through_exactly_the_same_signature():
@@ -795,18 +822,30 @@ def test_a_job_queued_before_it_ever_ran_says_so():
 # uses, one layer lower.
 
 
-def _client_answering(doc, path="/v1/services"):
-    """A real RunnerClient whose one HTTP call returns `doc`."""
+def _client_answering(doc, path="/v1/services", services=None, cfg=None):
+    """A real RunnerClient whose HTTP calls return canned documents.
+
+    TWO PATHS, because the runner's answer lives in two documents and neither
+    holds all of it. /v1/status has the live load and what is running;
+    /v1/services has the per-service device and the resolved `available`. A
+    fake that answered only one of them is how the snapshot came to ask
+    /v1/status for a `device` field the runner has never published there.
+
+    `services=` supplies the second document. Anything unasked for answers an
+    empty object, which is also what an older runner effectively gives.
+    """
     import json as _json
 
     from app.remote import RunnerClient
 
-    c = RunnerClient(RunnerConfig(host="runner.invalid", service="chatterbox",
-                                  fingerprint="ab" * 32))
+    docs = {path: doc}
+    if services is not None:
+        docs["/v1/services"] = services
+    c = RunnerClient(cfg or RunnerConfig(host="runner.invalid", service="chatterbox",
+                                         fingerprint="ab" * 32))
 
     def fake(method, p, body=None, headers=None, timeout=None):
-        assert p == path, p
-        return 200, {}, _json.dumps(doc).encode()
+        return 200, {}, _json.dumps(docs.get(p, {})).encode()
 
     c._request = fake            # type: ignore[method-assign]
     return c
@@ -892,14 +931,26 @@ def test_the_status_panel_can_say_what_the_runner_is_giving_up():
         "cpu": {"machine_pct": 12.5, "own_pct": 9.8, "foreign_pct": 2.7,
                 "logical_processors": 16},
         "memory": {"total_mib": 32670, "available_mib": 24513, "load_pct": 24},
-        "services": [{"id": "chatterbox", "running": True, "queued": 0,
-                      "device": "cpu", "available": True}],
-    }, path="/v1/status").snapshot(max_age=0.0)
+        "services": [{"id": "chatterbox", "running": True, "queued": 0}],
+    }, path="/v1/status", services={
+        # DEVICE AND AVAILABLE COME FROM HERE, and the test used to put them on
+        # /v1/status where the runner has never published them. The snapshot
+        # read two nulls and the assertion passed anyway because the fake was
+        # answering whatever it was asked. Both documents are now supplied
+        # separately, which is what the runner really does.
+        "gpu_available": False,
+        "cpu_available": True,
+        "services": [{"id": "chatterbox", "device": "cpu", "available": True}],
+    }).snapshot(max_age=0.0)
     assert snap["machine_state"] == "lightuse"
     assert snap["limits"]["cpu_pct"] == 10
     assert snap["cpu"]["foreign_pct"] == 2.7
     assert snap["memory"]["available_mib"] == 24513
     assert snap["services"][0]["device"] == "cpu"
+    assert snap["services"][0]["available"] is True
+    # The two machine-wide answers, side by side. A panel drawing one of them
+    # over the words "the runner" says the wrong thing half the time.
+    assert snap["gpu_available"] is False and snap["cpu_available"] is True
 
 
 def test_an_older_runner_reports_no_limits_rather_than_zero_ones():
@@ -913,3 +964,341 @@ def test_an_older_runner_reports_no_limits_rather_than_zero_ones():
     assert snap["limits"] is None
     assert snap["cpu"] is None
     assert snap["memory"] is None
+
+
+# ------------------------------------------------- the third rung ------------
+#
+# ONE MACHINE, TWO OFFERS. The runner sells its card and its processor as two
+# service ids over one host, and they are not the same question: a game takes
+# the card and leaves twelve threads idle, a compile takes every thread and
+# leaves the card at five per cent. Everything below is about the chooser
+# getting that right, and about the two ways it could quietly get it wrong --
+# walking past idle threads, and handing a job to a machine that is giving away
+# five per cent of itself.
+
+
+def _cpu_client(pct=100, ready=True, why="", service="chatterbox-cpu"):
+    """A processor rung offering `pct` of its machine."""
+    c = FakeClient(cfg=RunnerConfig(host="runner.invalid", service=service, poll=0.0))
+    c.device = "cpu"
+    c.cpu_pct = pct
+    c.state = (ready, why)
+    return c
+
+
+def _spoken(chars=400):
+    """A job the size of a real one, because the cap arithmetic is about size."""
+    return {"id": "abc123", "segments": [("x" * chars, 0.0)]}
+
+
+def test_a_game_on_the_card_does_not_walk_past_twelve_idle_threads(speech,
+                                                                   monkeypatch):
+    """THE DEFECT THIS PREVENTS, and it is the reason the rung exists at all.
+
+    Somebody starts a game. The card goes, and sixteen threads on the same
+    machine do not. A chooser that reads one answer for the whole runner falls
+    back to a machine across the LAN for work the runner was about to do, at the
+    precise moment the runner is most willing to do it.
+    """
+    import app.main as main
+
+    monkeypatch.setattr(main, "BACKEND_ORDER", ("runner", "runner_cpu", "local"))
+    gpu = FakeClient()
+    gpu.state = (False, "machine_busy: a game is running")
+    with runner(gpu, cpu=_cpu_client(pct=100)):
+        job = _spoken()
+        chosen = main._backend_for(job)
+
+    assert job["backend"] == "runner_cpu", job.get("fell_back_reason")
+    assert chosen is not main.state["synth"]
+    assert job["runner_service"] == "chatterbox-cpu"
+    # The card's refusal is still on the record. A job that ended up on the
+    # processor because a game was running reads differently from one that
+    # ended up there because the card was never installed.
+    assert "runner: machine_busy" in job["fell_back_reason"]
+
+
+def test_a_cap_that_makes_the_runner_slower_than_here_is_not_taken(speech,
+                                                                  monkeypatch):
+    """THE DEFECT THIS PREVENTS: routing on the boolean instead of the cap.
+
+    `available: true` while the runner is giving a hundred per cent of a sixteen
+    thread machine and `available: true` while it is giving ten are the same
+    field and a ten to one difference in delivered speech. A ten minute job sent
+    to the second one takes over an hour, on somebody's desktop, while they are
+    sitting at it -- and nothing anywhere reports a fault.
+    """
+    import app.main as main
+
+    monkeypatch.setattr(main, "BACKEND_ORDER", ("runner_cpu", "local"))
+    with runner(None, cpu=_cpu_client(pct=10)):
+        job = _spoken()
+        chosen = main._backend_for(job)
+
+    assert chosen is main.state["synth"]
+    assert job["backend"] == "local"
+    assert "10%" in job["fell_back_reason"], job["fell_back_reason"]
+
+
+def test_an_unknown_cap_is_a_refusal_and_never_a_hundred_per_cent(speech,
+                                                                  monkeypatch):
+    """THE ONE PLACE THIS FILE FAILS CLOSED ON A MISSING FIELD.
+
+    Everywhere else a runner that does not publish something gets the benefit of
+    the doubt, because the cost of being wrong is a fallback to a CPU that
+    works. Here the cost is a job going slowly on a machine nobody is watching,
+    which is the failure that does not announce itself. A runner that will not
+    say how much of its processor it is selling does not get the job.
+    """
+    import app.main as main
+
+    monkeypatch.setattr(main, "BACKEND_ORDER", ("runner_cpu", "local"))
+    with runner(None, cpu=_cpu_client(pct=None)):
+        job = _spoken()
+        assert main._backend_for(job) is main.state["synth"]
+
+    assert job["backend"] == "local"
+    assert "how much" in job["fell_back_reason"]
+
+
+def test_a_queue_here_is_what_earns_the_processor_rung_its_first_job(speech,
+                                                                     monkeypatch):
+    """THE SELF-FULFILLING REFUSAL, and the only escape from it.
+
+    The runner's processor is measured at 0.24x against this host's 0.23x, so on
+    an idle stack there is no reason to send it anything and the default order
+    puts it below a local backend that is always willing -- which makes it
+    unreachable, so it is never measured, so its seed is permanent.
+
+    A queue is what changes the arithmetic: 0.24x starting now beats 0.23x
+    starting four minutes from now. This is the one rule that gets the third
+    backend its first observation, and without it `backend_observations` would
+    read zero for ever.
+    """
+    import app.main as main
+
+    monkeypatch.setattr(main, "BACKEND_ORDER", ("runner", "local", "runner_cpu"))
+    monkeypatch.setattr(main, "RUNNER_CPU_WHEN_BACKLOG_S", 120.0)
+
+    with runner(None, cpu=_cpu_client(pct=100)):
+        quiet = _spoken()
+        assert main._backend_for(quiet) is main.state["synth"], \
+            "a rung below an always-willing floor must be unreachable while quiet"
+        assert quiet["backend"] == "local"
+
+        # A queue in front of it: several minutes of accepted work.
+        main.jobs["queued-1"] = {"id": "queued-1", "status": "queued",
+                                 "segments": [("y" * 20000, 0.0)]}
+        try:
+            assert main._backlog_seconds() > 120
+            busy = _spoken()
+            main._backend_for(busy)
+        finally:
+            main.jobs.pop("queued-1", None)
+
+    assert busy["backend"] == "runner_cpu", busy.get("fell_back_reason")
+
+
+def test_a_yield_off_the_card_steps_to_the_processor_beside_it(speech,
+                                                              monkeypatch):
+    """THE DEFECT THIS PREVENTS: a ladder with its bottom rung hard coded.
+
+    The fallback used to be one line -- `job["backend"] = "local"` and run here
+    -- because this host was the only other place there was. With three places
+    that can skip the machine that just said no to its card and yes to its
+    threads, which is the same machine, one service along, with the model
+    already on its disk.
+
+    The order is set here rather than left at the default, and that is the
+    point of the setting: the SHIPPED order puts this host between the two
+    rungs, because the runner's processor is measured at about the same rate as
+    this host and is across a network. An operator who wants the machine's own
+    threads tried first says so, and the ladder must then actually go there.
+    """
+    import app.main as main
+
+    monkeypatch.setattr(main, "BACKEND_ORDER", ("runner", "runner_cpu", "local"))
+    gpu = FakeClient(cfg=RunnerConfig(host="h", max_wait=0.0, poll=0.0), segments=99)
+    gpu.job = lambda job_id: {"status": "queued", "artefacts": []}
+    cpu = _cpu_client(pct=100)
+
+    with runner(gpu, cpu=cpu):
+        created = speech.post("/jobs", json={"text": "One short line.",
+                                             "voice": "default"}).json()
+        finished = _wait(speech, created["id"])
+
+    assert finished["status"] == "done", finished.get("error")
+    assert finished["backend"] == "runner_cpu", "it jumped past the processor"
+    # WHERE IT CAME FROM, which `fell_back` alone cannot say once there is more
+    # than one place to fall back from.
+    assert finished["fell_back_from"] == "runner"
+    assert cpu.submitted, "the processor rung was never asked to do anything"
+
+
+def test_segments_from_two_rungs_are_added_up_and_not_overwritten(speech,
+                                                                 monkeypatch):
+    """THE DEFECT THIS PREVENTS is a record that under-reports what was done.
+
+    `segments_from_runner` was assigned, which was right while a job could leave
+    exactly one machine. A job that has segments spoken on the card and more on
+    the processor before ending up here would report only the second lot, and
+    that number is the only evidence of how much work a yield actually cost.
+    """
+    import app.main as main
+
+    monkeypatch.setattr(main, "BACKEND_ORDER", ("runner", "runner_cpu", "local"))
+
+    def stalls_after_one(host, service):
+        # One segment delivered, then the owner comes back and never leaves.
+        c = FakeClient(cfg=RunnerConfig(host=host, service=service,
+                                        max_wait=0.0, poll=0.0),
+                       segments=2, yield_after=1)
+        return c
+
+    gpu = stalls_after_one("h", "chatterbox")
+    cpu = stalls_after_one("h", "chatterbox-cpu")
+    cpu.device, cpu.cpu_pct = "cpu", 100
+
+    with runner(gpu, cpu=cpu):
+        created = speech.post("/jobs", json={"text": "One short line.",
+                                             "voice": "default"}).json()
+        finished = _wait(speech, created["id"])
+
+    assert finished["status"] == "done", finished.get("error")
+    assert finished["backend"] == "local", "the floor is still the floor"
+    assert finished["fell_back_from"] == "runner, runner_cpu"
+    assert finished["segments_from_runner"] == 2, (
+        "each rung delivered one segment before handing the job back; a record "
+        "that says " + repr(finished["segments_from_runner"]) + " has kept only "
+        "the last of them")
+
+
+def test_the_processors_rate_never_enters_the_cards_average_or_this_hosts(speech):
+    """Three machines, three averages. Merging any two of them describes a
+    machine that does not exist, and `rate` is what decides whether a request is
+    answered synchronously or handed a 202."""
+    import app.main as main
+
+    local_before = main.rate.value
+    gpu_before = main.rate_for("runner").value
+    main.rate_for("runner_cpu").observe(audio_seconds=10.0, compute_seconds=50.0)
+
+    assert main.rate.value == local_before
+    assert main.rate_for("runner").value == gpu_before
+    assert main.rate_for("runner_cpu").value != main.rate_for("local").value
+
+
+def test_a_seed_is_a_hypothesis_and_health_says_which_numbers_are_measured(speech):
+    """THE DEFECT THIS PREVENTS: a documented measurement from another machine
+    being read as this stack's own.
+
+    Every backend's rate is seeded, and a seed and an average over four hundred
+    jobs look identical in `realtime_factor_by_backend`. The count beside it is
+    what makes the difference legible -- to a router, and to whoever is trying
+    to work out why a job went where it went.
+    """
+    import app.main as main
+
+    main.rate_for("runner_cpu")            # seeded, never observed
+    doc = speech.get("/health").json()
+    assert doc["backend_observations"]["runner_cpu"] == 0
+    assert doc["realtime_factor_by_backend"]["runner_cpu"] > 0
+    assert doc["backend_order"] == list(main.BACKEND_ORDER)
+
+
+# ------------------------------------------------- configuring the rung ------
+
+
+def test_the_processor_rung_shares_the_pin_and_the_key_of_the_card():
+    """THE DEFECT THIS PREVENTS: a second client built by hand.
+
+    One host, one certificate, one key, one port. Building the second config by
+    `replace` is what stops the two drifting apart the day a field is added --
+    and a forgotten fingerprint is not an error anybody would ever see, because
+    the only visible symptom is a connection that works.
+    """
+    cfg = RunnerConfig(host="box", fingerprint="ab" * 32, api_key="secret",
+                       port=47601, max_wait=900.0)
+    cpu = cfg.for_cpu()
+    assert cpu is not None
+    assert cpu.service == "chatterbox-cpu" and cfg.service == "chatterbox"
+    assert cpu.fingerprint == cfg.fingerprint
+    assert cpu.api_key == cfg.api_key and cpu.port == cfg.port
+    # Shorter, and the asymmetry is the point: the rung below the card is about
+    # as fast as the card's machine, so waiting out a game is worth it. The rung
+    # below the processor is no slower than the processor, so it is not.
+    assert cpu.max_wait == 300.0 and cpu.max_wait < cfg.max_wait
+
+
+def test_an_empty_cpu_service_means_the_runner_sells_only_its_card():
+    """UNSET AND EMPTY ARE DIFFERENT ANSWERS. Unset is "the default id, which is
+    what the runner ships". Empty is "this machine has no processor rung", which
+    is how the two-backend behaviour is restored on purpose. `or` would have
+    collapsed them into one."""
+    assert RunnerConfig.from_env(
+        {"TTS_RUNNER_HOST": "box"}).cpu_service == "chatterbox-cpu"
+    assert RunnerConfig.from_env(
+        {"TTS_RUNNER_HOST": "box", "TTS_RUNNER_CPU_SERVICE": ""}).cpu_service == ""
+    assert RunnerConfig.from_env(
+        {"TTS_RUNNER_HOST": "box", "TTS_RUNNER_CPU_SERVICE": ""}).for_cpu() is None
+    assert RunnerConfig(host="box", service="only-one",
+                        cpu_service="only-one").for_cpu() is None, \
+        "one service id cannot be two rungs"
+
+
+def test_the_cap_is_read_from_the_row_in_force_and_not_from_a_service_field():
+    """The cap is a property of the MACHINE's current state, not of the service:
+    it is the matrix row in force, published once at the top of /v1/services.
+    Reading it off the service entry would find nothing and refuse for ever."""
+    offer = _client_answering({
+        "gpu_available": False,
+        "cpu_available": True,
+        "machine_state": "nobodyhome",
+        "machine_state_reason": "nobody is signed in",
+        "limits": {"gpu": True, "cpu_pct": 100, "priority": "normal"},
+        "services": [{"id": "chatterbox", "installed": True, "enabled": True,
+                      "device": "cpu", "available": True}],
+    }).offer()
+    assert offer.ready is True
+    assert offer.cpu_pct == 100
+    assert offer.device == "cpu"
+    assert offer.machine_state == "nobodyhome"
+
+
+def test_a_runner_that_publishes_no_limits_gives_a_cap_of_none_not_zero():
+    """Absent is not zero and it is not a hundred. Zero would read as "it will
+    do nothing" and a hundred as "help yourself"; the truth is "this runner does
+    not say", and the chooser refuses on it."""
+    offer = _client_answering({
+        "gpu_available": True,
+        "services": [{"id": "chatterbox", "installed": True, "enabled": True,
+                      "available": True}],
+    }).offer()
+    assert offer.ready is True
+    assert offer.cpu_pct is None
+
+
+def test_a_runner_that_sells_only_its_card_is_not_a_misconfiguration(speech,
+                                                                     caplog,
+                                                                     monkeypatch):
+    """THE DEFECT THIS PREVENTS: a warning per job that trains people to ignore
+    the log.
+
+    A machine whose owner installed the speech service for the card and not for
+    the processor is an ordinary configuration and a deliberate one. Telling
+    them once a job to run `idlegpu service install` is noise, and it is the
+    same message that means something real when the CARD is missing, so it
+    devalues both.
+    """
+    import app.main as main
+
+    monkeypatch.setattr(main, "BACKEND_ORDER", ("runner_cpu", "local"))
+    absent = _cpu_client(ready=False, why="no_such_service")
+    with runner(None, cpu=absent):
+        with caplog.at_level("INFO"):
+            job = _spoken()
+            assert main._backend_for(job) is main.state["synth"]
+
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any("TTS_RUNNER_CPU_SERVICE" in r.getMessage() for r in caplog.records), \
+        "the log did not say how to switch the rung off"
