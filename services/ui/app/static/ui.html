@@ -280,6 +280,21 @@ details.jobtext>summary{font-weight:400;color:var(--dim);
 details.jobtext .body{padding:var(--s2) 0 var(--s2) var(--s3);
   border-left:2px solid var(--line);font-size:var(--t-body);line-height:1.7;
   white-space:pre-wrap;max-height:14em;overflow:auto}
+/* The vocabulary panel's rows are plain block children of a details body,
+   which carries no spacing rule of its own: the expert panels get theirs from
+   .grid2's gap, and this one has no grid. Same owl rule the card uses, with
+   the same label guard, so a label stays welded to its control. */
+#glossman .body > * + *{margin-top:var(--s3)}
+#glossman .body label + *{margin-top:0}
+#glossman .body *:empty{margin-top:0}
+/* AN EMPTY .seg IS A 2px BOX. #glossnames is empty on a deployment holding no
+   profiles at all, and an inline-flex with a border and nothing in it draws a
+   sliver that means nothing. */
+#glossnames:empty{display:none}
+/* Monospace because this is a file rather than prose: the `=` in `heard =
+   intended` is the syntax, and a proportional font hides which lines line up.
+   Taller than the shared 7.5rem floor -- a glossary is read as a list. */
+#glosstext{font-family:var(--mono);min-height:12em}
 .slider{display:grid;grid-template-columns:1fr auto;gap:var(--s2);
   align-items:center}
 .slider input[type=range]{width:100%}
@@ -715,6 +730,87 @@ details>summary:active{opacity:.72}
             <div><label>silence_duration_ms</label>
               <div class="slider"><input type="range" id="x-vad-s" min="0" max="30000" step="50" value="300"><output>300</output></div></div>
           </div>
+        </div>
+      </details>
+
+      <!-- READING AND MANAGING THE PROFILES, on the tab where they are chosen.
+           #glossbox above is the CHOICE and stays a row of toggles; this is
+           the other half, and until now the page had none: there was no way to
+           see what a profile contains, and no way to add, change or remove
+           one. That work went through curl, so the terms a transcript depends
+           on were invisible to the person depending on them.
+
+           A <details> and not a fourth tab. Managing vocabulary is rarer than
+           transcribing and belongs one disclosure away, which is the pattern
+           this page already uses for its secondary depth; a tab would put a
+           permanent third of the wayfinding in front of a job most sessions
+           never do.
+
+           HIDDEN UNTIL THE SERVICE ANSWERS. GET /glossaries is what says which
+           profiles exist and whether the deployment can be written to at all,
+           so with no answer there is nothing honest to draw.
+
+           EVERY REFUSAL IS PRE-EMPTED WHERE THE PAGE CAN SEE IT COMING. A
+           built-in is a 409, a bad name is a 400 and an unwritable deployment
+           is a 503, and all three are decidable here from the listing. So Save
+           and Delete grey with the reason beside them rather than offering a
+           write that the server is certain to refuse. The server stays the
+           authority: glossSave() still reads the status it gets back. -->
+      <details id="glossman" hidden>
+        <summary>Vocabulary profiles</summary>
+        <div class="body">
+          <div class="row" style="align-items:center">
+            <div class="seg tight" id="glossnames"></div>
+            <span class="spacer"></span>
+            <button class="small tight" id="glossnew" type="button">New profile</button>
+          </div>
+
+          <div id="glossform" hidden>
+            <div class="row fields">
+              <div class="tight">
+                <label for="glossname">Name</label>
+                <!-- 64 is profiles.NAME_PATTERN's own ceiling. Stopping the
+                     keystroke is kinder than greying Save after it. -->
+                <input type="text" id="glossname" maxlength="64"
+                       autocomplete="off" spellcheck="false">
+              </div>
+              <div class="tight">
+                <label>Source</label>
+                <div class="pills"><span class="pill" id="glosssource"></span>
+                  <span class="pill" id="glossterms"></span>
+                  <span class="pill" id="glossbytes"></span></div>
+              </div>
+            </div>
+            <!-- The file text, not the parsed halves. GET /glossaries/{name}
+                 returns both, and the text is the one that carries the
+                 comments: a glossary's comments are where it says why a rule
+                 is a hotword rather than a replacement, and rebuilding the
+                 file from two JSON objects would drop all of them. -->
+            <label for="glosstext">Terms</label>
+            <textarea id="glosstext" spellcheck="false" autocomplete="off"
+                      autocapitalize="off"></textarea>
+            <div class="actions">
+              <button class="primary small" id="glosssave" type="button">Save</button>
+              <!-- Hidden until the server refuses lines it would accept under
+                   force, and hidden again the moment the text changes: a
+                   second press must never send a body the reader has edited
+                   since the refusal it answers. -->
+              <button class="small" id="glossforce" type="button" hidden>Save anyway</button>
+              <span class="spacer"></span>
+              <button class="small" id="glossdelete" type="button">Delete</button>
+            </div>
+          </div>
+
+          <!-- THE REASON, BESIDE THE GREYED CONTROL. Same job as
+               #x-route-hint: glossGuards() writes why Save or Delete is off,
+               and it is a hint rather than a note because it is a standing
+               property of the field and not the result of anything. It does
+               not announce for that reason; it changes on every keystroke. -->
+          <div class="hint" id="glosswhy"></div>
+          <!-- OUTSIDE #glossform, because the first thing this has to be able
+               to say is that the deployment cannot write at all, and that is
+               true with no profile open. -->
+          <div id="glossnote" aria-live="polite"></div>
         </div>
       </details>
     </div>
@@ -1176,6 +1272,15 @@ function reason(payload, fallback) {
   if (Array.isArray(payload.detail)) {
     return payload.detail.map(d => (d.loc ? d.loc.join(".") + ": " : "") + d.msg).join("; ");
   }
+  /* AND AN OBJECT, which is the third shape and was reaching the reader as a
+     bare "400 Error". PUT /glossaries/{name} refuses a file line by line and
+     puts the summary in detail.message with the line list beside it, so
+     without this the one failure a person can actually fix printed the status
+     code and nothing else. glossSave() renders the list; this is what the rest
+     of the page gets from the same body. */
+  if (payload.detail && typeof payload.detail.message === "string") {
+    return payload.detail.message;
+  }
   return fallback;
 }
 
@@ -1194,7 +1299,7 @@ function reason(payload, fallback) {
 
    The service's own routes -- /ui/config, /ui/clips, /ui/resolve and the rest
    -- are NOT prefixed: they are already under /ui and the gateway forwards
-   them as they are. Only the eleven proxied paths move.
+   them as they are. Only the proxied paths move.
 
    Both mounts are live on the UI service, so this also works unchanged when
    the page is opened on that service's own port directly. */
@@ -1213,6 +1318,11 @@ async function json(path, options) {
     const err = new Error(reason(payload, `${response.status} ${response.statusText}`));
     err.status = response.status;
     err.retryAfter = Number(response.headers.get("Retry-After")) || null;
+    /* THE WHOLE BODY, not just the sentence taken out of it. A refused
+       glossary carries a `rejected` array of line numbers, and reason() can
+       only ever return one string; a caller that wants the list has nowhere
+       else to read it from. Every other caller ignores this field. */
+    err.payload = payload;
     throw err;
   }
   return payload;
@@ -1703,23 +1813,260 @@ function chosenGlossaries() {
 }
 
 async function loadGlossaries() {
-  try { GLOSSARIES = (await json("/glossaries")).glossaries || []; }
-  catch { GLOSSARIES = []; }
+  /* THE WHOLE LISTING, not just the names. The same document says whether this
+     deployment has anywhere to write a profile at all, and in its own words
+     why not when it has not, so both halves come from one request. */
+  let listing = null;
+  try { listing = await json("/glossaries"); } catch {}
+  GLOSSARIES = (listing && listing.glossaries) || [];
+  GLOSS_SERVED = !!listing;
+  GLOSS_WRITABLE = !!(listing && listing.writable);
+  GLOSS_REASON = (listing && listing.reason) || "";
+
+  /* WHAT THE READER HAD TICKED, carried over the rebuild. Saving or deleting a
+     profile calls this function again, and without this the row of toggles is
+     redrawn from scratch and a selection made before the panel was ever opened
+     is gone with no message. It is NOT a default: a first load finds an empty
+     row here and restores nothing, which is what the 12% and 28% WER
+     measurements above require. */
+  const kept = chosenGlossaries();
+
   /* Hidden entirely when the service offers none, rather than shown empty: a
      control with nothing in it is a question the page cannot answer. */
   $("glossbox").hidden = !GLOSSARIES.length;
-  if (!GLOSSARIES.length) return;
   $("gloss").innerHTML = GLOSSARIES.map(g =>
     `<button type="button" data-gloss="${esc(g.name)}" aria-pressed="false"
        title="${esc(g.terms + " terms")}">${esc(g.name)}</button>`).join("");
-  $("gloss").querySelectorAll("button").forEach(b =>
+  $("gloss").querySelectorAll("button").forEach(b => {
+    if (kept.indexOf(b.dataset.gloss) >= 0) b.setAttribute("aria-pressed", "true");
     b.addEventListener("click", () => {
       /* Independent toggles, not a radio group: several can be selected, and
          the service merges them in the order it is given. */
       b.setAttribute("aria-pressed",
                      b.getAttribute("aria-pressed") === "true" ? "false" : "true");
-    }));
+    });
+  });
+  glossRender();
 }
+
+/* ------------------------------------------ managing those profiles --- */
+/*
+  READ, WRITE AND REMOVE, on the tab where a profile is chosen. Until now the
+  page could only list the names: what a profile actually contains, and every
+  change to one, went through curl against the gateway.
+
+  THE NAME BOX IS THE ADDRESS. One rule decides the whole panel, because two
+  would drift: every control here is settled by what the typed name resolves to
+  in the listing, never by which name button was pressed. Open `tech`, type
+  `mine` over it, and the panel becomes a new profile in the same keystroke:
+  the source pill says so, the text stops being read-only, Save creates it and
+  Delete goes off because there is nothing at that name to delete. That is also
+  the documented way out of a built-in, which cannot be written and can be
+  copied.
+
+  THREE REFUSALS ARE PRE-EMPTED AND ONE IS NOT.
+    a built-in name        409   decidable here: the listing carries `writable`
+    a name that is not a   400   decidable here: the pattern is a filename rule
+      usable filename
+    no writable volume     503   decidable here: the listing carries `writable`
+                                 and the server's own reason for it
+    lines the parser       400   NOT decidable here, and it must not be. The
+      refused                    check is the service's, it changes with the
+                                 service, and a copy of it in this file would
+                                 be a second opinion that is wrong on the day
+                                 they disagree. So the body is sent and the
+                                 refusal is rendered, line by line.
+
+  NOTHING IS WRITTEN WHEN ANY LINE IS REFUSED -- the server says so and means
+  it -- so the text in the editor is still the only copy. That is why the
+  refusal is rendered in place rather than cleared.
+*/
+
+/* Whether GET /glossaries answered at all. The panel is hidden until it has,
+   because that document is the only thing that knows which profiles exist and
+   whether this deployment can be written to. */
+let GLOSS_SERVED = false;
+let GLOSS_WRITABLE = false;
+/* The server's own sentence for why it cannot write, which names the directory
+   and what to do about it. Better than anything this file could guess. */
+let GLOSS_REASON = "";
+
+/* services/stt/app/profiles.py NAME_PATTERN, and the shape is a filename rule
+   rather than a label rule: the name is joined onto a directory and written,
+   so `../../etc/passwd` is why it is an allowlist. Copied here to grey Save
+   with the reason instead of sending a request that is certain to be a 400. */
+const GLOSS_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+/* profiles.MAX_BYTES. Every term is a compiled regex run against every word of
+   every transcript that selects the profile, which is what the ceiling is
+   protecting. */
+const GLOSS_MAX_BYTES = 65536;
+
+function glossProfile(name) {
+  return GLOSSARIES.filter(g => g.name === name)[0] || null;
+}
+
+/* UTF-8 BYTES, which is what the ceiling counts. text.length counts UTF-16
+   code units, so a profile of accented terms is refused by the server at a
+   length this page called comfortable. */
+function glossBytes(text) {
+  try { return new Blob([text]).size; } catch { return text.length; }
+}
+
+function glossTarget() {
+  const name = $("glossname").value.trim().toLowerCase();
+  return { name: name, profile: glossProfile(name) };
+}
+
+function glossRender() {
+  $("glossman").hidden = !GLOSS_SERVED;
+  if (!GLOSS_SERVED) return;
+  const open = !$("glossform").hidden;
+  const here = open ? glossTarget().name : "";
+  $("glossnames").innerHTML = GLOSSARIES.map(g =>
+    `<button type="button" data-open="${esc(g.name)}"
+       aria-pressed="${g.name === here ? "true" : "false"}"
+       title="${esc(g.source + ", " + g.terms + " terms")}">${esc(g.name)}</button>`
+  ).join("");
+  $("glossnames").querySelectorAll("button").forEach(b =>
+    b.addEventListener("click", () => glossOpen(b.dataset.open)));
+  glossGuards();
+}
+
+/* Every control in the panel, settled from the name box and the listing. Runs
+   on load, on every keystroke in either field, and after every write. */
+function glossGuards() {
+  const target = glossTarget();
+  const profile = target.profile;
+  const builtin = !!profile && profile.writable === false;
+  const bytes = glossBytes($("glosstext").value);
+  const kb = (bytes / 1024).toFixed(1) + " KB";
+
+  $("glosssource").textContent = profile ? profile.source : "new";
+  $("glossterms").textContent = profile ? profile.terms + " terms" : "not saved";
+  $("glossbytes").textContent = kb;
+  $("glossbytes").className = "pill" + (bytes > GLOSS_MAX_BYTES ? " bad" : "");
+
+  let why = "";
+  if (!GLOSS_WRITABLE) why = GLOSS_REASON || "This server cannot write a profile.";
+  else if (builtin) why = `"${target.name}" is a built-in profile. Save it under a new name to change it.`;
+  else if (target.name && !GLOSS_NAME.test(target.name))
+    why = "A name takes lower case letters, digits, and the . - _ characters.";
+  else if (bytes > GLOSS_MAX_BYTES) why = `That is ${kb}. The ceiling is 64 KB.`;
+
+  /* READ-ONLY AND NOT DISABLED. A disabled textarea cannot be selected, and
+     the whole point of opening a built-in is to read it and copy from it. */
+  $("glosstext").readOnly = builtin || !GLOSS_WRITABLE;
+  $("glosssave").disabled = !!why || !target.name;
+  /* Delete removes what the name box points at, so it is off unless that is a
+     profile the server holds and may remove. */
+  $("glossdelete").disabled = !!why || !profile;
+  $("glossnew").disabled = !GLOSS_WRITABLE;
+  /* The standing reason belongs beside the greyed control, and only while
+     something is greyed by it. */
+  $("glosswhy").textContent = ($("glossform").hidden && GLOSS_WRITABLE) ? "" : why;
+}
+
+async function glossOpen(name) {
+  note($("glossnote"), "", "");
+  $("glossforce").hidden = true;
+  try {
+    const profile = await json("/glossaries/" + encodeURIComponent(name));
+    $("glossname").value = profile.name;
+    /* THE FILE TEXT, not the parsed replacements and hotwords. The comments in
+       a glossary are where it says why a rule is a hotword rather than a
+       rewrite, and rebuilding the file from the two JSON objects beside this
+       field would drop every one of them. */
+    $("glosstext").value = profile.text || "";
+    $("glossform").hidden = false;
+  } catch (err) {
+    $("glossform").hidden = true;
+    note($("glossnote"), "bad", esc(err.message));
+  }
+  glossRender();
+}
+
+function glossNew() {
+  note($("glossnote"), "", "");
+  $("glossforce").hidden = true;
+  $("glossname").value = "";
+  $("glosstext").value = "";
+  $("glossform").hidden = false;
+  glossRender();
+  $("glossname").focus();
+}
+
+/* The refused lines, as the server numbered them.
+
+   FORCE IS OFFERED FOR ONE REFUSAL AND NO OTHER. `force` switches off the
+   single-word left-hand-side rule and nothing else, so a body with an empty
+   left-hand side or an over-long line in it fails again with force set. The
+   server marks the forceable ones itself, in the reason it prints, and reading
+   that is more honest than this file keeping its own list of which refusals
+   are which. */
+function glossRefused(detail) {
+  const lines = detail.rejected || [];
+  const forceable = lines.length > 0 &&
+    lines.every(r => String(r.reason || "").indexOf("send force") >= 0);
+  note($("glossnote"), "bad", esc(detail.message || "") +
+    lines.map(r => `<div class="hint">Line ${esc(r.line)}: ${esc(r.text)}
+      <br>${esc(r.reason)}</div>`).join(""));
+  $("glossforce").hidden = !forceable;
+}
+
+async function glossSave(force) {
+  const target = glossTarget();
+  $("glosssave").disabled = true;
+  note($("glossnote"), "flat", "Saving…");
+  try {
+    const written = await json(
+      "/glossaries/" + encodeURIComponent(target.name) + (force ? "?force=true" : ""),
+      { method: "PUT", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: $("glosstext").value }) });
+    $("glossforce").hidden = true;
+    /* The listing carries the term counts and the source, and the row of
+       toggles on this tab is drawn from it, so both are refreshed from one
+       request rather than patched in place. */
+    await loadGlossaries();
+    note($("glossnote"), "ok",
+         `Saved <strong>${esc(written.name)}</strong>, ${esc(written.terms)} terms.`);
+  } catch (err) {
+    const detail = err.payload && err.payload.detail;
+    if (err.status === 400 && detail && detail.rejected) glossRefused(detail);
+    else note($("glossnote"), "bad", esc(err.message));
+  }
+  glossGuards();
+}
+
+async function glossDelete() {
+  const target = glossTarget();
+  if (!target.profile) return;
+  /* DESTRUCTIVE AND ASKED FIRST, the same shape the clone voice uses: the file
+     goes from the volume and the terms with it. */
+  if (!confirm(`Delete the vocabulary profile "${target.name}"?
+The file is deleted from disk.`)) return;
+  try {
+    await json("/glossaries/" + encodeURIComponent(target.name), { method: "DELETE" });
+    $("glossform").hidden = true;
+    await loadGlossaries();
+    note($("glossnote"), "ok", `Deleted <strong>${esc(target.name)}</strong>.`);
+  } catch (err) {
+    note($("glossnote"), "bad", esc(err.message));
+  }
+  glossGuards();
+}
+
+$("glossnew").addEventListener("click", glossNew);
+$("glosssave").addEventListener("click", () => glossSave(false));
+$("glossforce").addEventListener("click", () => glossSave(true));
+$("glossdelete").addEventListener("click", glossDelete);
+$("glossname").addEventListener("input", glossRender);
+/* THE FORCED SAVE IS RETIRED BY AN EDIT. It answers one refusal of one body;
+   once the text has changed it would send something the server never refused,
+   under a flag the reader agreed to for different lines. */
+$("glosstext").addEventListener("input", () => {
+  $("glossforce").hidden = true;
+  glossGuards();
+});
 
 async function pick(file) {
   stt.file = file; stt.token = null; stt.prepared = null; stt.facts = null;

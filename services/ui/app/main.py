@@ -118,11 +118,25 @@ PROXIED: tuple[tuple[str, str], ...] = (
     ("DELETE", "/jobs/{job_id}"),
     ("GET", "/jobs/{job_id}/audio"),
     ("GET", "/v1/models"),
-    # READ ONLY. The page offers the profiles a transcription can select, so it
-    # needs to list them; creating and deleting one is an operator action over
-    # curl, and putting a write route in the page's allowlist would make this
-    # service a way to reach it without the key the gateway checks.
+    # NO LONGER READ ONLY, and the entry it replaces said why it was: creating
+    # and deleting a profile was an operator action over curl. That was the
+    # defect rather than the design. The terms a transcript depends on were
+    # invisible to the person depending on them, and the one control on the
+    # Transcribe tab that only they can set offered a list they could not read,
+    # add to or correct.
+    #
+    # ON THE KEY, because the entry this replaces raised it: a request through
+    # this process is signed with UI_GATEWAY_API_KEY on the way past, which is
+    # exactly what already happens for POST /jobs and DELETE /jobs/{id}. So
+    # these three change WHAT the page may do with that key, not whether it
+    # holds one. Anybody who can reach this service could already start and
+    # cancel work on the stack; they can now also write a glossary file. The
+    # ceiling on that is the service's own: 64 KB, a validated name, and a 409
+    # on a built-in.
     ("GET", "/glossaries"),
+    ("GET", "/glossaries/{name}"),
+    ("PUT", "/glossaries/{name}"),
+    ("DELETE", "/glossaries/{name}"),
 )
 
 # Routes whose request body is an upload and must therefore never be buffered
@@ -420,10 +434,10 @@ async def _forward(request: Request) -> Response:
         headers=_response_headers(upstream))
 
 
-# Registered from the table in a loop rather than as eleven near-identical
-# decorated functions. It is still an explicit allowlist -- FastAPI is handed
-# one route per entry and no wildcard exists -- and the loop is what keeps the
-# list readable as a list.
+# Registered from the table in a loop rather than as one near-identical
+# decorated function per entry. It is still an explicit allowlist -- FastAPI is
+# handed one route per entry and no wildcard exists -- and the loop is what
+# keeps the list readable as a list.
 for _method, _path in PROXIED:
     app.add_api_route(_path, _forward, methods=[_method], include_in_schema=False)
     # The same route, prefixed. Registered from the same table so the two

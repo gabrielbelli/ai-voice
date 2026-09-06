@@ -947,3 +947,169 @@ def test_the_page_can_reach_the_glossary_listing():
     and skip the UI's key. /ui/api is what brings it back through."""
     assert "glossaries" in HTML[HTML.index("const GATEWAY_ROUTES"):
                                 HTML.index("const GATEWAY_ROUTES") + 200]
+
+
+# ------------------------------------------------ managing the profiles --
+#
+# The page could list the profile names and nothing else: no way to see what a
+# profile contains, and no way to add, change or remove one. That work went
+# through curl, so the terms a transcript depends on were invisible to the
+# person depending on them.
+#
+# Every test here is named after a refusal the panel has to handle honestly.
+# The service is the authority on all of them; what these pin is that the page
+# does not offer a write it can already see will fail, and does not swallow one
+# it could not.
+
+
+def _guards() -> str:
+    return _code(_fn("function glossGuards("))
+
+
+def test_a_builtin_is_never_offered_an_edit_that_would_409():
+    """`dictation` and `tech` ship in the image and PUT on either is a 409.
+
+    Offering a Save that is certain to be refused is the same defect as a
+    control the current route cannot carry staying live: the page knows, from
+    `writable` in the listing it already has, and says so instead. Greyed and
+    not hidden, because a control that vanishes takes its reason with it.
+    """
+    body = _guards()
+    assert "profile.writable === false" in body, "the listing's own flag is not read"
+    assert 'is a built-in profile' in body, "nothing says why Save is off"
+    assert '$("glosssave").disabled' in body
+    assert '$("glossdelete").disabled' in body
+    # Readable, because copying a built-in is the documented way past the 409,
+    # and a disabled textarea cannot be selected.
+    assert '$("glosstext").readOnly = builtin' in body
+
+
+def test_an_unwritable_deployment_is_said_once_in_the_servers_own_words():
+    """A deployment with nothing mounted answers 503 on every write, and the
+    listing says so up front with a `reason` naming the directory and the fix.
+
+    The page must not invent its own wording for that: the server knows which
+    of four things is wrong (no directory configured, nothing mounted, not a
+    directory, wrong uid) and this file knows none of them.
+    """
+    load = _code(_fn("async function loadGlossaries("))
+    assert "GLOSS_WRITABLE = !!(listing && listing.writable)" in load
+    assert "GLOSS_REASON = (listing && listing.reason)" in load
+    body = _guards()
+    assert "if (!GLOSS_WRITABLE) why = GLOSS_REASON" in body
+    assert '$("glossnew").disabled = !GLOSS_WRITABLE' in body
+
+
+def test_the_editor_round_trips_the_file_text_and_not_the_parsed_halves():
+    """GET /glossaries/{name} returns `text` beside `replacements` and
+    `hotwords` precisely so that GET, edit, PUT is a round trip.
+
+    Rebuilding the file from the two parsed objects would drop every comment,
+    and a glossary's comments are where it says why a rule is a hotword rather
+    than a rewrite.
+    """
+    body = _code(_fn("async function glossOpen("))
+    assert '$("glosstext").value = profile.text' in body
+
+
+def test_the_two_glossary_routes_disagree_about_two_field_names():
+    """`replacements` and `hotwords` are INTEGER COUNTS on GET /glossaries and
+    the full object and array on GET /glossaries/{name}. Same keys, two types.
+
+    One renderer over both is a "13" where a dictionary belongs, or the other
+    way round, with nothing raising. The panel reads neither field from either
+    route: the counts it shows are `terms`, which is an integer on both.
+    """
+    script = _code(HTML[HTML.index("<script>"):])
+    for field in (".replacements", ".hotwords"):
+        assert field not in script, \
+            f"{field} is read from a route where its type is not what is assumed"
+
+
+def test_deleting_a_profile_asks_before_the_file_goes():
+    """It removes a file from the volume, and the terms with it. Same shape as
+    the clone voice, which is the other destructive control on this page."""
+    body = _code(_fn("async function glossDelete("))
+    assert "confirm(" in body
+    assert "${target.name}" in body, "the question does not name what it deletes"
+    assert 'method: "DELETE"' in body
+
+
+def test_a_write_refreshes_the_row_of_toggles_without_a_reload():
+    """The Vocabulary row on the Transcribe tab is drawn from the listing. A
+    profile created or deleted in the panel and not in that row is a control
+    lying about what the service holds, until somebody reloads the page."""
+    for name in ("async function glossSave(", "async function glossDelete("):
+        assert "await loadGlossaries();" in _code(_fn(name)), \
+            f"{name} leaves the selector stale"
+
+
+def test_a_ticked_profile_survives_the_refresh_a_write_causes():
+    """loadGlossaries() rebuilds the row by assigning innerHTML, so calling it
+    after a save wiped a selection the reader had made before they ever opened
+    the panel -- silently, on a control whose whole subject is which terms this
+    recording contains.
+
+    THIS DOES NOT MAKE ANYTHING A DEFAULT, which is what
+    test_nothing_is_selected_by_default is for: a first load reads an empty row
+    and restores nothing.
+    """
+    body = _code(_fn("async function loadGlossaries("))
+    assert "const kept = chosenGlossaries();" in body
+    assert 'b.setAttribute("aria-pressed", "true")' in body
+    assert "kept.indexOf(b.dataset.gloss) >= 0" in body
+
+
+def test_force_is_offered_only_for_the_refusal_it_can_fix():
+    """`force` switches off the single-word left-hand-side rule and nothing
+    else, so a body that also has an empty left-hand side or an over-long line
+    in it is refused again with the flag set.
+
+    The service marks the forceable refusals itself, in the reason it prints,
+    and reading that is more honest than this file keeping a second list of
+    which refusals are which and being wrong on the day they diverge.
+    """
+    body = _code(_fn("function glossRefused("))
+    assert 'indexOf("send force")' in body
+    assert "lines.every(" in body, "one forceable line must not offer force for all of them"
+    assert '$("glossforce").hidden = !forceable' in body
+
+
+def test_a_refused_body_is_not_cleared_from_the_editor():
+    """The service writes NOTHING when any line is refused, so the text in the
+    editor is the only copy of it left. A panel that cleared on failure would
+    delete the work the failure was about."""
+    body = _code(_fn("async function glossSave("))
+    assert '$("glosstext").value = ""' not in body
+
+
+def test_the_refused_lines_reach_the_reader_at_all():
+    """`detail` is a STRING for every other failure in this stack and an OBJECT
+    for this one. reason() read the two known shapes, returned the fallback for
+    the third, and the one failure a person can actually fix printed "400
+    Error" and nothing else."""
+    body = _code(_fn("function reason(payload, fallback)"))
+    assert 'typeof payload.detail.message === "string"' in body
+    # And the array beside that message, which reason() cannot return.
+    assert "err.payload = payload;" in HTML, "the body is thrown away"
+
+
+def test_no_profile_name_reaches_innerhtml_unescaped():
+    """A custom profile is named by whoever wrote it, which is not this file.
+
+    Scoped to the innerHTML sinks on purpose. The other two places a name is
+    drawn are #glosswhy, which is written with textContent, and the delete
+    question, which is a confirm() -- both are text, and escaping there would
+    put a literal &quot; on the screen. So the assertion is per sink rather
+    than per name.
+    """
+    for raw in ("${g.name}", "${written.name}", "${r.text}", "${r.reason}",
+                "${r.line}"):
+        offenders = [n for n, line in enumerate(HTML.splitlines(), 1)
+                     if raw in line and "esc(" not in line]
+        assert not offenders, f"{raw} reaches innerHTML unescaped at line(s) {offenders}"
+    # Deleted <strong>name</strong> is markup, so that one is escaped too.
+    assert "Deleted <strong>${esc(target.name)}</strong>" in HTML
+    # And the two text sinks are still text sinks.
+    assert '$("glosswhy").textContent =' in HTML
+    assert 'confirm(`Delete the vocabulary profile' in HTML

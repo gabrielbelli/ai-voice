@@ -374,3 +374,54 @@ def test_the_page_is_never_cached(client):
         assert response.status_code == 200
         cache = response.headers.get("cache-control", "")
         assert "no-cache" in cache, f"{path} served with cache-control={cache!r}"
+
+
+# --------------------------------------------- the glossary write routes --
+#
+# GET /glossaries was the only entry for these, and its comment said why:
+# creating and deleting a profile was an operator action over curl. That was
+# the defect rather than the design -- the page offered a Vocabulary control it
+# could not read, add to or correct -- so the other three are on the table now.
+# These pin that they forward, and that opening them opened nothing else.
+
+
+def test_one_profile_can_be_read_written_and_removed_through_this_service(client):
+    """All three carry the path parameter, and the PUT carries its body and its
+    query string. ?force=true is what lets a single-word left-hand side through,
+    and dropping it would make that rule unenterable while appearing to work."""
+    api, gateway, _ = client()
+
+    assert api.get("/glossaries/tech").status_code == 200
+    assert gateway.seen[-1].url.path == "/glossaries/tech"
+
+    assert api.put("/glossaries/mine?force=true",
+                   json={"text": "belly = Belli\n"}).status_code == 200
+    sent = gateway.seen[-1]
+    assert (sent.method, sent.url.path) == ("PUT", "/glossaries/mine")
+    assert sent.url.query == b"force=true", "the force flag was dropped"
+    assert json.loads(sent.content)["text"] == "belly = Belli\n"
+
+    assert api.delete("/glossaries/mine").status_code == 200
+    assert (gateway.seen[-1].method, gateway.seen[-1].url.path) == \
+        ("DELETE", "/glossaries/mine")
+
+
+def test_the_write_routes_are_on_the_allowlist_and_not_behind_a_wildcard(client):
+    """The table is an allowlist and stays one. A method it does not name is a
+    404 here, and nothing is forwarded to find that out."""
+    api, gateway, _ = client()
+    before = len(gateway.seen)
+    assert api.post("/glossaries/mine", json={"text": "x"}).status_code == 405
+    assert api.patch("/glossaries/mine", json={"text": "x"}).status_code == 405
+    assert api.put("/glossaries").status_code == 405
+    assert len(gateway.seen) == before, "an unlisted method reached the gateway"
+
+
+def test_the_prefixed_mount_carries_the_profile_name_too(client):
+    """The page is served from the gateway's origin, so it calls /ui/api/... .
+    A prefix that swallowed the path parameter would write to a profile called
+    something else, which is a silent wrong-file write."""
+    api, gateway, _ = client()
+    assert api.put("/ui/api/glossaries/mine",
+                   json={"text": "Catallaxy\n"}).status_code == 200
+    assert gateway.seen[-1].url.path == "/glossaries/mine"

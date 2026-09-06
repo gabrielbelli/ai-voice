@@ -656,10 +656,11 @@ downloading.
   Denoising measured **+26 % mean WER**, worse in 9 of 13 conditions, one case
   above WER 1.0 from hallucination. Expert mode carries this as a note so
   nobody adds it back.
-- **A per-request glossary box.** There is no such field — glossary is a
-  startup file, and `prompt`/`keywords[]` are both 400 on Parakeet. An
-  *irrelevant* glossary cost +12 % WER on Parakeet and +28 % on Whisper, which
-  is a finding no slider can express.
+- **A per-request glossary box.** There is no such field: a request selects
+  *named profiles* by name, and `prompt`/`keywords[]` are both 400 on Parakeet.
+  Reading and editing those profiles is its own panel, in *Vocabulary
+  profiles*. An *irrelevant* glossary cost +12 % WER on Parakeet and +28 % on
+  Whisper, which is a finding no slider can express.
 - **`model` on STT.** Required by `/v1` validation, but it does not choose an
   engine — Parakeet runs regardless and says so in `x-stt-engine`.
 - **The TTS language dropdown, on the fast path.** It is *inferred* from the
@@ -688,6 +689,51 @@ Chatterbox: `exaggeration`, `cfg_weight` and `temperature`, each labelled
 values is exactly the state people get lost in. Resemble's demo offers
 exaggeration 0.25–2.0; our backend validates `ge=0.0, le=1.0`, so those ranges
 are reconciled rather than copied.
+
+### Vocabulary profiles: reading them, and changing them
+
+The **Vocabulary** row on the Transcribe tab chooses which named profiles a
+request applies. That is one half. The **Vocabulary profiles** panel under it
+is the other: it reads a profile's file, creates one, replaces one and deletes
+one, against `/glossaries` on the gateway.
+
+Before it existed the page could list the names and nothing else. What a
+profile contains, and every change to one, went through `curl`. The terms a
+transcript depends on were invisible to the person depending on them, on the
+one control that only they can set.
+
+**The name box is the address.** Every control in the panel is decided by what
+the typed name resolves to in the listing, never by which name was opened. Open
+`tech`, type `mine` over it, and the same keystroke turns the panel into a new
+profile: the source says so, the text stops being read-only, Save creates it
+and Delete goes off. That is also the documented way out of a built-in, which
+cannot be written and can be copied.
+
+**Three refusals are pre-empted and one is not.** A built-in's name (409), a
+name that is not a usable filename (400) and a deployment with nothing mounted
+(503) are all decidable from the listing the page already holds, so Save and
+Delete grey *with the reason beside them* rather than offering a write the
+service is certain to refuse. That is the rule the route control follows. The
+fourth is not decidable here and must not be: which lines the parser accepts is
+the service's business and changes with the service, so the body is sent and
+the refusal is rendered line by line, with the service's own wording. Nothing
+is written when any line is refused, so the text stays in the editor.
+
+`force` is offered only for the one refusal it can fix. It switches off the
+single-word left-hand-side rule and nothing else, and the service marks the
+forceable rejections in the reason it prints, so the panel reads that rather
+than keeping a second copy of the rule.
+
+`GET /glossaries` and `GET /glossaries/{name}` both carry `replacements` and
+`hotwords`, and they are **integer counts on the first and the full object and
+array on the second**. Nothing in the page reads either field: the counts it
+shows come from `terms`, which is an integer on both.
+
+The four routes are on `app/main.py`'s allowlist. Three of them are writes, and
+what that changes is stated in the table: anybody who can reach this service
+could already start and cancel work on the stack, and can now also write a
+glossary file. The ceiling is the service's own: 64 KB, a validated name, 500
+terms, and a 409 on a built-in.
 
 **What they still do not show**, because an expert panel is not every
 environment variable: `STT_VAD`, `STT_HOTWORDS`, `STT_THREADS`,
