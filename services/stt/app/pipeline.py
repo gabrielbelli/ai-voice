@@ -1,6 +1,6 @@
 """The transcription pipeline, separate from the shape it is returned in.
 
-    audio -> VAD -> recogniser -> glossary repair -> text
+    audio -> VAD -> windows -> recogniser -> glossary repair -> text
 
 Three routes share this: the native /transcribe, which returns everything the
 run measured, and /v1/audio/transcriptions and /v1/audio/translations, which
@@ -8,7 +8,15 @@ return the subset OpenAI's specification has fields for. The work lives here so
 the compatibility layer cannot slowly become a second pipeline that drifts from
 the first — which is the usual way these shims rot.
 
-Two things this file owns that the recogniser cannot:
+Three things this file owns that the recogniser cannot:
+
+  the windows    Parakeet's encoder attends over everything it is handed at
+                 once, O(n^2) in the length, and past about seven minutes of
+                 speech it does not slow down, it returns an ONNX Runtime
+                 failure out of the first layer's self-attention. So the speech
+                 is cut into passes at the VAD's pauses and the results are
+                 stitched. MAX_WINDOW_SECONDS carries the measurement;
+                 _windows carries the offsets argument.
 
   the timeline   The ASR sees speech runs, concatenated. Every timestamp it
                  reports is in that compacted timeline, and a subtitle needs
@@ -59,6 +67,40 @@ DEFAULT_PROFILES = os.getenv("STT_GLOSSARY_DEFAULT", "")
 # slice. See the README.
 THREADS = int(os.getenv("STT_THREADS", "4"))
 VAD_ENABLED = os.getenv("STT_VAD", "1") not in {"0", "false", "no"}
+# Ceiling on what reaches the recogniser in one pass, in seconds of SPEECH.
+# Speech, not audio: the VAD runs first, so the encoder never sees the silence
+# it removed, and a clip of any length is only as long as what is left.
+#
+# THIS EXISTS BECAUSE A LONG CLIP DID NOT DEGRADE, IT FAILED. Parakeet's
+# Conformer encoder computes self-attention over the whole sequence at once,
+# which is O(n^2) in its length. Bisected against the deployed service on
+# 2026-09-06, one recording looped to different lengths, 16 kHz mono wav:
+#
+#      5.0 min   200 in 45.2 s
+#      6.0 min   200 in 61.5 s
+#      6.6 min   200 in 71.2 s
+#      7.7 min   500 in  7.6 s
+#
+# and the 500 was
+#
+#   [ONNXRuntimeError] : 1 : FAIL : Non-zero status code returned while
+#   running Add node. Name:'/layers.0/self_attn/Add_2'
+#
+# Note that the failure arrives FASTER than the successes. It is not a timeout
+# and not a body-size limit — the encoder gives up in the first layer's
+# attention, before any decoding starts. The attention matrix is (n/0.08)^2
+# floats per head per layer, so the cost roughly quadruples for every doubling
+# of the clip and the exact cliff moves with whatever else is resident on the
+# host. That is why this is a configurable ceiling with margin rather than the
+# largest number observed to work.
+#
+# 300 s is a MEASURED success on the deployed host, not an interpolation
+# between one, and it sits at 0.65 of the shortest length measured to fail. A
+# smaller box should lower it; the cost of doing so is only that a rule or a
+# sentence spanning a cut cannot be seen whole, which is the same property
+# segment boundaries already have. 0 switches windowing off entirely and
+# restores the single pass that produced the 500 above.
+MAX_WINDOW_SECONDS = float(os.getenv("STT_MAX_WINDOW_SECONDS", "300"))
 # Off switch for decode-time biasing, so a benchmark can separate what the
 # vocabulary contributes from what the model does. BOTH ENGINES: it used to say
 # "Whisper only — Parakeet has no such mechanism", which stopped being true
@@ -267,6 +309,86 @@ def _speech(samples: np.ndarray, tuning: Tuning) -> vad.Speech:
     )
 
 
+def _windows(speech: vad.Speech, ceiling_seconds: float) -> tuple[vad.Speech, ...]:
+    """Split speech into passes the encoder survives, cutting at the pauses.
+
+    Returns one Speech per pass, each one a Speech in its own right: `samples`
+    is that pass's audio and `spans` are the offsets it came from IN THE
+    ORIGINAL CLIP. That is the whole trick, and it is worth being explicit
+    about because getting it wrong is invisible in the first pass and wrong
+    everywhere after it.
+
+    Speech.original walks the spans it is given, starting from a compacted time
+    of zero. A window's compacted timeline IS the timeline the recogniser will
+    report against for that window, because the window's samples are all the
+    recogniser was handed. So mapping a window time through the window's own
+    spans lands on the client's timeline directly, with the window's start
+    already inside the answer. Nothing downstream adds a window offset to a
+    timestamp, and nothing downstream should: the shift is carried by which
+    spans a window holds, and adding it a second time would double it.
+
+    Cuts land on the VAD's own boundaries — real pauses in the recording, which
+    is the same argument _segments_from_words makes for cutting segments there.
+    A word split down the middle is a word lost from both halves. The exception
+    is a single speech run longer than the ceiling, which by definition has no
+    pause inside it to cut at; that one is cut by length, and it is the only
+    place here that can land mid-word.
+    """
+    limit = int(ceiling_seconds * SAMPLE_RATE)
+    if limit <= 0 or speech.samples.size <= limit:
+        # THE SHORT-CLIP PATH, and it hands back the untouched object rather
+        # than a rebuilt copy of it. Everything after this behaves exactly as
+        # it did before windowing existed by construction, not by resemblance.
+        return (speech,)
+
+    # Each run as (offset into speech.samples, offset into the original clip,
+    # length in samples). Long runs are cut by length as they are collected.
+    runs: list[tuple[int, int, int]] = []
+    offset = 0
+    for start, end in speech.spans:
+        origin, length = start, end - start
+        while length > limit:
+            runs.append((offset, origin, limit))
+            offset += limit
+            origin += limit
+            length -= limit
+        if length > 0:
+            runs.append((offset, origin, length))
+            offset += length
+    if not runs:
+        return (speech,)
+
+    windows: list[vad.Speech] = []
+    batch: list[tuple[int, int, int]] = []
+
+    def flush() -> None:
+        if not batch:
+            return
+        first, last = batch[0], batch[-1]
+        windows.append(vad.Speech(
+            # A slice of the concatenated speech, which is contiguous because
+            # the runs were collected in order and a hard cut splits a run into
+            # adjacent pieces rather than reordering anything.
+            samples=speech.samples[first[0]:last[0] + last[2]],
+            spans=tuple((origin, origin + length) for _, origin, length in batch),
+            # Carried, not recomputed. `kept` is the fraction of the CLIP that
+            # was speech, which is a statement about the whole request; no
+            # reader of it wants a per-window number, and inventing one would
+            # be worse than passing the true one through.
+            kept=speech.kept))
+        batch.clear()
+
+    used = 0
+    for run in runs:
+        if batch and used + run[2] > limit:
+            flush()
+            used = 0
+        batch.append(run)
+        used += run[2]
+    flush()
+    return tuple(windows)
+
+
 def _compression_ratio(text: str) -> float:
     """Whisper's own measure, computed the same way for the other engine.
 
@@ -302,8 +424,12 @@ def _segments_from_words(words: tuple[asr.Word, ...], speech: vad.Speech,
     Two of the ten required fields have no equivalent on this engine and are
     written down here rather than left to a reader to discover:
 
-      seek            a Whisper 30 s window offset. There are no windows here;
-                      the encoder runs over the whole waveform. Always 0.
+      seek            a Whisper 30 s window offset. This engine has no such
+                      window — its encoder runs over everything it is handed in
+                      one pass, which is what MAX_WINDOW_SECONDS puts a ceiling
+                      on. The ceiling is not this field: a Whisper seek indexes
+                      a decoder window inside one pass, and a pipeline window
+                      is a whole pass. Always 0.
       no_speech_prob  a Whisper decoder output. A TDT decoder produces none.
                       Always 0.0 — and note the VAD has already removed what
                       it believed was silence, so a segment reaching this
@@ -454,38 +580,90 @@ def run(data: bytes, opts: asr.Options | None = None, *,
     started = time.monotonic()
     speech = _speech(samples, tuning)
     speech_seconds = speech.samples.size / SAMPLE_RATE
-
-    recognition = model.transcribe(speech.samples, opts)
     if rules is None:
         rules = default_rules()
-    text, repaired = glossary.apply(recognition.text, rules)  # type: ignore[arg-type]
 
-    if recognition.segments is not None:
-        segments, words = _place_segments(recognition.segments, speech, rules)
-    else:
-        segments, words = _segments_from_words(recognition.words, speech, rules)
+    # One pass per window, and exactly one window for every clip short enough
+    # to have worked before this existed. There is deliberately no second code
+    # path for the short clip: _windows hands back the Speech untouched, this
+    # loop runs once, and every combining step below is the identity on one
+    # element. A short clip is not a special case, it is the general case with
+    # a length of one.
+    windows = _windows(speech, MAX_WINDOW_SECONDS)
+    parts: list[str] = []
+    collected: list[asr.Segment] = []
+    words: list[asr.Word] = []
+    logprobs: list[asr.TokenLogprob] = []
+    reported_logprobs = False
+    language: str | None = None
+    boosted: list[str] = []
+
+    for window in windows:
+        # opts is unchanged per window, so the glossary's decode-time half —
+        # Whisper's hotwords, Parakeet's boosting automaton — is compiled and
+        # applied to every window exactly as it is applied to a single pass
+        # today. Parakeet caches the automaton by term tuple, so the windows
+        # after the first pay nothing to compile it again. See boosting.py.
+        recognition = model.transcribe(window.samples, opts)
+        # `window` carries ORIGINAL-clip spans, so these two put this window's
+        # times onto the client's timeline themselves. This is the only place
+        # the shift happens; see _windows.
+        if recognition.segments is not None:
+            placed, mapped = _place_segments(recognition.segments, window, rules)
+        else:
+            placed, mapped = _segments_from_words(recognition.words, window, rules)
+        if recognition.text:
+            parts.append(recognition.text)
+        collected.extend(placed)
+        words.extend(mapped)
+        if recognition.logprobs is not None:
+            # None and empty are different answers: None is "this engine
+            # reports none", () is "asked for and there were none". Preserved
+            # rather than flattened, because include[]=logprobs is refused by
+            # name on the engine that reports None.
+            reported_logprobs = True
+            logprobs.extend(recognition.logprobs)
+        language = language or recognition.language
+        boosted.extend(recognition.boosted)
+
+    raw = " ".join(parts)
+    text, repaired = glossary.apply(raw, rules)  # type: ignore[arg-type]
+    # Renumbered so ids run 0..n-1 over the whole transcript instead of
+    # restarting at every window. Both mappers already number from 0 in order,
+    # so this is the identity when there is one window.
+    segments = tuple(replace(segment, id=index)
+                     for index, segment in enumerate(collected))
+    # Order-preserving, because it is the same automaton for every window and a
+    # caller reading x-boost-applied wants the phrases once.
+    applied = tuple(dict.fromkeys(boosted))
     compute = time.monotonic() - started
 
-    log.info("%.1fs audio, %.1fs speech, %.2fs compute (%.1fx), repaired=%s, "
-             "boosted=%s", audio_seconds, speech_seconds, compute,
+    log.info("%.1fs audio, %.1fs speech in %d window(s), %.2fs compute (%.1fx), "
+             "repaired=%s, boosted=%s", audio_seconds, speech_seconds,
+             len(windows), compute,
              audio_seconds / compute if compute else 0.0, repaired or "none",
-             ", ".join(recognition.boosted) or "none")
+             ", ".join(applied) or "none")
 
     return Result(
         text=text,
-        raw=recognition.text,
+        raw=raw,
         repaired=repaired,
         model=MODEL,
         audio_seconds=round(audio_seconds, 2),
         speech_seconds=round(speech_seconds, 2),
         compute_seconds=round(compute, 2),
+        # The WHOLE job against the WHOLE clip, not one window's share of
+        # either. `started` is taken before the VAD and `compute` after the
+        # last window, so every pass and the VAD that produced them are inside
+        # this number — which is what it claimed before windowing existed and
+        # the only reading under which a client can compare two requests.
         realtime_factor=round(audio_seconds / compute, 1) if compute else 0.0,
-        language=recognition.language,
+        language=language,
         segments=segments,
-        words=words,
-        logprobs=recognition.logprobs,
+        words=tuple(words),
+        logprobs=tuple(logprobs) if reported_logprobs else None,
         task=opts.task,
-        boosted=recognition.boosted,
+        boosted=applied,
     )
 
 

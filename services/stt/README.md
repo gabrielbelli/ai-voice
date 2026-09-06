@@ -494,6 +494,7 @@ transcript is the product.
 | `STT_LANGUAGE` | unset | Leave unset if you code-switch. See below |
 | `STT_THREADS` | `4` | Must match your CPU limit. See below |
 | `STT_VAD` | `1` | Silence removal |
+| `STT_MAX_WINDOW_SECONDS` | `300` | Seconds of **speech** per pass through the recogniser. Longer clips are cut at the VAD's pauses and stitched back. `0` disables it. See below |
 | `STT_HOTWORDS` | `1` | `0` disables decode-time biasing entirely, for A/B tests. See below |
 | `STT_MAX_CONCURRENT` | `0` | Transcriptions allowed at once. `0` is no limit; past a limit, `/v1` answers 429 with `Retry-After` |
 | `STT_GLOSSARY_BUILTIN` | `/etc/ai-voice/glossaries` | Read-only profiles baked into the image |
@@ -504,6 +505,51 @@ transcript is the product.
 | `STT_LOG_LEVEL` | `INFO` | `DEBUG`, `WARNING`, … An unrecognised value falls back to `INFO` |
 | `STT_TLS_CERT` | unset | PEM certificate. With `STT_TLS_KEY`, serves HTTPS |
 | `STT_TLS_KEY` | unset | PEM private key, readable by uid 1000 |
+
+### Long audio
+
+Parakeet's Conformer encoder computes self-attention over everything it is
+handed in one pass. That is O(n²) in the length, and past roughly seven minutes
+of speech it does not get slower, it **fails**:
+
+```
+{"error":{"message":"internal error: [ONNXRuntimeError] : 1 : FAIL :
+ Non-zero status code returned while running Add node.
+ Name:'/layers.0/self_attn/Add_2' ..."}}
+```
+
+Bisected against a deployed instance, one recording looped to different
+lengths, 16 kHz mono wav:
+
+| Speech | Result |
+|---|---|
+| 5.0 min | 200 in 45.2 s |
+| 6.0 min | 200 in 61.5 s |
+| 6.6 min | 200 in 71.2 s |
+| 7.7 min | **500 in 7.6 s** |
+
+The failure arrives faster than the successes, which is the tell: it is not a
+timeout and not a body-size limit. The encoder gives up in the first layer,
+before any decoding starts.
+
+So the pipeline cuts long speech into passes of at most
+`STT_MAX_WINDOW_SECONDS` and stitches the results. Cuts land on the pauses the
+VAD already found, because a cut through a word costs that word in both halves;
+a single run of speech longer than the ceiling has no pause inside it and is
+cut by length instead.
+
+Everything the response carries is unaffected. Word and segment times are in
+the original clip, `realtime_factor` describes the whole job, and a glossary
+reaches every pass. The one visible difference is that a glossary rule spanning
+a cut cannot fire — the same property segment boundaries already have.
+
+The default counts **speech**, not audio: the VAD runs first, so a recording
+with pauses in it goes further per pass than its running time suggests. 300 s
+is a length measured to succeed on the host above, at 0.65 of the shortest
+length measured to fail. Lower it on a smaller box; the attention matrix is
+`(n/0.08)²` floats per head per layer, so the cliff moves with whatever else is
+resident. `STT_MAX_WINDOW_SECONDS=0` switches windowing off and restores the
+single pass that produced the 500.
 
 ### Glossary profiles
 
