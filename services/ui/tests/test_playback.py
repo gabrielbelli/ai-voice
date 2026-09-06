@@ -1099,7 +1099,7 @@ def test_the_streamed_format_is_pcm_and_only_pcm():
     2 x 24000 is that chunk's exact duration. The sink requires it rather than
     degrading quietly into a format whose boundaries are a guess.
     """
-    speak = code(body_of("async function speakNow(voice, text, engine)", "async function collectSSE"))
+    speak = code(body_of("async function speakNow(voice, text)", "async function collectSSE"))
     assert 'const format = ctx ? "pcm"' in speak, "the streamed format is not forced"
     assert "const PCM_RATE = 24000;" in HTML
 
@@ -1144,40 +1144,29 @@ def test_the_underrun_is_pre_empted_by_a_timer_that_a_hidden_tab_cannot_stop():
     assert 'say("flat", "Paused.")' in sink
 
 
-def test_a_cloned_voice_streams_so_the_first_sentence_can_be_heard():
-    """THIS ASSERTION IS THE REVERSE OF THE ONE IT REPLACES, on purpose, and
-    the user asked for it three times.
+def test_the_clone_path_does_not_stream():
+    """RESTORED after I broke it, and the docstring is the record of why.
 
-    The old test pinned "the clone path never streams", on two grounds. The
-    first was the underrun arithmetic: Chatterbox at 0.230x realtime needs a
-    lead of 3.35 x T, so a minute of speech would cost three minutes twenty of
-    silence before playback could start without stalling. The second was that
-    tts-long cancelled a queued or running job when a reader hung up, so
-    closing a laptop lid killed a thirty-six minute job.
+    The user asked to hear results as soon as possible. I read that as
+    covering every voice and made Chatterbox stream too. It was asked about
+    Kokoro, and they said so plainly: "i dont want streaming for chatterbox,
+    it was for kokoro".
 
-    The second ground is gone: tts-long keeps the job now, and says so in a
-    log line, because the Jobs tab already promised exactly that in as many
-    words. See TTS_SSE_CANCEL_ON_DISCONNECT.
+    The arithmetic agrees with them. Chatterbox runs at 0.230x on this
+    server's CPU, so playback catches up and waits roughly every segment. A
+    file that arrives whole is a better thing to listen to than one that stops
+    every few seconds, and posting a job is also what lets a reader close the
+    page while it runs.
 
-    The first ground answered a question nobody asked. Not stalling is worth
-    less than hearing the first sentence. The honest shape is a player that
-    plays every segment the moment it exists and waits VISIBLY when it runs
-    out, rather than one that waits invisibly for all of them. The arithmetic
-    still decides whether playback is continuous. It no longer decides whether
-    you get to listen at all.
+    Kokoro is the opposite case and is unaffected: 2.39x measured live, so
+    generation outruns playback and the stream plays through.
     """
-    speak = code(body_of("async function speakNow(voice, text, engine)",
-                         "async function collectSSE"))
-    flat = re.sub(r"\s+", " ", speak)
-    # `model` is what the gateway routes on: chatterbox reaches tts-long.
-    assert 'model:"chatterbox"' in flat
-    assert 'stream_format:"sse"' in flat
-    # A clone takes /v1 and streams whatever the Kokoro controls say, because
-    # those controls are not on screen for it.
-    assert 'const clone = engine === "chatterbox"' in flat
-    assert "const streamed = clone ||" in flat
-    # And it sends no speed, which Chatterbox answers with a 400.
-    assert 'model:"chatterbox", input:text, voice, response_format:format,' in flat
+    body = body_of("async function speakNow(voice, text)", "async function collectSSE")
+    flat = re.sub(r"\s+", " ", code(body))
+    assert 'model:"chatterbox"' not in flat, "a clone reaches the streaming path again"
+    assert 'model:"kokoro"' in flat, "the Kokoro path went with it"
+    # The clone branch posts a job instead, which is the whole difference.
+    assert 'if (voice.kind === "clone") await queueJob(voice.name, text);' in HTML
 
 
 def test_a_stream_that_dies_half_way_still_hands_over_what_it_made():
@@ -1190,7 +1179,7 @@ def test_a_stream_that_dies_half_way_still_hands_over_what_it_made():
     """
     collect = code(body_of("async function collectSSE", "/* Builds the highlight"))
     assert "err.chunks = chunks;" in collect, "the bytes die with the error"
-    speak = code(body_of("async function speakNow(voice, text, engine)", "async function collectSSE"))
+    speak = code(body_of("async function speakNow(voice, text)", "async function collectSSE"))
     assert "The stream ended early." in speak
     assert 'response.headers.get("x-job-id")' in speak
     assert "adopt(jobId)" in speak
@@ -1251,7 +1240,7 @@ def test_a_browser_with_no_audio_context_is_never_promised_anything():
     """Decided BEFORE the request is built, so response_format is never forced
     to pcm on a browser that cannot decode it, and the format the reader chose
     is honoured. No message, because nothing was promised."""
-    speak = code(body_of("async function speakNow(voice, text, engine)", "async function collectSSE"))
+    speak = code(body_of("async function speakNow(voice, text)", "async function collectSSE"))
     assert "const ctx = plan && plan.mode === \"audio\" ? openAudio() : null;" in speak
     opener = code(body_of("function openAudio()", "\n/* 44 bytes of RIFF"))
     assert "return null" in opener
