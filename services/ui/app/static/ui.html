@@ -5429,6 +5429,22 @@ async function retryJob(id) {
 }
 
 async function refreshJobs() {
+  /* NEVER LEAVE THE CARD BLANK. #joblist starts empty in the markup, so
+     anything that throws between here and the innerHTML write leaves a card
+     with no rows AND no explanation, which is what a reader saw while the
+     server was holding twenty-one jobs and serving them correctly. An empty
+     list has a sentence; a broken one now has one too. */
+  try {
+    await refreshJobsInner();
+  } catch (err) {
+    $("joblist").innerHTML =
+      `<div class="note bad">The job list could not be drawn: ` +
+      `${esc(err && err.message ? err.message : String(err))}</div>`;
+    throw err;
+  }
+}
+
+async function refreshJobsInner() {
   let listed = [];
   try { listed = (await json("/jobs")).jobs || []; }
   catch (err) {
