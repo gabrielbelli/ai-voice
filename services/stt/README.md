@@ -581,13 +581,58 @@ and if nothing is mounted there the write routes answer **503 naming the
 reason** while the built-ins carry on serving. A `PUT` that evaporated on the
 next restart would be worse than a refusal.
 
-> **Set `STT_API_KEYS` before you mount that volume.** Authentication is
-> `STT_API_KEYS`, unchanged, and on a deployment that leaves it unset **a write
-> API is an unauthenticated write API**.
+#### Turning the write routes on
 
-A profile written over the API applies to the **next request** — no restart.
-Editing a file in the mounted directory by hand works the same way; the
-registry stats the directory and its files and rescans only when one changes.
+The four routes are complete in every image, and they refuse every write until
+something is mounted at `/glossaries`. That is the whole of the operator's job:
+
+```yaml
+services:
+  stt-stack:
+    volumes:
+      - stt-models:/models
+      - stt-glossaries:/glossaries   # writable profiles live here
+
+volumes:
+  stt-models:
+  stt-glossaries:
+```
+
+Or, for a plain `docker run`:
+
+```bash
+docker run -v stt-models:/models -v stt-glossaries:/glossaries \
+  -p 8000:8000 ghcr.io/gabrielbelli/ai-voice-stt
+```
+
+The repository's own `compose.yaml` carries that mount, so the deployed stack
+has writable profiles from the next `up`. Nothing else changes: no environment
+variable turns this on, `STT_GLOSSARY_DIR` already defaults to `/glossaries`,
+and `GET /glossaries` reports `writable: true` once the volume is there.
+
+**A named volume rather than a host directory**, because nothing on the host
+needs to read these files. They are written over the API, read by this
+container, and capped at 64 KB each. Use a bind mount if you would rather edit
+them with an editor over SMB; the entrypoint chowns `/glossaries` to uid 1000
+on every start, which is what makes either kind writable by a process that
+never runs as root. If you set `user:` in compose instead, own the directory
+yourself: the 503 then names the uid it could not write as.
+
+A profile written over the API applies to the **next request**, with no
+restart. Editing a file in the mounted directory by hand works the same way:
+the registry stats the directory and its files and rescans only when one
+changes.
+
+> **These write routes are open on this deployment, today.** `STT_API_KEYS` is
+> unset here and so is `GATEWAY_API_KEYS`, because a key invented in a file
+> that gets deployed is how a placeholder becomes a production credential. The
+> backends are reachable only through the gateway, and the gateway with no keys
+> configured accepts every request. So anyone who can reach the published port
+> can create, replace and delete glossary profiles, and a profile changes what
+> other people's transcripts say. A rule added by someone else is a silent
+> rewrite of everyone's text, discovered weeks later if at all. Mounting the
+> volume is what makes that reachable rather than merely refused. Set `GATEWAY_API_KEYS` before this port is
+> reachable from anywhere you do not control.
 
 #### Two line forms, because they are two different jobs
 

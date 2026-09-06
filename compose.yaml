@@ -179,6 +179,44 @@ services:
     mem_limit: 6g
     volumes:
       - stt-models:/models
+      # WRITABLE GLOSSARY PROFILES, and until this line existed the four
+      # /glossaries routes were complete and unusable. STT_GLOSSARY_DIR is
+      # /glossaries in the image, the Containerfile deliberately does NOT
+      # mkdir it, and profiles.writability() reports `writable: false` and
+      # refuses every PUT and DELETE with 503 when nothing is mounted there.
+      # So the service shipped a write API that answered "mount a volume" to
+      # every write, which is the honest failure and still a dead feature.
+      #
+      # A NAMED VOLUME, like the other five in this file, and not a bind
+      # mount. Nothing on the host needs to read these files -- they are
+      # written over the API and read by this container only -- so naming a
+      # host path here would add an ownership problem and a personal path to a
+      # published file for no gain. A profile is a few hundred bytes and
+      # MAX_BYTES caps one at 64 KB, so this volume never grows to anything.
+      #
+      # OWNERSHIP IS HANDLED, and it is worth saying where. Docker creates a
+      # named volume's directory owned by root when the image has no directory
+      # to copy ownership from, and this container's uvicorn runs as uid 1000,
+      # so an unaided mount would land on profiles.writability()'s os.access
+      # check and answer 503 with "not writable by uid 1000" -- a mounted
+      # volume that still refuses writes, which is the confusing failure
+      # rather than the clear one. VOICE_CHOWN_DIRS in the Containerfile
+      # already lists /glossaries, so voice-entrypoint.sh chowns it to 1000
+      # while it is still root, on every start.
+      #
+      # THE BUILT-INS ARE NOT IN HERE and must not be. `dictation` and `tech`
+      # ship read-only at /etc/ai-voice/glossaries, and a custom file cannot
+      # take one of their names: the write routes answer 409 and the registry
+      # refuses the shadow. This volume holds only what somebody wrote.
+      #
+      # READ THE SECURITY NOTE BEFORE THIS IS REACHABLE FROM ANYWHERE
+      # UNTRUSTED. GATEWAY_API_KEYS above is unset on this deployment, and the
+      # backends run with STT_API_KEYS unset because the gateway is the only
+      # process that checks a token. Unset plus this volume means an
+      # unauthenticated write API on the LAN: anyone who can reach :30080 can
+      # create, replace and delete profiles, and a profile changes what other
+      # people's transcripts say. Set GATEWAY_API_KEYS.
+      - stt-glossaries:/glossaries
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health')"]
       interval: 60s
@@ -449,6 +487,14 @@ services:
 # the next restart without it.
 volumes:
   stt-models:
+  # `stt-glossaries` is the second addition, and the same argument as `voices`
+  # one paragraph up: the deployed compose mounted no glossary volume at all,
+  # so /glossaries did not exist in the container, `writable` was false and
+  # every PUT and DELETE answered 503. Without it a profile written over the
+  # API would land in the container's writable layer and die on the next
+  # `pull_policy: always` restart, which is why the service refuses rather
+  # than accepts.
+  stt-glossaries:
   tts-models:
   tts-long-models:
   tts-long-out:

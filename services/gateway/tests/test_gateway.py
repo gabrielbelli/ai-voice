@@ -110,6 +110,55 @@ async def test_a_job_can_be_cancelled_through_the_gateway(monkeypatch, backends)
     assert (long.seen[-1]["method"], long.seen[-1]["path"]) == ("DELETE", "/jobs/abc-123")
 
 
+async def test_a_glossary_can_be_written_and_deleted_through_the_gateway(
+        monkeypatch, backends):
+    """The four /glossaries routes are the only WRITE surface behind this door.
+
+    Routing them is not enough and the DELETE /jobs/{id} failure above is why:
+    a path registered for the wrong methods meets Starlette's 405 and never
+    reaches a backend that has had the route all along. So the method, the
+    body and the query string are asserted where they land, not here.
+
+    ?force=true carries the most meaning of any query string on this service.
+    It is what lets a single-word left-hand side through, so dropping it turns
+    an accepted `belly = Belli` rule into a 400 that names a rule the operator
+    did send. Streaming the body makes that easy to get wrong: an empty
+    forwarded body would still be a 200 from a backend that writes an empty
+    profile.
+    """
+    stt, tts, long = backends
+    async with gateway(monkeypatch, stt=stt, tts=tts, long=long) as (client, _):
+        written = await client.put("/glossaries/mine?force=true",
+                                   content=b"belly = Belli\n")
+        listed = await client.get("/glossaries")
+        read = await client.get("/glossaries/mine")
+        removed = await client.delete("/glossaries/mine")
+
+    assert [(r["method"], r["path"]) for r in stt.seen] == [
+        ("PUT", "/glossaries/mine"), ("GET", "/glossaries"),
+        ("GET", "/glossaries/mine"), ("DELETE", "/glossaries/mine")]
+    assert stt.seen[0]["body"] == b"belly = Belli\n"
+    assert stt.seen[0]["query"] == "force=true"
+    for response in (written, listed, read, removed):
+        assert response.status_code == 200
+    assert not tts.seen and not long.seen
+
+
+async def test_a_json_glossary_body_keeps_its_content_type(monkeypatch, backends):
+    """stt reads the content type to decide between JSON and the raw file.
+
+    `_body` in services/stt/app/main.py takes anything that is not
+    `application/json` as the file itself, so a stripped content type would
+    write the literal string `{"text": "..."}` into the profile and answer 200
+    while doing it.
+    """
+    stt, tts, long = backends
+    async with gateway(monkeypatch, stt=stt, tts=tts, long=long) as (client, _):
+        await client.put("/glossaries/mine", json={"text": "a b = C\n"})
+
+    assert stt.seen[-1]["headers"]["content-type"] == "application/json"
+
+
 async def test_advertised_models_route_where_the_list_says_they_do(monkeypatch, backends):
     """GET /v1/models is the routing table, so it must not drift from it.
 

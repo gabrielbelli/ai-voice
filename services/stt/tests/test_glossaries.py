@@ -13,6 +13,7 @@ recognisers (460 MB and 2.9 GB) are not present.
 from __future__ import annotations
 
 import io
+import re
 import struct
 import wave
 from pathlib import Path
@@ -447,6 +448,142 @@ def test_the_built_ins_still_serve_with_no_volume(client: TestClient) -> None:
                            files={"file": ("clip.wav", wav(), "audio/wav")},
                            data={"glossary": "dictation"})
     assert response.status_code == 200
+
+
+# ── the volume the write routes need ──────────────────────────────────────────
+#
+# The four routes above were complete, tested and unusable on the deployed
+# stack for as long as compose.yaml mounted nothing at /glossaries: `grep -n
+# glossar compose.yaml` returned nothing, so the directory did not exist in the
+# container, writability() reported false and every PUT and DELETE answered 503
+# telling the operator to mount a volume. Everything above this line passes
+# with that volume missing, which is exactly why these four tests read the
+# deployment files rather than the app.
+
+
+def _compose() -> dict:
+    # PyYAML rather than a regex over the file: this asserts the shape of a
+    # mapping, and a regex would pass on a `/glossaries` that appears in a
+    # comment. It is installed by services/stt/requirements.txt, which names
+    # uvicorn[standard], and CI installs that file before running this suite.
+    import yaml  # noqa: PLC0415
+
+    return yaml.safe_load((REPO.parents[1] / "compose.yaml").read_text(
+        encoding="utf-8"))
+
+
+def _containerfile_env() -> dict[str, str]:
+    """The image's ENV block, as a mapping. One ENV, backslash-continued."""
+    text = (REPO / "Containerfile").read_text(encoding="utf-8")
+    settings: dict[str, str] = {}
+    for line in text.replace("\\\n", " ").splitlines():
+        if not line.startswith("ENV "):
+            continue
+        for token in re.findall(r'(\w+)=("[^"]*"|\S+)', line[4:]):
+            settings[token[0]] = token[1].strip('"')
+    return settings
+
+
+def test_the_deployed_compose_mounts_the_volume_the_write_routes_need() -> None:
+    """Without this mount the whole write API answers 503 and nothing else fails.
+
+    A write surface that refuses every write is not a failing test anywhere: it
+    is a service behaving exactly as designed on a deployment that never asked
+    for run-time profiles. This test is the one thing that can tell the two
+    apart.
+    """
+    compose = _compose()
+    mounts = compose["services"]["stt-stack"]["volumes"]
+    targets = {entry.split(":")[1]: entry.split(":")[0] for entry in mounts}
+    assert profiles.DEFAULT_CUSTOM_DIR in targets, (
+        f"nothing is mounted at {profiles.DEFAULT_CUSTOM_DIR}: every PUT and "
+        "DELETE on /glossaries answers 503 on this deployment")
+
+    source = targets[profiles.DEFAULT_CUSTOM_DIR]
+    # A named volume, like every other mount in that file bar the two
+    # read-only host paths. A bind mount would put a host path into a
+    # published file and arrive with the host directory's ownership.
+    assert not source.startswith((".", "/")), (
+        f"{source} is a host path; the other volumes in this file are named")
+    assert source in compose["volumes"], (
+        f"{source} is mounted but never declared, so compose creates an "
+        "anonymous volume that a redeploy orphans")
+
+
+def test_the_mounted_path_is_the_one_the_image_actually_writes_to() -> None:
+    """Two files have to agree and neither imports the other.
+
+    STT_GLOSSARY_DIR decides where custom profiles are read and written;
+    compose decides where the volume lands. Drift between them is silent: the
+    volume mounts, the container starts, and the write routes go on answering
+    503 about a directory the operator can see in `docker inspect`.
+    """
+    compose = _compose()
+    targets = {entry.split(":")[1] for entry
+               in compose["services"]["stt-stack"]["volumes"]}
+    assert _containerfile_env()["STT_GLOSSARY_DIR"] in targets
+
+
+def test_the_entrypoint_takes_ownership_of_the_glossary_directory() -> None:
+    """A named volume's directory is created owned by root; uvicorn is uid 1000.
+
+    The image has no /glossaries for docker to copy ownership from, and the
+    Containerfile says why it must not, so the mount arrives root-owned and
+    writability()'s os.access check answers 503 "not writable by uid 1000".
+    That is a mounted volume that still refuses writes, which is the confusing
+    failure rather than the clear one. voice-entrypoint.sh chowns everything in
+    VOICE_CHOWN_DIRS while it is still root.
+    """
+    chown = _containerfile_env()["VOICE_CHOWN_DIRS"].split()
+    assert profiles.DEFAULT_CUSTOM_DIR in chown
+
+
+def test_the_whole_write_path_round_trips(writable: TestClient) -> None:
+    """Create, list, read, replace, delete, on a volume that is really there.
+
+    The tests above each assert one refusal or one step. This is the sequence
+    an operator actually performs, in order, and it is the one thing that was
+    never possible on the deployed stack.
+    """
+    created = writable.put("/glossaries/mine",
+                           content="# mine\nghost paper = Ghost Pepper\n")
+    assert created.status_code == 201
+    assert created.json()["created"] is True
+
+    listing = writable.get("/glossaries").json()
+    assert listing["writable"] is True
+    assert "reason" not in listing
+    mine = {entry["name"]: entry for entry in listing["glossaries"]}["mine"]
+    # One term, not two: the comment is not a term and the intended spelling
+    # becomes a hotword only when a request selects the profile.
+    assert (mine["source"], mine["writable"], mine["terms"]) == ("custom", True, 1)
+
+    read = writable.get("/glossaries/mine").json()
+    assert read["text"] == "# mine\nghost paper = Ghost Pepper\n"
+
+    replaced = writable.put("/glossaries/mine",
+                            content="ghost paper = Ghost Pepper\nBelli\n")
+    assert replaced.status_code == 200
+    assert replaced.json()["created"] is False
+    assert writable.get("/glossaries/mine").json()["hotwords"] == ["Belli"]
+
+    assert writable.delete("/glossaries/mine").status_code == 200
+    assert writable.get("/glossaries/mine").status_code == 404
+    assert [entry["name"] for entry in
+            writable.get("/glossaries").json()["glossaries"]] == [
+        "dictation", "tech"]
+
+
+def test_a_replace_is_a_200_and_a_create_is_a_201(writable: TestClient) -> None:
+    """A client that cannot tell the two apart cannot warn before overwriting.
+
+    Both answers carry `created` as well, because a status code is the half of
+    the answer a proxy is allowed to rewrite.
+    """
+    first = writable.put("/glossaries/mine", content="ghost paper = A\n")
+    second = writable.put("/glossaries/mine", content="ghost paper = B\n")
+    assert (first.status_code, second.status_code) == (201, 200)
+    assert (first.json()["created"], second.json()["created"]) == (True, False)
 
 
 # ── writes are validated ──────────────────────────────────────────────────────

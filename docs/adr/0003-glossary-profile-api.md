@@ -63,6 +63,16 @@ means today: on this deployment the keys are unset, so **a write API is an
 unauthenticated write API**. That is a reason to set them before mounting the
 volume, and it belongs in the README rather than in a comment nobody reads.
 
+**Since 2026-09-06 the volume is mounted.** `compose.yaml` had no glossary
+volume of any kind for as long as this ADR had been accepted, so `/glossaries`
+did not exist in the container and every `PUT` and `DELETE` answered the 503
+above. The four routes were complete, tested and unusable on the only
+deployment that runs them. `stt-glossaries:/glossaries` is a named volume like
+the other five in that file, and `VOICE_CHOWN_DIRS` in the image already listed
+`/glossaries`, so the entrypoint takes ownership for uid 1000 on every start.
+The warning in the paragraph above is now live rather than hypothetical: the
+keys are still unset, and the write routes now accept writes.
+
 ### Writes are validated, because a bad rule corrupts silently
 
 The shipped `glossary.txt` already argues this in its own header:
