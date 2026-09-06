@@ -829,7 +829,13 @@ def _health() -> dict[str, object]:
         # separate: "this host does 0.28x and the runner does 20x" is two facts,
         # and averaging them describes no machine that exists.
         "realtime_factor_by_backend": {k: round(v.value, 3) for k, v in _rates.items()},
-        "runner": state.get("runner") is not None,
+        # WAS A BOOLEAN, AND A BOOLEAN ANSWERED THE WRONG QUESTION. "A runner is
+        # configured" is not what anybody wants to know; "is it up, is it free,
+        # and if not why not" is. The page draws this, so it is the whole
+        # snapshot and not a flag. None when no runner is configured at all,
+        # which is still distinguishable from one that is configured and down.
+        "runner": (state["runner"].snapshot()
+                   if state.get("runner") is not None else None),
     }
 
 

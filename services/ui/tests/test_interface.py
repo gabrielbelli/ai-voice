@@ -781,3 +781,24 @@ def test_auto_detect_says_what_it_detected():
     # edit and voice change -- a second listener is a second chance to
     # disagree with the code actually sent.
     assert "  showDetected();" in HTML
+
+
+def test_the_runner_panel_asks_the_three_questions_separately():
+    """Is it there, will it take work, and if not why not.
+
+    Those are three different questions and a single status word answers none
+    of them well. The state is the headline, the runner's own reason is its own
+    line, and "not answering" is a state rather than an error, because the
+    machine is somebody's desktop and switched off is ordinary.
+    """
+    assert 'id="runnerbox"' in HTML
+    assert "function paintRunner()" in HTML
+    # Drawn from the health poll the page already runs. A second request would
+    # be a second thing to fail and a second thing to disagree with.
+    assert "  paintRunner();" in HTML
+    assert 'HEALTH.backends.tts_long' in HTML
+    # Hidden completely when no runner is configured: a panel that always says
+    # "none" is furniture.
+    assert "if (!r) { box.hidden = true; return; }" in HTML
+    # The reason is the runner's words, not a guess from the state name.
+    assert "r.reason" in HTML

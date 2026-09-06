@@ -1045,6 +1045,20 @@ details>summary:active{opacity:.72}
         </div>
       </div>
 
+      <!-- THE GPU RUNNER, when there is one. Hidden entirely when no runner
+           is configured, because a panel that always says "none" is furniture.
+           Everything in it comes from /ui/health, which this page already
+           polls, so there is no second request and no second thing to fail. -->
+      <div id="runnerbox" hidden>
+        <div class="row" style="align-items:baseline">
+          <strong id="runnerstate"></strong>
+          <span class="spacer"></span>
+          <span class="hint tight" id="runnerwhere"></span>
+        </div>
+        <div class="hint" id="runnerwhy"></div>
+        <div class="hint" id="runnergpu"></div>
+      </div>
+
       <!-- Hoisted out of the job row: it rendered once per live job, so
            three running jobs said it three times. It is one fact about this
            page, not about any one job. -->
@@ -1374,6 +1388,55 @@ async function poll() {
        body is. */
     HEALTH = await (await fetch("/ui/health")).json();
   } catch { HEALTH = null; }
+  paintRunner();
+}
+
+/* THE RUNNER, AS A PERSON WOULD ASK ABOUT IT: is it there, will it take work,
+   and if not why not. Those are three different questions and the panel keeps
+   them apart -- the state is the headline, the reason is its own line, and the
+   card disappears completely when no runner is configured. */
+function paintRunner() {
+  const box = $("runnerbox");
+  if (!box) return;
+  const h = HEALTH && HEALTH.backends && HEALTH.backends.tts_long
+            && HEALTH.backends.tts_long.health;
+  const r = h && h.runner;
+  if (!r) { box.hidden = true; return; }
+  box.hidden = false;
+
+  /* UNREACHABLE IS A STATE, NOT AN ERROR. The machine is somebody's desktop:
+     switched off, asleep and rebooting are all ordinary. */
+  if (!r.reachable) {
+    $("runnerstate").textContent = "GPU runner: not answering";
+    $("runnerwhy").textContent = r.error ? "The last attempt gave " + r.error + "." : "";
+    $("runnerwhere").textContent = r.host ? r.host + ":" + r.port : "";
+    $("runnergpu").textContent = "";
+    return;
+  }
+
+  const busy = r.job_running ? " · working" : "";
+  $("runnerstate").textContent = "GPU runner: " + (r.state || "unknown") + busy;
+  $("runnerwhere").textContent = (r.host || "") + ":" + (r.port || "")
+    + (r.mode ? " · " + r.mode : "");
+
+  /* The reason is the useful half whenever it will not run, and it is the
+     runner's own words rather than this page guessing from a state name. */
+  let why = r.can_run ? "" : (r.reason || "");
+  if (!r.can_run && r.seconds_until_available > 0)
+    why += (why ? " " : "") + "Free again in " + clock(r.seconds_until_available) + ".";
+  $("runnerwhy").textContent = why;
+
+  const g = r.gpu || {};
+  const bits = [];
+  if (g.name) bits.push(g.name);
+  if (g.util_gpu !== undefined && g.util_gpu !== null) bits.push(g.util_gpu + "% used");
+  if (g.mem_used_mib) bits.push(g.mem_total_mib
+    ? human(g.mem_used_mib * 1048576) + " of " + human(g.mem_total_mib * 1048576)
+    : human(g.mem_used_mib * 1048576));
+  if (g.temperature_c) bits.push(g.temperature_c + " C");
+  const svc = (r.services || []).filter(x => x.running).map(x => x.id);
+  if (svc.length) bits.push("running " + svc.join(", "));
+  $("runnergpu").textContent = bits.join(" · ");
 }
 
 /* ============================================== playback speed ======== */

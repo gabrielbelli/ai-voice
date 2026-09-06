@@ -213,6 +213,10 @@ class RunnerClient:
         self._ctx = _pinned_context(cfg)
         self._lock = threading.Lock()
         self._assets: set[str] = set()
+        # See snapshot(): the page polls health, health must not become a
+        # round trip to somebody's desktop on every poll.
+        self._snap: dict | None = None
+        self._snap_at = 0.0
 
     def _connect(self) -> http.client.HTTPSConnection:
         conn = http.client.HTTPSConnection(
@@ -279,6 +283,57 @@ class RunnerClient:
                 return False, "gpu_busy"
             return True, ""
         return False, "no_such_service"
+
+    def snapshot(self, max_age: float = 5.0) -> dict:
+        """What the runner is doing, for a person to look at.
+
+        CACHED, because /health is polled by the page every few seconds and by
+        the container healthcheck on its own timer, and neither should turn into
+        a round trip over the LAN to somebody's desktop. Five seconds is well
+        under the poll interval and well over the runner's own one-second
+        sampling tick, so the page never shows a figure older than the thing
+        producing it.
+
+        NEVER RAISES. This feeds a status panel, and a runner that is switched
+        off, asleep or being rebooted is the normal case rather than an error.
+        The unreachable answer is itself the status.
+        """
+        now = time.monotonic()
+        if self._snap is not None and (now - self._snap_at) < max_age:
+            return self._snap
+        try:
+            status, _, data = self._request("GET", "/v1/status")
+            if status != 200:
+                snap = {"reachable": False, "error": f"HTTP {status}"}
+            else:
+                doc = json.loads(data)
+                gpu = doc.get("gpu") or {}
+                snap = {
+                    "reachable": True,
+                    "state": doc.get("state"),
+                    "can_run": doc.get("can_run"),
+                    "mode": doc.get("mode"),
+                    "reason": doc.get("reason"),
+                    "seconds_until_available": doc.get("seconds_until_available"),
+                    "job_running": doc.get("job_running"),
+                    "running_service": doc.get("running_service"),
+                    "yields": doc.get("yields"),
+                    "gpu": {k: gpu.get(k) for k in
+                            ("healthy", "util_gpu", "mem_used_mib", "mem_total_mib",
+                             "temperature_c", "power_w", "name")
+                            if k in gpu},
+                    "services": [{"id": x.get("id"),
+                                  "running": x.get("running"),
+                                  "queued": x.get("queued")}
+                                 for x in (doc.get("services") or [])],
+                }
+        except Exception as exc:  # noqa: BLE001 - the failure IS the status
+            snap = {"reachable": False, "error": type(exc).__name__}
+        snap["host"] = self.cfg.host
+        snap["port"] = self.cfg.port
+        snap["service"] = self.cfg.service
+        self._snap, self._snap_at = snap, now
+        return snap
 
     # -- assets -------------------------------------------------------------
 
