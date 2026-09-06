@@ -11,6 +11,14 @@ for both to come out of the same encoder. So the route drains this generator for
 a buffered response and frames each yield as a delta for an SSE one, and the two
 cannot drift because there is nothing to drift.
 
+**The claim is about the ENCODER, and it holds for the chunks it is given.**
+Since the latency ramp, `stream_format: "sse"` asks app.main.ramp_schedule for
+small leading chunks on an input of at least RAMP_MIN_PHONEMES, and a chunk
+boundary is a thing the duration predictor sees. So a ramped request and its
+buffered twin carry the same words spoken slightly differently, not the same
+samples, and comparing them byte for byte is not a test of anything. Every
+buffered request, and every input below that threshold, is unchanged.
+
 **One sample conversion, `voice_common.audio.pcm_bytes`, feeding every format.**
 Before this, `wav` went through libsndfile and `pcm` through pcm_bytes, and the
 two rounded differently: measured over one utterance, 54.6% of samples differed,
@@ -275,7 +283,11 @@ def encode(chunks: Iterable[np.ndarray], fmt: str) -> bytes:
 
     For mp3, aac, flac and pcm this is exactly `b"".join(encode_stream(…))`, and
     the deltas of an SSE response for the same request concatenate to it byte
-    for byte — asserted in tests/test_openai_speech.py for every format. `opus`
+    for byte whenever both routes were given the same chunks, asserted in
+    tests/test_openai_speech.py for every format, on an input below the ramp
+    threshold. A ramped stream is planned into different chunks on purpose and
+    is a different rendering of the same words; see the module docstring above
+    and app/main.py. `opus`
     agrees everywhere but the Ogg page serial and the CRC covering it, which
     the muxer randomises per stream: 40 bytes of 8980 on a five-page stream,
     and already true of two identical buffered requests before any of this.

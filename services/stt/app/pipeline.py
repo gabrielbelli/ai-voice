@@ -686,6 +686,16 @@ def open_stream(data: bytes, opts: asr.Options, *, allow_resample: bool = True,
     Only the engine that can genuinely emit before it finishes reaches here —
     the route refuses stream=true on the other one by name rather than
     delivering one delta at the end and calling it a stream.
+
+    THIS PATH DOES NOT WINDOW, AND `run` DOES. `deltas` below hands
+    `speech.samples` whole to model.stream, so the ceiling that `_windows` and
+    MAX_WINDOW_SECONDS exist to enforce guards `run` alone. It costs nothing
+    today, because the only engine that reaches here is Parakeet and Parakeet
+    has no such ceiling. It is written down because the ceiling was added after
+    a 7.7-minute clip returned 500 from an encoder, and a deployment that gave
+    this route an engine with that limit would meet it again here with nothing
+    in the way. Fixing it means moving _windows into this function and turning
+    `can_stream` from a flag into a question about clip length.
     """
     model = engine()
     tuning = tuning or Tuning()

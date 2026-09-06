@@ -167,3 +167,23 @@ def test_a_stream_is_not_given_a_length_it_does_not_have(client):
     response = api.post(PATH, json={})
     assert "content-length" not in response.headers
     assert response.content == b"".join(FRAMES)
+
+
+def test_the_chunk_plan_survives_the_relay_in_both_directions(client):
+    """X-Chunk-Phonemes coming back, X-Chunk-Plan going out.
+
+    tts-stack announces the sizes of the chunks a stream is about to carry so
+    the page can draw a bar that moves before any audio exists, and the page
+    sends X-Chunk-Plan to say it has read them. Both are ordinary headers on a
+    denylist hop, so nothing had to be added for them to pass; this is the
+    assertion that keeps it that way. A stripped header is not a broken page,
+    but it is a silently worse one, which is the failure nobody notices.
+    """
+    api, gateway, _ = client()
+    gateway.streams[PATH] = (
+        {"content-type": "text/event-stream",
+         "x-chunk-phonemes": "60,60,98,157"}, Paced([b"data: x\n\n"]))
+
+    response = api.post(PATH, json={}, headers={"X-Chunk-Plan": "1"})
+    assert response.headers["x-chunk-phonemes"] == "60,60,98,157"
+    assert gateway.seen[-1].headers.get("x-chunk-plan") == "1"

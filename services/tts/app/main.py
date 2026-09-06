@@ -25,6 +25,7 @@ stream got a single buffered mp3, HTTP 200, no error, and no way to tell.
 from __future__ import annotations
 
 import base64
+import functools
 import json
 import os
 import subprocess
@@ -36,7 +37,7 @@ from pathlib import Path
 from typing import Literal
 
 import numpy as np
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -75,6 +76,112 @@ THREADS = int(os.getenv("TTS_THREADS", "4"))
 CHUNK_PHONEMES = min(max(int(os.getenv("TTS_CHUNK_PHONEMES",
                                        str(MAX_CHUNK_PHONEMES))), 1),
                      MAX_CHUNK_PHONEMES)
+
+# ------------------------------------------------------- the latency ramp --
+#
+# THE FIRST CHUNK IS THE ONLY ONE WHOSE SIZE A LISTENER EXPERIENCES AS WAITING.
+# Every later one is generated while they are still hearing the one before it.
+# Packing the first to the window as well is right for throughput and ruinous
+# for the one thing a stream is for: measured against this service, 528
+# characters came back as two deltas and the first arrived after 10.24 s
+# carrying 24.7 s of audio. The stream was working exactly as designed and
+# nobody could hear anything for ten seconds.
+#
+# 60 phonemes is where the wait and the tempo cross. Kokoro's duration
+# predictor sees less context in a short input and slows down, so a very small
+# first chunk buys a fast start and pays in speed. Measured on orko, seconds
+# of audio per phoneme against the full window's 0.0447: 0.079 at 28 phonemes,
+# 0.067 at 52, 0.053 at 86, 0.053 at 195. At 60 the first delta leaves in
+# about 1.5 s and its four seconds of speech run a little under normal. 93 is
+# the value to try first if the tempo step at the first seam is audible; it
+# costs 0.6 s of that wait. Set this to CHUNK_PHONEMES or above to turn the
+# ramp off.
+FIRST_CHUNK_PHONEMES = min(max(int(os.getenv("TTS_FIRST_CHUNK_PHONEMES", "60")),
+                               1),
+                           CHUNK_PHONEMES)
+
+# BELOW THIS THE WHOLE REQUEST IS UNDER THREE SECONDS, so a ramp would move it
+# from one point inside the 1-to-10 s band to another and buy nothing, while
+# costing an extra seam and an extra model call. Short requests therefore stay
+# byte-identical to what this service returned before the ramp existed,
+# streamed and buffered alike.
+RAMP_MIN_PHONEMES = 2 * FIRST_CHUNK_PHONEMES
+
+# THE PAGE'S OWN MARGIN, NAMED AFTER IT. services/ui/app/static/ui.html holds
+# STREAM.safety = 1.15 and applies it to this same arithmetic from the other
+# end. The schedule below has to survive the rule that page enforces, so it
+# uses the page's number rather than inventing a second one.
+RAMP_SAFETY = 1.15
+
+# THE SHAPE OF ONE MODEL CALL, as two ratios rather than four seconds, so that
+# nothing here depends on how long a full window happens to take on a given
+# machine.
+#
+# Measured on orko at TTS_THREADS=8, eight sizes, three runs each, the phoneme
+# counts taken from the tokeniser this service uses:
+#
+#     phonemes      28     52     86    130    195    294    395    499
+#     generate    0.99   1.39   1.80   2.82   4.08   5.48   8.52   9.23  s
+#     audio       2.22   3.48   4.59   7.42  10.39  14.66  19.01  22.29  s
+#
+#     gen(p)   = 0.399 + 0.01853 p        audio(p) = 1.360 + 0.04358 p
+#
+# CALL_SHARE is that generation intercept over a full window's generation,
+# 0.399 / 9.83: the part of a call that is paid whatever is in it.
+#
+# AUDIO_FIXED_SHARE is the audio intercept over a full window's audio,
+# 1.360 / 23.54: the silence at a chunk's edges plus the drawl. It is why a
+# ramp works at all, because every chunk banks about a second more audio than
+# its phoneme count alone would buy.
+CALL_SHARE = 0.041
+AUDIO_FIXED_SHARE = 0.058
+
+# THE RATE THE SCHEDULE IS PLANNED AGAINST, as a multiple of realtime, and
+# DELIBERATELY BELOW THE ONE MEASURED. orko at 8 threads generates a full
+# window at 2.4x, and planning at that leaves no room at all: the same
+# schedule on a machine a sixth slower is one the page pauses. 2.0 is that
+# figure with a fifth held back, and it survives a machine a sixth slower with
+# half a second to spare. Below about 1.85x no schedule survives, and none is
+# planned. See ramp_schedule.
+#
+# NOT `rate.value`, and that is a decision rather than an oversight. The
+# published figure is an EMA over whatever sizes have been asked for lately,
+# and a short request measures well below the marginal rate: this deployment
+# answered a 1.2 s clip at 1.8x and a 22 s one at 2.4x within a minute of each
+# other. A schedule that read it would switch itself on and off between
+# requests, and the ramp's own small first chunks would drag it down and then
+# switch the ramp off. `rate.value` is still consulted, but only as a guard.
+RAMP_RATE = max(float(os.getenv("TTS_RAMP_RATE", "2.0")), 1.0)
+
+# HOW MANY TIMES OVER A CHUNK'S GENERATION MUST FIT INSIDE THE AUDIO BANKED.
+#
+# TWICE is the rule ui.html enforces today, and it enforces it because it
+# cannot do better: with no idea how big the next chunk is, the only honest
+# reading of "the next delta is late" is that nothing has arrived for longer
+# than the audio still in hand. Half the bank is therefore spent proving the
+# stream is alive rather than keeping it playing.
+#
+# ONCE is the rule that is left when the client reads X-Chunk-Phonemes and can
+# tell a late delta from an expected one. It reaches the full window in four
+# chunks instead of seven, which matters because every chunk under about 300
+# phonemes is spoken slowly: measured on orko, 0.064 s per phoneme at 52,
+# 0.055 at 120, 0.053 at 155, against 0.045 for a whole 495-phoneme utterance.
+# Fewer small chunks is less of that.
+#
+# A CLIENT ASKS FOR IT BY NAME, with X-Chunk-Plan, and gets the careful
+# schedule otherwise. This service has to be safe deployed on its own: a page
+# that has not learned to read the plan must not be handed a stream it will
+# report as having fallen behind.
+RAMP_LEAD = 2
+RAMP_LEAD_WITH_PLAN = 1
+RAMP_PLAN_HEADER = "X-Chunk-Plan"
+
+# HOW MANY CHUNKS THE RAMP MAY SPEND REACHING THE FULL WINDOW. A schedule
+# longer than this is a stream of small chunks rather than a ramp: it pays a
+# model call and a little duration on every one of them for a latency that was
+# already bought on the first. At the planned rate the ramp takes seven.
+RAMP_MAX_CHUNKS = 12
+
 
 # OpenAI's own maximum for `input`, and the schema's. It was not enforced, so a
 # single synchronous request had no upper bound on how long it could run.
@@ -133,6 +240,73 @@ class _Rate:
 
 
 rate = _Rate()
+
+
+def ramp_schedule(total: int, *, reads_plan: bool = False) -> list[int] | None:
+    """Sizes for the leading chunks of a streamed request, or None for today's.
+
+    THE RULE IS THE PAGE'S, READ FROM THE OTHER END. ui.html plays a delta as
+    it lands and pauses when the audio still in hand has fallen below the time
+    since the last delta arrived, which is the honest reading of "the next
+    delta is already late". So a chunk may be as large as its generation fits
+    TWICE inside the audio banked when the delta before it landed. Once over
+    would only keep the sound going; the second is what stops the page saying
+    it fell behind. Written out, each size is the largest that satisfies
+
+        2 x RAMP_SAFETY x generate(next) <= banked audio
+
+    with the bank carried forward: it grows by the audio a chunk makes and
+    shrinks by the time the next one takes to make. Nothing is geometric. At
+    the planned rate the sizes that fall out are 60, 60, 98, 157, 240, 358 and
+    then the full window, steep after the first step because the bank grows
+    faster than the chunks do.
+
+    THIS HAS TO BE SAFE DEPLOYED ON ITS OWN. A page that cannot read the
+    schedule keeps the rule above and nothing tells it a ramp is running, so a
+    schedule this service cannot defend would show a reader "The voice fell
+    behind" where today they hear one clean run. `reads_plan` is a client
+    saying it has read X-Chunk-Phonemes and can tell a late delta from an
+    expected one; it halves the requirement and reaches the window in four
+    chunks. See RAMP_LEAD.
+    """
+    if total < RAMP_MIN_PHONEMES or FIRST_CHUNK_PHONEMES >= CHUNK_PHONEMES:
+        return None
+
+    # BELOW REALTIME NOTHING HELPS. A machine that generates slower than it
+    # speaks cannot keep any schedule ahead of playback, so the request is
+    # planned as it always was. Only a measurement counts here: an unseeded
+    # rate is None and means nothing has been synthesised yet.
+    measured = rate.value
+    if measured is not None and measured < RAMP_SAFETY:
+        return None
+
+    # One full window of audio is the unit, so the seconds cancel and the two
+    # ratios above are the whole model.
+    def audio(phonemes: int) -> float:
+        return (AUDIO_FIXED_SHARE
+                + (1 - AUDIO_FIXED_SHARE) * phonemes / MAX_CHUNK_PHONEMES)
+
+    def generate(phonemes: int) -> float:
+        return (CALL_SHARE
+                + (1 - CALL_SHARE) * phonemes / MAX_CHUNK_PHONEMES) / RAMP_RATE
+
+    lead = RAMP_LEAD_WITH_PLAN if reads_plan else RAMP_LEAD
+    sizes = [FIRST_CHUNK_PHONEMES]
+    bank = audio(sizes[0])
+    while sizes[-1] < CHUNK_PHONEMES:
+        room = RAMP_RATE * bank / (lead * RAMP_SAFETY) - CALL_SHARE
+        allowed = int(MAX_CHUNK_PHONEMES * room / (1 - CALL_SHARE))
+        # NEVER SMALLER THAN THE FIRST, so the ramp may hold its size for a
+        # step while the bank catches up. The first two chunks are equal at
+        # every rate this ships at, and that step is the tightest one in the
+        # whole schedule: after it the bank grows faster than the chunks do.
+        size = min(CHUNK_PHONEMES, max(FIRST_CHUNK_PHONEMES, allowed))
+        if len(sizes) >= RAMP_MAX_CHUNKS and size < CHUNK_PHONEMES:
+            return None
+        bank += audio(size) - generate(size)
+        sizes.append(size)
+    return sizes
+
 
 
 def _fetch(url: str, dest: Path) -> None:
@@ -562,6 +736,14 @@ def _sse_body(synth: Synth, chunks: list[str], voice: str, language: str,
     the same request byte for byte — same encoder, same chunks, see
     app/audio_out.py — for every format but wav, where it differs in the two
     length fields a stream cannot know.
+
+    THAT HOLDS WHILE BOTH ROUTES PLAN THE SAME CHUNKS, and a ramped request is
+    the one case where they do not: `stream_format: "sse"` on an input of at
+    least RAMP_MIN_PHONEMES asks for small leading chunks, and a chunk
+    boundary is what the duration predictor sees, so the samples differ and so
+    does `input_tokens`. The two bodies are the same audio, spoken slightly
+    differently; they are not the same bytes. Every buffered request and every
+    input below RAMP_MIN_PHONEMES is unaffected.
     """
     samples = 0
     compute = 0.0
@@ -591,9 +773,10 @@ def _sse_body(synth: Synth, chunks: list[str], voice: str, language: str,
     # chunks without a second thread. What that would buy is a stream that
     # survives a proxy read timeout on one very slow chunk, and the timeout in
     # front of this service is 300 s (GATEWAY_TTS_TIMEOUT) against a chunk of
-    # at most CHUNK_PHONEMES phonemes, measured at 6.21 s for the first of
-    # seven on a 4096-character input. tts-long keepalives because it queues
-    # for minutes before it starts; this service starts at once.
+    # at most CHUNK_PHONEMES phonemes, measured on orko at 9.23 s for 499
+    # phonemes, and a ramped request's chunks are smaller still. tts-long
+    # keepalives because it queues for minutes before it starts; this service
+    # starts at once.
     try:
         for data in encode_stream(audio(), fmt):
             yield _frame({"type": "speech.audio.delta",
@@ -618,7 +801,7 @@ def _sse_body(synth: Synth, chunks: list[str], voice: str, language: str,
 # event loop. A StreamingResponse handed a sync generator is iterated in that
 # same pool, so the SSE path does not put synthesis on the loop either.
 @app.post("/v1/audio/speech")
-def openai_speech(req: SpeechRequest) -> Response:
+def openai_speech(req: SpeechRequest, request: Request) -> Response:
     synth = state.get("synth")
     if not synth:
         return error_response(503, "model still loading",
@@ -657,7 +840,15 @@ def openai_speech(req: SpeechRequest) -> Response:
             f"{k}={v}" for k, v in sorted(headers.items())))
 
     try:
-        chunks = synth.plan(req.input, language, CHUNK_PHONEMES)  # type: ignore[attr-defined]
+        # THE FIRST CHUNK IS SMALL ONLY WHEN SOMEBODY IS LISTENING TO IT. A
+        # buffered request is judged on when the whole file arrives, and
+        # cutting its first chunk short would cost throughput for nothing.
+        reads_plan = (request.headers.get(RAMP_PLAN_HEADER, "").strip().lower()
+                      in {"1", "true", "yes", "on"})
+        chunks = synth.plan(  # type: ignore[attr-defined]
+            req.input, language, CHUNK_PHONEMES,
+            ramp=(functools.partial(ramp_schedule, reads_plan=reads_plan)
+                  if req.stream_format == "sse" else None))
         input_tokens = synth.token_count(chunks)  # type: ignore[attr-defined]
     except Exception as exc:  # noqa: BLE001 - the client needs the reason
         return error_response(500, f"phonemisation failed: {exc}",
@@ -675,7 +866,17 @@ def openai_speech(req: SpeechRequest) -> Response:
             media_type="text/event-stream",
             headers={**headers,
                      "Cache-Control": "no-cache",
-                     "X-Accel-Buffering": "no"})
+                     "X-Accel-Buffering": "no",
+                     # WHAT THIS STREAM IS ABOUT TO DO, before it does any of
+                     # it. plan() has already run, so the sizes are known and
+                     # the header costs nothing: measured time to first byte on
+                     # this route is 10 to 15 ms from 4 characters to 1495. A
+                     # client that reads it knows how long the first delta will
+                     # take and when the next one is due, which is the only way
+                     # to draw a bar that moves before any audio exists. A
+                     # client that ignores it loses nothing.
+                     "X-Chunk-Phonemes": ",".join(
+                         str(len(chunk)) for chunk in chunks)})
 
     started = time.monotonic()
     try:

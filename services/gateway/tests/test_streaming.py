@@ -168,3 +168,44 @@ async def test_the_instruction_not_to_buffer_survives_the_proxy(monkeypatch):
     assert response.headers["content-type"] == "text/event-stream"
     assert "content-length" not in response.headers, \
         "a length this response cannot keep makes a client stop reading early"
+
+
+async def test_the_chunk_plan_survives_the_proxy_in_both_directions(monkeypatch):
+    """X-Chunk-Phonemes coming back, X-Chunk-Plan going out.
+
+    tts-stack announces the sizes of the chunks a stream is about to carry, so
+    a client can draw a bar that moves before any audio exists, and a client
+    sends X-Chunk-Plan to say it has read them and can therefore be given the
+    shorter ramp. Neither is hop-by-hop and neither needed anything added for
+    it to pass; this is what keeps it that way. A stripped header leaves a
+    working stack that is quietly slower and says nothing.
+    """
+    backend = Paced(FRAMES)
+    main = await _app(monkeypatch, backend)
+
+    class Announcing(Streaming):
+        seen: list[httpx.Request] = []
+
+        async def handle_async_request(self, request):
+            Announcing.seen.append(request)
+            response = await super().handle_async_request(request)
+            response.headers["x-chunk-phonemes"] = "60,60,98,157"
+            return response
+
+    router = Router({"stt.test": MockBackend("stt-stack"),
+                     "tts.test": Announcing(backend),
+                     "long.test": MockBackend("tts-long")})
+    monkeypatch.setattr(main, "new_client",
+                        lambda: httpx.AsyncClient(transport=router,
+                                                  follow_redirects=False))
+
+    async with main.app.router.lifespan_context(main.app):
+        async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=main.app),
+                base_url="http://gateway.test") as client:
+            response = await client.post(
+                SPEECH, headers={"X-Chunk-Plan": "1"},
+                content=json.dumps({"model": "kokoro", "input": "One.",
+                                    "stream_format": "sse"}))
+    assert response.headers["x-chunk-phonemes"] == "60,60,98,157"
+    assert Announcing.seen[-1].headers.get("x-chunk-plan") == "1"

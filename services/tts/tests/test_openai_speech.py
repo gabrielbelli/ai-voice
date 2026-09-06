@@ -21,13 +21,15 @@ import time
 
 import numpy as np
 import pytest
+from starlette.requests import Request
 from starlette.testclient import TestClient
 from voice_common.conformance import module_app
 
 import app.main as main
 from app.audio_out import FORMATS, encode, encode_stream
 from app.openai_api import VOICE_ALIASES, custom_voice_id, resolve_voice
-from app.synth import MAX_CHUNK_PHONEMES, chunk_phonemes
+from app.synth import (MAX_CHUNK_PHONEMES, _take, chunk_phonemes,
+                       ramp_chunks)
 
 needs_ffmpeg = pytest.mark.skipif(shutil.which("ffmpeg") is None,
                                   reason="ffmpeg is not on PATH")
@@ -60,9 +62,20 @@ class FakeSynth:
         self.fail_on: int | None = None
 
     def plan(self, text: str, language: str,
-             target: int = MAX_CHUNK_PHONEMES) -> list[str]:
+             target: int = MAX_CHUNK_PHONEMES, *, ramp=None) -> list[str]:
+        """The real chunking and the real ramp; only the model is faked.
+
+        `ramp` IS NOT OPTIONAL TO ACCEPT. The route passes it on every request
+        that asks for a stream, and a double one keyword short turns every
+        request into a 500 -- including `stream_format: "audio"`, which never
+        ramps at all. Measured on the first draft of this feature: 23 of 61
+        tests failed and every one of them was this signature.
+        """
         if not text.strip():
             return []
+        schedule = ramp(len(text)) if ramp else None
+        if schedule:
+            return ramp_chunks(text, schedule, cap=target)
         return chunk_phonemes(text, target=target)
 
     def token_count(self, chunks: list[str]) -> int:
@@ -584,7 +597,11 @@ def test_the_response_closes_its_generator_when_the_client_hangs_up() -> None:
     request = main_module.SpeechRequest(model="tts-1", input=MULTI_CHUNK,
                                         voice="fable", response_format="pcm",
                                         stream_format="sse")
-    response = main_module.openai_speech(request)
+    # The bare scope a Request needs. The route reads one header off it, and
+    # nothing here sends that header, so the careful schedule is what runs.
+    http = Request({"type": "http", "method": "POST", "headers": [],
+                    "path": "/v1/audio/speech"})
+    response = main_module.openai_speech(request, http)
     assert isinstance(response, main_module.ClosingStreamingResponse)
 
     async def receive():
@@ -740,3 +757,311 @@ def test_the_reported_rate_and_the_header_are_the_same_measurement(client):
     header = float(response.headers["x-realtime-factor"])
     reported = client.get("/health").json()["realtime_factor"]
     assert reported == pytest.approx(header, rel=0.02)
+
+
+# ------------------------------------------------------- the latency ramp --
+#
+# espeak's own output, captured from the tokeniser this service uses, so the
+# assertions below are about phonemes a request really produces rather than
+# about English.
+NUMBER_PHONEMES = ("ˌɒn θɹˈiː.fˈaɪv kˈɪləmˌiːtəz ɒv kˈəʊst, twˈɛlv,fˈɔːhˈʌndɹɪd "
+                   "pˈiːpəl lˈaɪv and ðə bˈəʊts ɡˌəʊ ˈaʊt at dˈɔːn.")
+UNBROKEN_PHONEMES = (
+    "ðɪ ˌɛndʒɪnˈiəz hˌuː bˈɪlt ðə fˈɜːst tˈaɪd mˈɪlz ɒnðɪ ˈɛstjuːəɹi tʃˈəʊz ðeə "
+    "sˈaɪts baɪ wˈɒtʃɪŋ ðə wˈɔːtə fəɹə hˈəʊl jˈiə bɪfˌɔː ðeɪ lˈeɪd ɐ sˈɪŋɡəl "
+    "stˈəʊn ɪnðə mˈʌd and ðat pˈeɪʃəns ɪz ðə ɹˈiːzən sˈɛvɹəl ɒv ðˌɛm ɑː stˈɪl "
+    "stˈandɪŋ")
+
+
+def test_the_ramp_loses_nothing_and_repeats_nothing() -> None:
+    """head is a literal PREFIX and rest the literal REMAINDER, every time.
+
+    The first draft rebuilt the head with `chunk_phonemes` and then sliced the
+    source by its length. `chunk_phonemes` strips every piece and rejoins a
+    mark with no space before it, so that offset is only right when the
+    phoneme string happened to have exactly that spacing: three of six
+    ordinary sentences came back with a phoneme doubled at the seam or the
+    first letter of a word eaten. Cutting by offset makes the property hold by
+    construction, and this is the assertion that keeps it holding.
+    """
+    for phonemes in (NUMBER_PHONEMES, UNBROKEN_PHONEMES,
+                     "hˈɛlˌoʊ ðˈɛɹ , hˈaʊ ˈɑːɹ juː ? aɪ æm fˈaɪn",
+                     "hˈɛlˌoʊ  ðˈɛɹ  hˈaʊ  ˈɑːɹ  juː  aɪ  æm  fˈaɪn"):
+        for budget in (20, 37, 60, 93, 120, 200):
+            rest = phonemes
+            while len(rest) > budget:
+                head, tail = _take(rest, budget)
+                assert head, "an empty head would loop forever"
+                assert rest.startswith(head)
+                assert rest.endswith(tail)
+                assert head + rest[len(head):] == rest
+                rest = tail
+
+
+def test_no_ramped_chunk_can_reach_the_row_that_is_not_there() -> None:
+    """The crash this module was written to remove, reached from a new side.
+
+    A voice tensor has 510 rows and 510 tokens index row 510, so every chunk
+    is bounded at 509. `_take` looks PAST its budget for a mark to cut at,
+    which is what lets an unpunctuated opening sentence be ramped, and an
+    unbounded look-ahead is a head half again the size of the window: 763
+    phonemes on the last budget of the schedule.
+    """
+    marks = "wˈʌn tˈuː θɹˈiː fˈɔː fˈaɪv " * 60 + "sˈɪks."
+    for cap in (40, 120, MAX_CHUNK_PHONEMES):
+        for budget in (12, 30, cap - 1, cap):
+            head, _ = _take(marks, min(budget, cap), cap)
+            assert len(head) <= cap, (budget, cap, len(head))
+            assert head + marks[len(head):] == marks
+    # And through the whole ramp, where the tail is bounded by the window the
+    # unchanged chunk_phonemes bounds it at, exactly as plan() bounds it.
+    schedule = main.ramp_schedule(len(marks))
+    assert all(len(chunk) <= MAX_CHUNK_PHONEMES
+               for chunk in ramp_chunks(marks, schedule))
+
+
+def test_the_ramp_does_not_cut_inside_a_number() -> None:
+    """A mark with no space after it is inside a word, not between two.
+
+    espeak renders "12,400" as `twˈɛlv,fˈɔːhˈʌndɹɪd` and "3.5" as
+    `θɹˈiː.fˈaɪv`. Cutting at either mark ends a chunk on "twelve" or "three"
+    with the falling contour of a finished clause and opens the next one on
+    the rest of the number. This is ordinary prose with a number in it.
+    """
+    for budget in range(20, len(NUMBER_PHONEMES)):
+        head, rest = _take(NUMBER_PHONEMES, budget)
+        assert not head.endswith("θɹˈiː."), head
+        assert not head.endswith("twˈɛlv,"), head
+        if rest:
+            assert not rest.startswith(("fˈaɪv", "fˈɔːhˈʌndɹɪd")), rest
+
+
+def test_the_ramp_cuts_a_sentence_with_no_punctuation_in_it() -> None:
+    """The case the first draft silently did nothing about.
+
+    `chunk_phonemes` breaks only on `.,!?;`, so a long run between two marks is
+    taken whole whatever target it is given: 298 phonemes of one unpunctuated
+    sentence came back as [297, 1] at every first size tried. That is 15 s of
+    audio and about 7 s of wait, from a paragraph of plain narrative.
+    """
+    chunks = ramp_chunks(UNBROKEN_PHONEMES, [60, 71, 136])
+    assert len(chunks[0]) <= 60
+    assert " ".join(chunks) == UNBROKEN_PHONEMES
+    assert all(chunks)
+
+
+def test_every_ramp_seam_falls_where_the_model_would_have_paused() -> None:
+    """THE TRADE THIS WHOLE FEATURE HAS TO WIN, and the reason it can.
+
+    A first chunk that ignores punctuation buys latency and pays for it with
+    an audible seam, which is a worse bargain than the wait. `chunk_phonemes`
+    already splits on `.,!?;` for exactly that reason, and the ramp keeps it:
+    a seam lands on a mark the model was going to pause on, or failing that on
+    a word boundary, and never inside a word.
+
+    Both strings below are espeak's own output for ordinary English, so this
+    asserts about phonemes a request really produces. Measured on the deployed
+    service, a cut at a space inserts 0.09 to 0.15 s of silence, the same
+    order as the silence Kokoro leaves at the end of every utterance anyway.
+    """
+    for phonemes in (NUMBER_PHONEMES, UNBROKEN_PHONEMES):
+        for schedule in ([60, 60, 98], [37, 55, 120], [20, 40, 80]):
+            rest, at = phonemes, 0
+            for budget in schedule:
+                if len(rest) <= budget:
+                    break
+                head, tail = _take(rest, budget)
+                at += len(head)
+                ends_a_clause = head[-1] in ".,!?;"
+                ends_a_word = phonemes[at:at + 1] in (" ", "")
+                assert ends_a_clause or ends_a_word, (
+                    f"seam inside a word: {head[-12:]!r} | "
+                    f"{phonemes[at:at + 12]!r}")
+                at += len(rest) - len(head) - len(tail)
+                rest = tail
+
+
+def test_the_ramp_folds_a_tail_of_two_words_into_the_chunk_before_it() -> None:
+    """A trailing chunk this short is a model call to say a full stop, and one
+    call costs about 0.40 s on orko before it generates anything.
+
+    Folded on the ramped path and nowhere else: joining two chunks changes
+    what the duration predictor sees, and the buffered route has to keep
+    returning the samples it always returned.
+    """
+    from app.synth import TAIL_MERGE_PHONEMES, _merge_tail
+
+    stub = ["wˈʌn tˈuː θɹˈiː fˈɔː fˈaɪv sˈɪks sˈɛvən ˈeɪt", "nˈaɪn."]
+    assert len(stub[-1]) <= TAIL_MERGE_PHONEMES
+    assert _merge_tail(stub, MAX_CHUNK_PHONEMES) == [" ".join(stub)]
+
+    # Not when it would take the chunk past the window, which is the row of
+    # the voice tensor that is not there.
+    assert _merge_tail(stub, len(stub[0])) == stub
+
+    # And through the whole ramp: no chunk that short survives, and the fold
+    # loses nothing.
+    phonemes = "wˈʌn tˈuː θɹˈiː fˈɔː fˈaɪv sˈɪks sˈɛvən ˈeɪt nˈaɪn tˈɛn."
+    chunks = ramp_chunks(phonemes, [20, 30])
+    assert len(chunks) >= 2
+    assert len(chunks[-1]) > TAIL_MERGE_PHONEMES
+    assert " ".join(chunks) == phonemes
+
+
+def test_a_short_request_is_not_ramped(client: TestClient) -> None:
+    """Under RAMP_MIN_PHONEMES the whole job takes under three seconds, so a
+    ramp would move it from one point inside the 1-to-10 s band to another and
+    buy nothing. Every short request therefore stays exactly what it was."""
+    assert main.ramp_schedule(main.RAMP_MIN_PHONEMES - 1) is None
+    short = "One. Two. Three."
+    assert len(short) < main.RAMP_MIN_PHONEMES
+    streamed = parse(speech(client, input=short, response_format="pcm",
+                            stream_format="sse").content)
+    joined = b"".join(base64.b64decode(e["audio"]) for e in streamed
+                      if e["type"] == "speech.audio.delta")
+    assert joined == speech(client, input=short, response_format="pcm").content
+
+
+def test_a_buffered_request_is_never_ramped(client: TestClient) -> None:
+    """`ramp` is keyword-only with a default of None so that `speak` and
+    `speak_segments`, which call plan positionally, cannot reach it. This is
+    the assertion that a long BUFFERED request is chunked as it always was,
+    however small TTS_FIRST_CHUNK_PHONEMES is set."""
+    long_input = MULTI_CHUNK[:1200]
+    speech(client, input=long_input, response_format="pcm")
+    assert client.synth.calls == chunk_phonemes(long_input,
+                                                target=main.CHUNK_PHONEMES)
+
+
+def test_the_stream_says_the_sizes_it_is_about_to_send(client: TestClient) -> None:
+    """X-Chunk-Phonemes, and it has to be the truth rather than the plan.
+
+    A client cannot draw a bar that moves before the first delta exists unless
+    it knows how long that delta will take, and the only process that knows is
+    this one. plan() has already run when the header is written -- measured
+    time to first byte on this route is 10 to 15 ms from 4 characters to 1495
+    -- so it costs nothing and arrives before any audio.
+    """
+    response = speech(client, input=MULTI_CHUNK, response_format="pcm",
+                      stream_format="sse")
+    announced = [int(n) for n in response.headers["x-chunk-phonemes"].split(",")]
+    assert announced == [len(chunk) for chunk in client.synth.calls]
+    deltas = [e for e in parse(response.content)
+              if e["type"] == "speech.audio.delta"]
+    assert len(deltas) == len(announced)
+
+
+def test_the_ramp_never_shrinks_and_reaches_the_full_window() -> None:
+    """Monotonic, and it ends at the window rather than ramping for ever.
+
+    A schedule that went on emitting small chunks would pay a model call and a
+    little duration on every one of them for a latency that was already bought
+    on the first. It may hold its size for a step while the bank catches up,
+    and at every rate this ships at it does exactly that once."""
+    planned = main.RAMP_RATE
+    try:
+        for rate_value in (1.6, 2.0, 2.4, 2.8, 4.0, 8.0):
+            main.RAMP_RATE = rate_value
+            sizes = main.ramp_schedule(4096)
+            assert sizes is not None
+            assert sizes[0] == main.FIRST_CHUNK_PHONEMES
+            assert sizes == sorted(sizes), "never smaller than the step before"
+            assert sizes[-1] == main.CHUNK_PHONEMES
+            assert len(sizes) <= main.RAMP_MAX_CHUNKS
+    finally:
+        main.RAMP_RATE = planned
+
+
+def test_the_ramp_does_not_run_on_a_machine_below_realtime() -> None:
+    """A machine that generates slower than it speaks cannot keep any schedule
+    ahead of playback, so it plans the request the way it always did. Only a
+    measurement counts: this service's rate is unseeded and None until it has
+    synthesised something, and None is not a slow machine."""
+    main.rate.value = 0.9
+    try:
+        assert main.ramp_schedule(4096) is None
+    finally:
+        main.rate.value = None
+    assert main.ramp_schedule(4096) is not None
+
+
+def test_a_client_that_reads_the_plan_gets_the_shorter_ramp(
+        client: TestClient) -> None:
+    """X-Chunk-Plan, and what it is for.
+
+    Half of the careful schedule's bank is spent proving to a page that cannot
+    read X-Chunk-Phonemes that the stream is still alive. A page that reads it
+    can tell a late delta from an expected one, so the same safety holds with
+    half the bank and the ramp reaches the window in four chunks instead of
+    seven. That matters because a small chunk is spoken slowly: 0.064 s per
+    phoneme at 52 against 0.045 for a whole utterance, measured on orko.
+
+    Default off, and that is the point. This service is safe deployed on its
+    own, ahead of any page.
+    """
+    careful = main.ramp_schedule(4096)
+    shorter = main.ramp_schedule(4096, reads_plan=True)
+    assert len(shorter) < len(careful)
+    assert shorter[-1] == careful[-1] == main.CHUNK_PHONEMES
+
+    asked = client.post("/v1/audio/speech",
+                        headers={main.RAMP_PLAN_HEADER: "1"},
+                        json={"model": "tts-1", "input": MULTI_CHUNK,
+                              "voice": "fable", "response_format": "pcm",
+                              "stream_format": "sse"})
+    plain = speech(client, input=MULTI_CHUNK, response_format="pcm",
+                   stream_format="sse")
+    assert (len(asked.headers["x-chunk-phonemes"].split(","))
+            < len(plain.headers["x-chunk-phonemes"].split(",")))
+
+
+def test_the_ramp_survives_the_rule_the_page_enforces() -> None:
+    """THE ONE THAT MAKES THIS SAFE TO DEPLOY ON ITS OWN.
+
+    services/ui/app/static/ui.html plays a delta as it lands and pauses, with
+    "The voice fell behind", when the audio still in hand falls below the time
+    since the last delta arrived. A page that cannot read X-Chunk-Phonemes
+    keeps that rule and is told nothing, so a schedule this service cannot
+    defend would turn one clean run into a visible failure.
+
+    Checked against the curves measured on orko at TTS_THREADS=8 rather than
+    against the model the schedule is built from, which would prove nothing:
+
+        gen(p)   = 0.399 + 0.01853 p        audio(p) = 1.360 + 0.04358 p
+
+    over eight sizes from 28 to 499 phonemes, three runs each. `slower` walks
+    the same schedule on a machine slower than the one that was measured,
+    because the rate the schedule is planned against is a documented default
+    rather than a reading. 1.3 is the edge and is deliberately not asserted:
+    past about a third slower, no first chunk of any size satisfies the rule,
+    which is why ramp_schedule refuses below RAMP_SAFETY and why RAMP_RATE is
+    set below what was measured.
+    """
+    def gen(phonemes: int, slower: float) -> float:
+        return (0.399 + 0.01853 * phonemes) * slower
+
+    def audio(phonemes: int) -> float:
+        return 1.360 + 0.04358 * phonemes
+
+    for slower in (1.0, 1.15):
+        sizes = main.ramp_schedule(4096)
+        assert sizes is not None
+        bank = audio(sizes[0])
+        for size in sizes[1:]:
+            making = gen(size, slower)
+            in_hand = bank - making
+            assert in_hand > 0, f"ran dry at {size} on {slower}x"
+            assert making <= in_hand, (
+                f"the page pauses at {size} on {slower}x: {making:.2f} s to "
+                f"make against {in_hand:.2f} s in hand")
+            bank = in_hand + audio(size)
+
+        # The shorter schedule gives up the pause margin and keeps the one
+        # that matters: the sound never stops, which is what headroom() <= 0
+        # and the emptied queue both catch.
+        sizes = main.ramp_schedule(4096, reads_plan=True)
+        bank = audio(sizes[0])
+        for size in sizes[1:]:
+            in_hand = bank - gen(size, slower)
+            assert in_hand > 0, f"ran dry at {size} on {slower}x with the plan"
+            bank = in_hand + audio(size)

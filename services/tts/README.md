@@ -433,8 +433,13 @@ also what makes streaming possible: it is the unit a delta carries.
 ### The streamed body differs from the buffered one in two formats
 
 Both come out of one encoder, so for `mp3`, `aac`, `flac` and `pcm` the
-concatenated deltas equal the buffered body byte for byte. Two exceptions,
-both physical:
+concatenated deltas equal the buffered body byte for byte, **as long as both
+were planned into the same chunks**. Since the latency ramp they are not, on a
+streamed request of 120 phonemes or more: the stream asks for small leading
+chunks on purpose, and a chunk boundary is something the duration predictor
+sees. Such a request carries the same words spoken slightly differently, not
+the same samples, and its `input_tokens` differs too. Every buffered request
+and every shorter input is unaffected. Two further exceptions, both physical:
 
 | Format | Difference | Why |
 |---|---|---|
@@ -611,6 +616,8 @@ start, so a renewed certificate needs a container restart.
 | `TTS_TLS_KEY` | unset | PEM private key, readable by uid 1000 |
 | `TTS_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`. An unrecognised value logs a warning and stays at `INFO` rather than refusing to start |
 | `TTS_CHUNK_PHONEMES` | `509` | Phonemes per model pass, and so how often an SSE delta leaves. See below |
+| `TTS_FIRST_CHUNK_PHONEMES` | `60` | The first chunk of a streamed request. Set it to `TTS_CHUNK_PHONEMES` to turn the ramp off |
+| `TTS_RAMP_RATE` | `2.0` | The realtime factor the ramp is planned against. Lower it on a slower machine |
 
 ### Chunk size and streaming latency
 
@@ -632,6 +639,51 @@ The 17% growth is the duration predictor seeing less context per chunk, not
 silence accumulating at the seams — it is a real change to the speech, which is
 why the default does not move. Lower it only if a caller needs the first audio
 sooner than a whole model pass and can live with slightly slower delivery.
+
+### The first chunk of a stream is smaller than the rest
+
+A streamed request ramps: a small first chunk, then larger ones, then the full
+window. It is the only chunk whose size a listener waits through, because every
+later one is made while they are still hearing the one before it.
+
+Measured on orko at `TTS_THREADS=8`, 494 characters, `pcm`, each chunk asked
+for on its own:
+
+```text
+              first audio   file complete   duration
+whole            8.00 s        8.00 s        22.68 s
+ramped           1.41 s       11.27 s        28.67 s
+```
+
+**5.6x sooner to a sound, and the price is on the same table.** The file lands
+three seconds later, and the speech is 26% longer because Kokoro speaks a short
+chunk slowly: 0.064 s per phoneme at 52 phonemes, 0.055 at 120, 0.053 at 155,
+against 0.045 for the whole 495-phoneme utterance. That is the same effect the
+table above records as 17% growth at a flat target of 100, and the ramp pays it
+on the opening seconds instead of on everything. A long request pays
+proportionally less, because the ramp covers a fixed number of phonemes at the
+start and the rest is batched at the full window as before.
+
+Nothing else changes. A buffered request is not ramped, an input under
+120 phonemes is not ramped, and `/speak` is not ramped.
+
+**How large each chunk may be** is decided by the rule the page enforces at the
+other end: it plays a delta as it lands and stops when the audio still in hand
+has fallen below the time since the last delta arrived. So a chunk may be as
+large as its own generation fits twice inside the audio already banked. At the
+planned rate that gives `60, 60, 98, 157, 240, 358, 509`.
+
+A client that reads `X-Chunk-Phonemes` can tell a late delta from an expected
+one, so it needs only half that margin. It asks by sending `X-Chunk-Plan: 1`
+and gets `60, 134, 281, 509` instead: four chunks to the full window rather
+than seven, and about half the extra duration. The careful schedule is the
+default because this service has to be safe in front of a client that has never
+heard of either header.
+
+| Header | Direction | Meaning |
+|---|---|---|
+| `X-Chunk-Phonemes` | response | The size of every chunk this stream will send, in order, written before the first one is made |
+| `X-Chunk-Plan` | request | The client reads the header above. Answered with the shorter ramp |
 
 ## Limiting CPU use
 
