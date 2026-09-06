@@ -652,8 +652,19 @@ UI_PATHS = (
     # list because the set it covers is voice-ui's PROXIED table, which is
     # already an allowlist on that side; duplicating it here would be two
     # lists to keep in step.
+    # THE PAGE'S OWN MOUNT, and every method it can arrive with. PUT was
+    # missing and nothing noticed until a profile was written against the
+    # deployed stack: the UI's allowlist had been extended for PUT and so had
+    # this service's own /glossaries routes, but the /ui/api PASSTHROUGH in
+    # between had not, so the page's save died here with 405
+    # method_not_supported before it reached either.
+    #
+    # The seam is easy to miss because it belongs to neither side. Whoever adds
+    # a method to the UI's PROXIED table has to add it here as well, and the
+    # test named after this defect is what says so.
     ("POST", "/ui/api/{rest:path}"),
     ("GET", "/ui/api/{rest:path}"),
+    ("PUT", "/ui/api/{rest:path}"),
     ("DELETE", "/ui/api/{rest:path}"),
 )
 

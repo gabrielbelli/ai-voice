@@ -853,3 +853,60 @@ async def test_a_repeated_request_header_reaches_the_backend_intact(monkeypatch,
     assert len(tts.seen) == 1
     cookies = [v for k, v in tts.last["raw_headers"] if k == "cookie"]
     assert cookies == ["a=1", "b=2"]
+
+
+def test_every_method_the_page_proxies_can_get_through_this_service():
+    """THE DEFECT THIS PREVENTS, found only against the deployed stack: saving
+    a vocabulary profile died with 405 method_not_supported.
+
+    The page reaches the proxied routes under /ui/api, which voice-ui strips
+    before forwarding. Three allowlists therefore have to agree, and PUT had
+    been added to two of them. voice-ui's PROXIED table allowed it and the stt
+    service answered it, but the /ui/api PASSTHROUGH here did not, so the
+    request never reached either.
+
+    That seam belongs to neither side, which is exactly why it was missed. This
+    reads voice-ui's own table and asserts every method in it is allowed
+    through, so adding a method there without adding it here fails HERE, in the
+    service that would have refused it.
+    """
+    import ast
+    from pathlib import Path
+
+    # parents[0] tests, [1] gateway, [2] services. Getting this wrong makes the
+    # test SKIP, which reads as a pass and asserts nothing.
+    ui_main = Path(__file__).resolve().parents[2] / "ui" / "app" / "main.py"
+    if not ui_main.exists():          # the services are separately deployable
+        pytest.skip("services/ui is not present in this checkout")
+
+    tree = ast.parse(ui_main.read_text())
+    proxied: set[str] = set()
+    for node in ast.walk(tree):
+        # AnnAssign as well as Assign: it is declared `PROXIED: tuple[...] = (`,
+        # and matching only Assign found nothing, which the empty-set assertion
+        # below is here to catch rather than let pass as "no methods missing".
+        if isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        elif isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        else:
+            continue
+        if not any(getattr(t, "id", "") == "PROXIED" for t in targets):
+            continue
+        if node.value is None:
+            continue
+        for item in ast.walk(node.value):
+            if isinstance(item, ast.Tuple) and len(item.elts) == 2:
+                method = item.elts[0]
+                if isinstance(method, ast.Constant) and isinstance(method.value, str):
+                    proxied.add(method.value)
+    assert proxied, "could not read voice-ui's PROXIED table"
+
+    from app import main as gateway_main
+
+    passthrough = {m for m, p in gateway_main.UI_PATHS
+                   if p == "/ui/api/{rest:path}"}
+    missing = proxied - passthrough
+    assert not missing, (
+        f"voice-ui proxies {sorted(missing)} but /ui/api does not allow it here, "
+        "so the page gets 405 before its request reaches voice-ui")
