@@ -1018,6 +1018,9 @@ details>summary:active{opacity:.72}
              that was often empty. -->
         <h2 class="tight">Jobs</h2>
         <span class="spacer"></span>
+        <label class="tight" id="onlyaudiowrap" hidden>
+          <input type="checkbox" id="onlyaudio"> Only with audio
+        </label>
         <button class="small tight" id="refresh" type="button">Refresh</button>
       </div>
 
@@ -3915,8 +3918,24 @@ async function queueJob(voice, text) {
    A cancelled job counts: "stop and keep what's done" keeps the partial audio,
    and /jobs/{id}/audio serves it. */
 function hasAudio(job) {
+  /* SAID, NOT INFERRED, WHEN IT CAN BE. The age test below is a guess at what
+     the sweeper has done; `audio_deleted` is the server stating that somebody
+     asked for the file to go and the record to stay. A guess cannot tell those
+     apart, and a row offering a player for a file that is gone is the defect
+     this closes. */
+  if (job.audio_deleted) return false;
   if (job.status !== "done" && job.status !== "cancelled") return false;
   return !(job.finished_at && Date.now() / 1000 - job.finished_at > TTL);
+}
+
+/* WHERE IT RAN, for the row. Only worth a word when there is more than one
+   answer: a stack with no runner would otherwise label every job "local",
+   which is noise about a choice nobody made. */
+function ranOn(job) {
+  if (!job.backend) return "";
+  if (job.backend === "runner")
+    return job.runner_host ? "GPU " + job.runner_host : "GPU runner";
+  return job.fell_back ? "this server, after the runner gave up" : "";
 }
 
 function statusClass(status) {
@@ -3928,17 +3947,36 @@ function statusClass(status) {
 const JOBTEXT = new Map();
 
 function renderJobs() {
-  const list = [...jobs.values()].sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+  const all = [...jobs.values()].sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+  /* THE FILTER, and the control that offers it. A finished job whose audio has
+     gone is still worth keeping -- it says what was said and where it ran --
+     but once there are a few of them the list is mostly things you cannot
+     play. Live jobs are never hidden: they have no audio YET, which is not the
+     same as having none, and hiding the thing you are waiting for would be the
+     worst possible reading of this checkbox.
+
+     The control only appears when it would actually hide something, so it is
+     absent on a page where every job is playable. */
+  const gone = all.filter(j => !hasAudio(j)
+                            && j.status !== "queued" && j.status !== "running").length;
+  const wrap = $("onlyaudiowrap");
+  if (wrap) wrap.hidden = gone === 0;
+  const onlyAudio = gone > 0 && $("onlyaudio") && $("onlyaudio").checked;
+  const list = onlyAudio
+    ? all.filter(j => hasAudio(j) || j.status === "queued" || j.status === "running")
+    : all;
   /* A BARE NUMBER, because it is now an accent chip in the tab rather than a
      parenthesis in a sentence -- "(2)" inside a pill is a bracket drawn twice.
      Two characters shorter, and readable from the other two tabs without
      stopping to parse it. The CSS hides the chip when this is "". */
-  const running = list.filter(j => j.status === "queued" || j.status === "running").length;
+  const running = all.filter(j => j.status === "queued" || j.status === "running").length;
   $("jobcount").textContent = running ? String(running) : "";
   $("jobsafe").hidden = !running;
 
   if (!list.length) {
-    $("joblist").innerHTML = `<div class="hint">No jobs. Cloned voices queue here.</div>`;
+    $("joblist").innerHTML = `<div class="hint">${onlyAudio
+      ? "No jobs with audio. Clear the filter to see the rest."
+      : "No jobs. Cloned voices queue here."}</div>`;
     document.title = "ai-voice";
     return;
   }
@@ -4002,6 +4040,8 @@ function renderJobs() {
             restart. It did not keep the text or the voice.</div>` : ""}
       ${job.status === "failed" ? `<div class="note bad">${esc(job.error || "no reason given")}</div>` : ""}
       ${expired ? `<div class="hint">expired: the audio was deleted after ${TTL / 3600} hours</div>` : ""}
+      ${ranOn(job) ? `<div class="hint">${esc(ranOn(job))}</div>` : ""}
+      ${job.audio_deleted ? `<div class="hint">The audio was deleted. This record was kept.</div>` : ""}
       ${job.realtime_factor ? `<div class="hint">${job.audio_seconds.toFixed(0)} s of audio in
         ${job.compute_seconds.toFixed(0)} s · ${job.realtime_factor.toFixed(3)}× realtime</div>` : ""}
       <div class="acts">
@@ -4010,8 +4050,9 @@ function renderJobs() {
              <button class="small" data-get="${esc(job.id)}" type="button">Download the audio</button>` : ""}
         ${live ? `<button class="small" data-stop="${esc(job.id)}" type="button">Stop and keep what's done</button>` : ""}
         ${job.status === "failed" ? `<button class="small" data-retry="${esc(job.id)}" type="button">Retry</button>` : ""}
+        ${audio ? `<button class="small" data-delaudio="${esc(job.id)}" type="button">Delete the audio</button>` : ""}
         <button class="small" data-forget="${esc(job.id)}" type="button">${
-          audio ? "Delete the audio" : "Forget"}</button>
+          audio ? "Delete the record too" : "Delete the record"}</button>
       </div>
     </div>`;
   }).join("");
@@ -4028,6 +4069,8 @@ function renderJobs() {
     b.addEventListener("click", () => stopJob(b.dataset.stop)));
   $("joblist").querySelectorAll("[data-retry]").forEach(b =>
     b.addEventListener("click", () => retryJob(b.dataset.retry)));
+  $("joblist").querySelectorAll("[data-delaudio]").forEach(b =>
+    b.addEventListener("click", () => deleteAudio(b.dataset.delaudio)));
   $("joblist").querySelectorAll("[data-forget]").forEach(b =>
     b.addEventListener("click", () => forgetJob(b.dataset.forget)));
 
@@ -4106,6 +4149,31 @@ async function downloadJob(id) {
   const a = document.createElement("a");
   a.href = url; a.download = id + ".wav"; a.click();
   setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+/* FREE THE DISK, KEEP THE HISTORY. The other button removes both, which is
+   what "forget" has always meant here; this one is the half people actually
+   want most of the time. Chatterbox audio is megabytes and the record is a few
+   hundred bytes, so the disk argument is entirely about the audio while the
+   thing worth keeping costs nothing.
+
+   Asked first, because it cannot be undone and the audio is the only copy. */
+async function deleteAudio(id) {
+  if (!confirm(`Delete the audio for job ${id.slice(0, 8)}?\n\nThe record `
+      + `stays: what was said, which voice, how long it took and where it ran. `
+      + `The audio cannot be recovered.`)) return;
+  try {
+    await json(`/jobs/${encodeURIComponent(id)}/audio`, { method: "DELETE" });
+  } catch (err) {
+    /* A 404 means the service does not have it either, which is the same
+       outcome. Anything else is worth saying rather than swallowing, and the
+       same alert forgetJob uses, because this is the same kind of failure. */
+    if (err.status !== 404) {
+      alert("Could not delete the audio: " + err.message);
+      return;
+    }
+  }
+  await refreshJobs();
 }
 
 async function forgetJob(id) {
@@ -4266,6 +4334,9 @@ function schedule(delay) {
 }
 document.addEventListener("visibilitychange", () => schedule(0));
 $("refresh").addEventListener("click", () => { refreshJobs(); });
+/* Redraw from what is already here. Filtering is a question about the rows on
+   this page, not a question for the server. */
+$("onlyaudio").addEventListener("change", renderJobs);
 
 /* ================================================= the clone sheet ===== */
 /*

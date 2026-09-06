@@ -476,8 +476,19 @@ def test_the_button_that_deletes_the_audio_says_so():
     """
     row = HTML[HTML.index("$(\"joblist\").innerHTML = list.map"):]
     row = row[:row.index("}).join(\"\")")]
-    assert 'audio ? "Delete the audio" : "Forget"' in row
-    assert ">Forget</button>" not in row, "an unconditional label is back"
+    # NOW TWO BUTTONS, because they are two different acts. Deleting used to
+    # take the audio AND the record together, so freeing a gigabyte also threw
+    # away what was said, which voice said it and which machine did the work --
+    # a few hundred bytes that are the only evidence any of it happened.
+    #
+    # The rule the old assertion protected is unchanged and now applies twice:
+    # every label names what it destroys, and neither of them says a bare
+    # "Forget" beside a Download button.
+    assert ">Delete the audio</button>" in row
+    assert 'audio ? "Delete the record too" : "Delete the record"' in row
+    assert ">Forget</button>" not in row, "a label that hides the consequence is back"
+    # The audio button only exists while there is audio to delete.
+    assert 'audio ? `<button class="small" data-delaudio=' in row
 
 
 def test_one_predicate_decides_whether_a_row_still_has_audio():

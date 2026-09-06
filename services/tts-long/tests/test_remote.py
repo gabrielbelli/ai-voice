@@ -122,7 +122,10 @@ def test_with_no_runner_configured_nothing_remote_is_constructed(speech):
     assert main.state.get("runner") is None
     job = {"id": "abc123", "segments": segs(1)}
     assert main._backend_for(job) is main.state["synth"]
-    assert "backend" not in job, "an unconfigured run must not even label itself"
+    # Same change as the route-level test above: the job record now names its
+    # backend on every path, so the proof that nothing remote happened is the
+    # returned object being the local Synth, not the absence of a label.
+    assert job["backend"] == "local", "an unconfigured run must say local"
 
 
 def test_an_unset_host_means_local_only_not_a_disabled_client():
@@ -673,8 +676,18 @@ def test_the_local_path_is_untouched_when_no_runner_is_configured(speech,
     finished = _wait(speech, created["id"])
 
     assert finished["status"] == "done"
-    assert "backend" not in finished, \
-        "an unconfigured job labelled itself, so the chooser did something"
+    # THE PROOF IS THE FORBIDDEN STUBS ABOVE, NOT A MISSING KEY. This used to
+    # assert `"backend" not in finished`, which read "the chooser did nothing"
+    # -- but absence proved only that nothing had written a label, and the job
+    # record now says where it ran on every path, deliberately: an ordinary
+    # local job carried no backend at all, so after a restart every row looked
+    # identical whether it had run on a GPU across the LAN or on this CPU.
+    #
+    # The real assertion is unchanged and is stronger: every entry point into
+    # remote.py raises, and a job ran to completion anyway.
+    assert finished["backend"] == "local", "an unconfigured job must say local"
+    assert "runner_host" not in finished, "nothing remote was involved"
+    assert "fell_back" not in finished, "there was nothing to fall back from"
 
 
 def test_the_two_backends_speak_through_exactly_the_same_signature():

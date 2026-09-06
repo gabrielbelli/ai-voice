@@ -3,6 +3,8 @@
 # ------------------------------------------- surviving a restart --
 
 
+from pathlib import Path
+
 def test_finished_jobs_are_recovered_from_disk(tmp_path, monkeypatch):
     """`jobs` is a dict in one process, so a restart forgets every job while
     the audio sits in a volume and survives. Three things followed: a finished
@@ -300,3 +302,72 @@ def test_a_job_that_vanished_before_it_ran_does_not_kill_the_worker(speech):
                                      "voice": "default"}).json()
     assert _wait(speech, job["id"])["status"] == "done", \
         "the worker thread died on the missing id and never ran this"
+
+
+def test_the_audio_can_go_without_the_record_going_with_it(speech, tmp_path):
+    """THE DEFECT THIS PREVENTS: reclaiming a gigabyte costs you the history.
+
+    Deleting used to mean both. The audio went and the row went with it, so
+    freeing disk also threw away what was said, which voice said it, how long
+    it took and which machine did the work -- a few hundred bytes that are the
+    only record any of it happened.
+    """
+    from app import main
+
+    created = speech.post("/jobs", json={"text": "One short line, spoken once.",
+                                         "voice": "default",
+                                         "language": "en"}).json()
+    done = _wait(speech, created["id"])
+    audio = Path(done["path"]) if done.get("path") else None
+    assert audio is not None and audio.exists()
+
+    r = speech.delete(f"/jobs/{created['id']}/audio")
+    assert r.status_code == 200, r.text
+    assert not audio.exists(), "the audio is still on disk"
+
+    row = speech.get(f"/jobs/{created['id']}").json()
+    assert row["audio_deleted"] is True
+    assert row["voice"] == "default", "the record went with the audio"
+    assert row["text"].startswith("One short line")
+    assert row["backend"] == "local", "and it still says where it ran"
+    assert not row.get("bytes")
+
+    # The whole point is that this survives a restart. _recover walks AUDIO
+    # files, so without the sidecar branch this row would be swept as an
+    # orphan and "keep the record" would be true only until the next restart.
+    main.jobs.clear()
+    assert main._recover() >= 1
+    back = main.jobs[created["id"]]
+    assert back["audio_deleted"] is True
+    assert back["voice"] == "default"
+    assert back["path"] is None
+
+
+def test_a_job_that_has_not_finished_cannot_have_its_audio_deleted(speech):
+    """There is no audio yet, and the honest answer is cancel it instead."""
+    from app import main
+
+    main.jobs["pending-1"] = {"id": "pending-1", "status": "running",
+                              "cancelled": False, "created_at": 0.0,
+                              "segments": [], "text": ""}
+    try:
+        r = speech.delete("/jobs/pending-1/audio")
+        assert r.status_code == 409, r.text
+    finally:
+        main.jobs.pop("pending-1", None)
+
+
+def test_deleting_the_record_still_takes_the_audio_with_it(speech):
+    """The other half stays exactly as it was: DELETE on the job removes both,
+    and leaves nothing behind for _recover to reason about."""
+    from app import main
+
+    created = speech.post("/jobs", json={"text": "Another short line.",
+                                         "voice": "default",
+                                         "language": "en"}).json()
+    done = _wait(speech, created["id"])
+    audio = Path(done["path"])
+    assert speech.delete(f"/jobs/{created['id']}").json()["status"] == "deleted"
+    assert not audio.exists()
+    assert not main._sidecar(created["id"]).exists(), "the sidecar was left behind"
+    assert speech.get(f"/jobs/{created['id']}").status_code == 404

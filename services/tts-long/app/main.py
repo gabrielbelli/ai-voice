@@ -298,6 +298,14 @@ def _worker() -> None:
                 else:
                     log.info("%s: %s; speaking it locally", job["id"][:8], yielded)
                     job["backend"] = "local"
+                    # It STARTED on the runner and finished here, which is a
+                    # different history from one that never left, and the row
+                    # used to look identical to a job that ran locally all
+                    # along. `realtime_factor` then describes the CPU while
+                    # nothing records that a GPU was tried and lost.
+                    job["fell_back"] = True
+                    job["fell_back_reason"] = str(yielded)
+                    job["segments_from_runner"] = yielded.delivered
                     _run(state["synth"], job)
             except Exception as exc:  # noqa: BLE001 - see below
                 # THE SAME CLASS THE KeyError GUARD ABOVE IS ABOUT, and it was
@@ -352,6 +360,14 @@ def _backend_for(job: dict):
     is what gets logged, because only one of them is worth telling somebody about.
     """
     local: Synth = state["synth"]  # type: ignore[assignment]
+    # STAMPED BEFORE ANYTHING IS DECIDED, so no path can leave without saying
+    # where it ran. There were three ways to reach the local synth and exactly
+    # one of them recorded the fact, so an ordinary local job carried no
+    # `backend` at all and `job.get("backend", "local")` quietly supplied the
+    # answer downstream. Nothing was wrong with the audio; the record just
+    # could not answer "where did this run", which is the first thing anybody
+    # asks once there is more than one machine.
+    job["backend"] = "local"
     client = state.get("runner")
     if client is None:
         return local
@@ -360,6 +376,8 @@ def _backend_for(job: dict):
     except Exception as exc:  # noqa: BLE001 - a runner that is down is not an error here
         log.info("%s: runner unreachable (%s); speaking locally",
                  job["id"][:8], exc)
+        job["fell_back"] = True
+        job["fell_back_reason"] = "unreachable: " + type(exc).__name__
         return local
     if not ready:
         if why in {"not_installed", "not_enabled", "no_such_service"}:
@@ -371,8 +389,12 @@ def _backend_for(job: dict):
         else:
             log.info("%s: the runner's GPU is busy (%s); speaking locally",
                      job["id"][:8], why)
+        job["fell_back"] = True
+        job["fell_back_reason"] = why
         return local
     job["backend"] = "runner"
+    job["runner_host"] = "%s:%d" % (client.cfg.host, client.cfg.port)
+    job["runner_service"] = client.cfg.service
 
     def on_wait(waiting: bool) -> None:
         """Say `queued` again while the runner's owner is at their machine.
@@ -400,7 +422,15 @@ def _run(synth: Synth, job: dict) -> None:
             stream.put("error", "the job was cancelled before it started")
         return
 
-    job.update(status="running", started_at=time.time())
+    started = time.time()
+    # HOW LONG IT SAT BEFORE ANYTHING TOUCHED IT. compute_seconds has always
+    # measured synthesis and nothing else, which is right, but it left the
+    # commonest complaint unanswerable: a job that took ten minutes when the
+    # estimate said two spent eight of them queued behind another job, and the
+    # record could not say so. created_at and started_at were both there and
+    # nobody was subtracting them.
+    job.update(status="running", started_at=started,
+               queued_seconds=round(max(0.0, started - job["created_at"]), 1))
     encoder = None
     try:
         started = time.monotonic()
@@ -580,6 +610,18 @@ SIDECAR_KEYS = (
     # dropping it would make a restart the one way to lose the number a client
     # was given -- exactly the class of loss this sidecar exists to stop.
     "estimated_seconds",
+    # WHERE IT RAN, AND WHAT HAPPENED ON THE WAY. Recovered rows used to come
+    # back with no backend at all, so every job in the list read the same
+    # whether it had been on a GPU across the LAN or on this CPU, and the one
+    # question worth asking of a two-machine setup had no answer after a
+    # restart.
+    "backend", "runner_host", "runner_service",
+    "fell_back", "fell_back_reason", "segments_from_runner",
+    "queued_seconds",
+    # Set when the audio was deleted on purpose and the record kept. Without
+    # it a restart cannot tell "somebody freed the disk" from "the sweeper
+    # expired this", and the row would offer a player for a file that is gone.
+    "audio_deleted",
 )
 
 
@@ -702,10 +744,30 @@ def _recover() -> int:
     # after it is an orphan -- and leaving it is the growth this function's
     # third paragraph is about, one directory entry smaller. _discard removes
     # the pair together, so this only catches audio deleted from outside.
+    # A SIDECAR WITH NO AUDIO IS NOT ALWAYS AN ORPHAN ANY MORE. Deleting a
+    # job's audio while keeping its record leaves exactly that shape, and the
+    # walk above is over audio files, so the record would be swept as rubbish
+    # on the next restart -- which would make "keep the record" true only until
+    # the service restarted, quietly.
+    #
+    # So a sidecar that SAYS its audio was deleted on purpose is rebuilt as a
+    # row with no audio. Anything else with no audio behind it really is an
+    # orphan and still goes.
     for stale in OUT_DIR.glob("*.json"):
-        if stale.stem not in jobs:
-            with suppress(OSError):
-                stale.unlink()
+        if stale.stem in jobs:
+            continue
+        kept = _read_sidecar(stale.stem)
+        if kept.get("audio_deleted"):
+            job = {"id": stale.stem, "status": "done", "cancelled": False,
+                   "recovered": True, "path": None, "bytes": 0}
+            job.update(kept)
+            job.update(id=stale.stem, path=None, bytes=0, recovered=True,
+                       audio_deleted=True)
+            jobs[stale.stem] = job
+            found += 1
+            continue
+        with suppress(OSError):
+            stale.unlink()
     # A half-written audio or sidecar file from a restart mid-write. _recover
     # ignores the suffix by design, so without this nothing would ever remove
     # them and /output would grow by one on every unlucky restart.
@@ -1033,6 +1095,39 @@ def get_job(job_id: str) -> dict:
     if job.get("segments"):
         out["segments"] = job["segments"]
     return out
+
+
+@app.delete("/jobs/{job_id}/audio")
+def delete_job_audio(job_id: str) -> dict:
+    """Free the disk and keep the record.
+
+    THE TWO THINGS A FINISHED JOB IS, SEPARATED. Deleting used to mean both:
+    the audio went and the row went with it, so reclaiming a gigabyte also
+    threw away what was said, which voice said it, how long it took and which
+    machine did the work. Those are the only record that any of it happened,
+    they cost a few hundred bytes, and they are what makes a list of past jobs
+    worth having at all.
+
+    The row stays, without a player, and says its audio is gone. The sidecar is
+    rewritten rather than removed, so this survives a restart the same way
+    everything else does: _recover walks audio files, so a record with no audio
+    is not rebuilt from disk and would otherwise come back looking finished
+    with a file behind it.
+    """
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "no such job")
+    if job["status"] not in {"done", "failed", "cancelled"}:
+        raise HTTPException(409, "that job has not finished; cancel it instead")
+    path = job.get("path")
+    if path:
+        with suppress(OSError):
+            Path(path).unlink()
+    job["path"] = None
+    job["bytes"] = 0
+    job["audio_deleted"] = True
+    _write_sidecar(job)
+    return {"id": job_id, "status": "audio_deleted"}
 
 
 @app.delete("/jobs/{job_id}")
