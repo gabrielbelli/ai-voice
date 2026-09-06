@@ -371,3 +371,116 @@ def test_deleting_the_record_still_takes_the_audio_with_it(speech):
     assert not audio.exists()
     assert not main._sidecar(created["id"]).exists(), "the sidecar was left behind"
     assert speech.get(f"/jobs/{created['id']}").status_code == 404
+
+
+# ------------------------------------------- progress while it runs --
+
+
+def _paced(monkeypatch):
+    """Hold the synthesiser at the START of every segment after the first.
+
+    A clone job is minutes of compute and the interesting moment is the middle
+    of it, which no other test in this file can reach: `_wait` polls until the
+    job is over. This hands the test the middle by blocking the worker inside
+    the fake model, so a poll can be made while exactly one segment exists.
+
+    Returns (started, release): `started` counts segments the worker has begun,
+    `release` lets it past the block.
+    """
+    import threading
+
+    from app import synth as synth_module
+
+    original = synth_module.Synth._speak
+    started: list[str] = []
+    release = threading.Event()
+
+    def paced(self, text, language, exaggeration, cfg_weight, temperature,
+              reference):
+        started.append(text)
+        if len(started) > 1:
+            assert release.wait(20), "the worker was never released"
+        return original(self, text, language, exaggeration, cfg_weight,
+                        temperature, reference)
+
+    monkeypatch.setattr(synth_module.Synth, "_speak", paced)
+    return started, release
+
+
+def _until(predicate, timeout: float = 20.0) -> None:
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.02)
+    raise AssertionError("the worker never reached that state")
+
+
+def test_a_running_job_reports_the_boundaries_it_has_already_made(speech, monkeypatch):
+    """The boundaries existed from the first sentence and were published when
+    the job ENDED, so a poll during the twenty minutes that matter could not
+    say how much had been spoken.
+
+    `chunks` said how many segments there would be and nothing said how many
+    there were, so a client had elapsed / estimated_seconds -- a guess against
+    a guess -- while the exact answer sat in a local list in _run.
+
+    A mid-run poll now carries `offsets`: len() of it is the segments made and
+    its last entry is the seconds of audio made, both exact, because each one
+    is a running total of samples that were actually produced.
+    """
+    started, release = _paced(monkeypatch)
+    created = speech.post("/jobs", json={
+        "segments": [{"text": "The first sentence is spoken first."},
+                     {"text": "The second sentence follows it."},
+                     {"text": "The third sentence ends the reading."}],
+        "voice": "default", "language": "en"}).json()
+
+    _until(lambda: len(started) == 2)          # one made, one held
+    running = speech.get(f"/jobs/{created['id']}").json()
+    assert running["status"] == "running"
+    assert running["chunks"] == 3
+    assert running["offsets"] == [0.0], "the first boundary, mid-run"
+
+    release.set()
+    finished = _wait(speech, created["id"])
+    assert len(finished["offsets"]) == 3
+    assert finished["offsets"][0] == 0.0
+    assert finished["offsets"] == sorted(finished["offsets"])
+    assert finished["offsets"][-1] < finished["audio_seconds"], \
+        "the last segment STARTS before the audio ends"
+
+
+def test_the_published_boundaries_are_a_copy_of_the_workers_list(speech, monkeypatch):
+    """_public snapshots a job with dict(job), which copies the mapping and not
+    the values. Publishing the live list would therefore leave the JSON encoder
+    walking a list the worker thread is appending to, mid-request.
+
+    The visible symptom is a response whose `offsets` is longer than the
+    segments it describes, or shorter, depending on where the encoder was when
+    the next segment landed. Both are races that appear once in a hundred polls
+    and neither is reproducible from the response.
+
+    So the published value must be a copy at the moment it was published, and
+    this is what proves it: a list taken from the job mid-run must not grow
+    afterwards.
+    """
+    from app import main
+
+    started, release = _paced(monkeypatch)
+    created = speech.post("/jobs", json={
+        "segments": [{"text": "The first sentence is spoken first."},
+                     {"text": "The second sentence follows it."},
+                     {"text": "The third sentence ends the reading."}],
+        "voice": "default", "language": "en"}).json()
+
+    _until(lambda: len(started) == 2)
+    held = main.jobs[created["id"]]["offsets"]
+    assert held == [0.0]
+
+    release.set()
+    _wait(speech, created["id"])
+    assert held == [0.0], "the published list grew: it was the worker's own"
+    assert len(main.jobs[created["id"]]["offsets"]) == 3

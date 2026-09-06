@@ -664,3 +664,79 @@ def test_a_plain_text_request_gets_no_offsets(client):
                                            "format": "wav"})
     assert response.status_code == 200, response.text
     assert "x-segment-offsets" not in response.headers
+
+
+# ---------------------------------------- how fast this machine is ------
+
+
+def test_the_speed_of_this_machine_is_absent_until_it_is_measured(client):
+    """A client that plays audio as it arrives has to know whether generation
+    outruns playback, and this service reported nothing to answer that with:
+    /health carried voices, a default voice and a thread count, and the only
+    rate anywhere was X-Realtime-Factor on one response.
+
+    So the number had to be written into the client, where it is a claim about
+    a machine that the client cannot check. Measured on this NAS: 1.83x
+    realtime at TTS_THREADS=4 and 2.79x at 8, the same model and the same text.
+
+    ABSENT, not zero and not a seed, until something has been synthesised.
+    tts-long's factor is an EMA seeded from a constant, so it is never missing
+    and a seed cannot be told from a measurement. Here a missing field means
+    "not measured on this process yet", which is what lets a client hold off
+    rather than plan a playback buffer around a number nobody observed.
+    """
+    fresh = client.get("/health").json()
+    assert "realtime_factor" not in fresh, "a rate before anything was spoken"
+
+    assert speech(client, input="One. Two. Three.").status_code == 200
+    measured = client.get("/health").json()
+    assert measured["realtime_factor"] > 0
+    assert measured["realtime_factor_samples"] == 1, \
+        "one request is one observation, and a client may want more"
+
+
+def test_a_request_that_made_no_audio_teaches_the_client_nothing(client):
+    """`input: ""` is valid and returns a valid empty body, so it reaches the
+    same measurement as any other request with zero seconds of audio in it.
+
+    Recorded, that is a realtime factor of 0.0, and a client reading 0.0 as a
+    measurement concludes this machine never finishes and refuses to stream
+    for the rest of the session. An unmeasurable request must leave the figure
+    exactly as it was.
+    """
+    assert speech(client, input="").status_code == 200
+    assert "realtime_factor" not in client.get("/health").json()
+
+
+def test_the_streamed_route_measures_the_rate_as_well(client):
+    """The streamed route is the one this figure exists for, so it must not be
+    the one route that never observes anything: a page that always streams
+    would keep asking a /health that never learned.
+
+    It also measures the model and not the reader. The generator is pulled by
+    starlette one frame at a time, so timing the whole of it would fold in
+    however long the client took to accept the last frame -- and one reader on
+    a slow link would then teach every other client that this machine is slow.
+    """
+    with client.stream("POST", "/v1/audio/speech",
+                       json={"model": "tts-1", "input": MULTI_CHUNK,
+                             "voice": "fable", "response_format": "pcm",
+                             "stream_format": "sse"}) as response:
+        assert response.status_code == 200
+        body = response.read()
+    assert b"speech.audio.done" in body
+
+    health = client.get("/health").json()
+    assert health["realtime_factor"] > 0
+    assert health["realtime_factor_samples"] == 1
+
+
+def test_the_reported_rate_and_the_header_are_the_same_measurement(client):
+    """Two numbers for one fact is how they drift. X-Realtime-Factor is what a
+    caller reads off its own request; /health is what a caller reads before it
+    makes one, and both come from the duration and the compute of the same
+    synthesis."""
+    response = speech(client, input="One. Two. Three.")
+    header = float(response.headers["x-realtime-factor"])
+    reported = client.get("/health").json()["realtime_factor"]
+    assert reported == pytest.approx(header, rel=0.02)

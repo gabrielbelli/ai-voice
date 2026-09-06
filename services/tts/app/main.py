@@ -28,6 +28,7 @@ import base64
 import json
 import os
 import subprocess
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
@@ -92,6 +93,46 @@ MODEL_NAME = "kokoro"
 log = voice_logging.setup("tts-stack", "TTS")
 
 state: dict[str, object] = {}
+
+
+class _Rate:
+    """The observed realtime factor of THIS container, as an EMA.
+
+    Reported in /health so a client does not have to write the number down.
+    It is a property of a machine and of its configuration, not of Kokoro: the
+    same model on the same NAS measured 1.83x realtime at TTS_THREADS=4 and
+    2.79x at 8, so any constant a caller keeps is a claim about a deployment
+    that a rebuild can make false without telling anyone.
+
+    UNSEEDED, AND THAT IS THE POINT. tts-long seeds its EMA from a constant so
+    that its queue arithmetic always has a number, which means its
+    realtime_factor is never absent and a seed is indistinguishable from a
+    measurement. A client deciding whether audio can be played as it arrives
+    must be able to tell those apart, so this one reports nothing at all until
+    something has actually been synthesised, and `value` stays None until then.
+
+    The first observation is taken whole rather than blended into a seed that
+    was never measured. Later ones move it by 0.3, the same weight tts-long
+    uses, so one unusually short request cannot swing the figure a client is
+    about to plan a playback buffer against.
+    """
+
+    def __init__(self) -> None:
+        self.value: float | None = None
+        self.samples = 0
+        self._lock = threading.Lock()
+
+    def observe(self, audio_seconds: float, compute_seconds: float) -> None:
+        if audio_seconds <= 0 or compute_seconds <= 0:
+            return
+        measured = audio_seconds / compute_seconds
+        with self._lock:
+            self.samples += 1
+            self.value = (measured if self.value is None
+                          else self.value + 0.3 * (measured - self.value))
+
+
+rate = _Rate()
 
 
 def _fetch(url: str, dest: Path) -> None:
@@ -254,10 +295,28 @@ def _health() -> dict[str, object]:
     answering while the service was merely busy. Nothing here blocks.
     """
     s = state.get("synth")
-    return {"status": "ok" if s else "loading",
-            "voices": len(getattr(s, "voices", [])),
-            "default_voice": DEFAULT_VOICE,
-            "threads": THREADS}
+    out: dict[str, object] = {"status": "ok" if s else "loading",
+                              "voices": len(getattr(s, "voices", [])),
+                              "default_voice": DEFAULT_VOICE,
+                              "threads": THREADS}
+    # HOW FAST THIS CONTAINER SPEAKS, measured, and ABSENT UNTIL IT IS.
+    #
+    # A client that plays audio as it arrives has to know whether generation
+    # outruns playback before it starts, and the only alternative to this field
+    # is a constant written into the client -- which is a claim about a machine
+    # and a thread count that the client cannot check. tts-long has reported
+    # its own factor all along; this service reported none, so the fast engine
+    # was the one being guessed about.
+    #
+    # Missing means "not measured on this process yet", which is a real state
+    # and not a zero. A client that treats an absent field as a number is
+    # exactly the failure this shape exists to prevent.
+    if rate.value is not None:
+        out["realtime_factor"] = round(rate.value, 2)
+        # How many requests are behind it, because one observation is a
+        # warm-up and a caller may reasonably want more before it commits.
+        out["realtime_factor_samples"] = rate.samples
+    return out
 
 
 install_health(app, _health)
@@ -445,6 +504,9 @@ def speak(req: SpeakRequest) -> Response:
     log.info("%.1fs audio in %.2fs (%.1fx) voice=%s",
              duration, compute, duration / compute if compute else 0.0, voice)
 
+    # The same two numbers the header carries, so /health and
+    # X-Realtime-Factor can never disagree about how fast this machine is.
+    rate.observe(duration, compute)
     headers = _headers(duration, compute)
     if offsets:
         # WHERE EACH SEGMENT STARTS, so a client can follow the text as it
@@ -502,18 +564,41 @@ def _sse_body(synth: Synth, chunks: list[str], voice: str, language: str,
     length fields a stream cannot know.
     """
     samples = 0
+    compute = 0.0
 
     def audio() -> Iterator[np.ndarray]:
-        nonlocal samples
+        nonlocal samples, compute
         for phonemes in chunks:
+            started = time.monotonic()
             piece = synth.speak_chunk(phonemes, voice, language, speed)
+            # THE MODEL'S TIME AND NOTHING ELSE. Timing the whole generator
+            # instead would include however long starlette waited for the
+            # client to take the last frame, so one reader on a slow link
+            # would teach every other client that this machine is slow.
+            compute += time.monotonic() - started
             samples += piece.size
             yield piece
 
+    # NO KEEPALIVE COMMENT, AND NO OPENING ONE EITHER, AND BOTH ARE CHOICES.
+    #
+    # The headers are already on their way before this generator is first
+    # pulled -- starlette sends http.response.start and only then iterates --
+    # so an opening `: comment` would tell a client nothing it does not have.
+    #
+    # A periodic one is a different question and the answer is the same for a
+    # different reason: this is a synchronous generator, blocked inside the
+    # model for the whole of speak_chunk, so it cannot emit anything between
+    # chunks without a second thread. What that would buy is a stream that
+    # survives a proxy read timeout on one very slow chunk, and the timeout in
+    # front of this service is 300 s (GATEWAY_TTS_TIMEOUT) against a chunk of
+    # at most CHUNK_PHONEMES phonemes, measured at 6.21 s for the first of
+    # seven on a 4096-character input. tts-long keepalives because it queues
+    # for minutes before it starts; this service starts at once.
     try:
         for data in encode_stream(audio(), fmt):
             yield _frame({"type": "speech.audio.delta",
                           "audio": base64.b64encode(data).decode("ascii")})
+        rate.observe(samples / SAMPLE_RATE, compute)
         yield _frame({"type": "speech.audio.done",
                       "usage": _usage(input_tokens, samples)})
     except Exception as exc:  # noqa: BLE001 - the client needs the reason
@@ -615,6 +700,7 @@ def openai_speech(req: SpeechRequest) -> Response:
     duration = sum(piece.size for piece in pieces) / SAMPLE_RATE
     log.info("%.1fs audio in %.2fs (%.1fx) voice=%s openai",
              duration, compute, duration / compute if compute else 0.0, voice)
+    rate.observe(duration, compute)
 
     # The buffered body keeps its Content-Length and its realtime factor. Both
     # are more use to a client than chunked framing would be — voice-gateway

@@ -665,6 +665,24 @@ Measured on an M2 Max, CPU only:
 
 ~330 MB resident. The GPU is never touched.
 
+**The rate is a property of the machine, not of the model.** The same weights
+and the same text measured 1.83x realtime at `TTS_THREADS=4` and 2.79x at 8 on
+the deployed NAS, so a caller that writes the figure down is describing a
+container it cannot see. `GET /health` reports what this process has actually
+observed:
+
+```json
+{"status": "ok", "voices": 54, "default_voice": "bm_george", "threads": 8,
+ "realtime_factor": 2.79, "realtime_factor_samples": 17}
+```
+
+Both fields are **absent until something has been synthesised**, and that is
+the useful part: a client deciding whether it can play audio as it arrives can
+tell "not measured here yet" from a number, which a seeded average cannot say.
+Every route observes, streamed and buffered alike; the streamed one times the
+model and not the reader, so a slow client cannot make this machine look slow.
+The first observation is taken whole and later ones move the figure by 0.3.
+
 ## What is not here
 
 **Chatterbox**, the long-form alternative, is deliberately absent. It needs

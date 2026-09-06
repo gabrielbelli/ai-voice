@@ -456,6 +456,21 @@ def _run(synth: Synth, job: dict) -> None:
             nonlocal samples
             offsets.append(round(samples / SAMPLE_RATE, 3))
             samples += piece.size
+            # PUBLISHED HERE, NOT WHEN THE JOB ENDS. A clone job is minutes of
+            # compute on this CPU, and until this line a poller had `chunks`
+            # and no way to learn how many of them existed yet -- so the only
+            # progress available was elapsed / estimated_seconds, a guess,
+            # while the exact answer sat in a local list until the job
+            # finished. A mid-run GET /jobs/{id} now carries a growing list of
+            # exact boundaries: len(offsets) segments are spoken and
+            # offsets[-1] seconds of audio are made.
+            #
+            # `list(offsets)`, never the list itself. _public snapshots a job
+            # with dict(job), which copies the mapping and NOT the values, so
+            # publishing the live object would hand the JSON encoder a list
+            # this worker thread is still appending to. The copy is a few
+            # floats per segment and it is what makes the snapshot a snapshot.
+            job["offsets"] = list(offsets)
             if encoder is None or stream is None:
                 return
             data = encoder.write(piece)
@@ -471,7 +486,11 @@ def _run(synth: Synth, job: dict) -> None:
             job["cfg_weight"], job["temperature"], job["reference"],
             on_chunk=on_chunk,
             cancelled=lambda: bool(job["cancelled"]))
-        job["offsets"] = offsets
+        # The final value, and a copy for the same reason. on_chunk has already
+        # published every boundary; this line is what covers a job that made no
+        # segments at all, and it leaves the published list independent of the
+        # local one for good.
+        job["offsets"] = list(offsets)
         compute = time.monotonic() - started
 
         if encoder is not None and stream is not None:

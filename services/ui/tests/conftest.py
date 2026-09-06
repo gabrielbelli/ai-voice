@@ -39,6 +39,12 @@ class FakeGateway:
         self.keys: tuple[str, ...] = ()
         self.seen: list[httpx.Request] = []
         self.reply: dict[str, tuple[int, dict[str, str], bytes]] = {}
+        # A path whose answer arrives in PIECES rather than as one body, keyed
+        # the same way `reply` is. An SSE response is the only kind this
+        # service carries where the pieces are the product: if the relay
+        # collects them and sends one body, the client sees the whole stream
+        # at the end and the feature is gone with nothing to see in a log.
+        self.streams: dict[str, tuple[dict[str, str], httpx.AsyncByteStream]] = {}
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.seen.append(request)
@@ -259,6 +265,13 @@ class Router(httpx.AsyncBaseTransport):
             await request.aread()
         host = request.url.host
         if host == "gateway.test":
+            streamed = self.gateway.streams.get(request.url.path)
+            if streamed is not None:
+                # Returned as it is, NOT rewrapped in Bytes below: the whole
+                # point of this branch is that the body is still being made.
+                self.gateway.seen.append(request)
+                headers, body = streamed
+                return httpx.Response(200, headers=headers, stream=body)
             answer = self.gateway.handle(request)
         elif host == "metube.test":
             answer = self.tube.handle(request)

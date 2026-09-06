@@ -251,6 +251,26 @@ service knows:
 | `DELETE` to cancel or discard | Close the stream, which cancels |
 | Never blocks | Blocks, streams, or hands back a job |
 
+### Following a job while it runs
+
+`GET /jobs/{id}` carries `offsets` **from the first segment onwards**, not only
+when the job is done:
+
+```json
+{"status": "running", "chunks": 34, "offsets": [0.0, 3.1, 7.4, 11.9]}
+```
+
+Four of thirty-four segments are spoken and 11.9 seconds of audio exist. Both
+are exact: each boundary is a running total of samples that were produced, not
+`duration x (characters so far / characters total)`, which is wrong from the
+first sentence because the pause after a segment is a fixed number of seconds
+whatever its length.
+
+At ~0.21x realtime a job runs for minutes, and before this the only progress a
+poller could show was elapsed time against an estimate. `offsets[-1]` divided
+by the time since `started_at` is also this job's own realtime factor, live,
+which corrects the remaining estimate without waiting for the service average.
+
 ### What is accepted and what is not
 
 Nothing is accepted and ignored. Every field is honoured or refused **by

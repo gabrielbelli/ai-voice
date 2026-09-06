@@ -224,3 +224,37 @@ def test_a_streamed_job_is_still_collectable_from_jobs(speech):
     # The complete header, with the real length in it — which is exactly what
     # the stream could not send.
     assert int.from_bytes(audio.content[40:44], "little") == len(audio.content) - 44
+
+
+def test_a_pcm_delta_is_one_segment_and_its_length_is_that_segment(speech):
+    """Where each sentence starts, derivable from the stream with no extra
+    frame, and only in `pcm`.
+
+    `_RawEncoder.write` returns the piece whole and `close()` returns nothing,
+    so one delta is exactly one segment and the bytes that arrived before it
+    are exactly where it starts: len / 2 / 24000 seconds, headerless s16le at
+    24 kHz mono. Those figures must equal the `offsets` the job records, which
+    are accumulated sample counts and not an interpolation.
+
+    A client that follows the text as it plays depends on this and cannot check
+    it. It does NOT hold for the other formats -- mp3 lags by up to
+    TTS_ENCODER_FLUSH_WAIT and adds a tail delta after the last segment, so
+    counting deltas there would drift a sentence at a time -- which is why a
+    caller that wants boundaries out of the stream must ask for pcm.
+    """
+    with speech.stream("POST", "/v1/audio/speech",
+                       json={"input": LONG, "response_format": "pcm",
+                             "stream_format": "sse"}) as response:
+        job_id = response.headers["x-job-id"]
+        raw = b"".join(response.iter_bytes())
+
+    deltas = [base64.b64decode(e["audio"]) for e in _events(raw)
+              if e["type"] == "speech.audio.delta"]
+    starts, running = [], 0
+    for delta in deltas:
+        starts.append(round(running / 2 / 24_000, 3))
+        running += len(delta)
+
+    job = speech.get(f"/jobs/{job_id}").json()
+    assert len(deltas) == job["chunks"] > 1, "one delta per segment"
+    assert starts == job["offsets"], "the stream and the job disagree on where"
