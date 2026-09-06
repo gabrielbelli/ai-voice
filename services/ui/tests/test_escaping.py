@@ -270,9 +270,21 @@ def test_chatterbox_voices_are_not_filtered_by_language():
 
 def test_populate_languages_runs_before_the_first_voice_load():
     """The voice list is filtered by $("lang"), so the options must exist
-    before the first filter runs."""
-    boot = HTML[HTML.index("  await poll();"):]
-    assert boot.index("populateLanguages()") < boot.index("await loadVoices()")
+    before the first filter runs.
+
+    THE ANCHORS CHANGED WITH THE CONCURRENT BOOT, and the property did not.
+    This used to slice from the literal `await poll();` and compare against
+    `await loadVoices()`. boot() no longer awaits either: poll() is started and
+    left to land, and loadVoices runs inside a Promise.all with the glossaries
+    and the job listing, because awaiting a cold /ui/health put a 2,517 ms
+    status read in front of the voice picker. The ordering rule that matters is
+    unchanged and is what is asserted: populateLanguages is synchronous and has
+    to have run before anything can list a voice.
+    """
+    boot = HTML[HTML.index("(async function boot()"):]
+    assert boot.index("populateLanguages()") < boot.index("loadVoices()")
+    # And it is still not awaited into the group, which would reorder it.
+    assert "await Promise.all([loadGlossaries(), loadVoices()," in boot
 
 
 # --------------------------------------------------------- auto-detect --

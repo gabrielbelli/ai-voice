@@ -1288,10 +1288,20 @@ function clock(seconds) {
 /* Deliberately vague above a minute. A confirm dialog that says "about 2
    minutes" is believed and acted on; one that says "1m 47s" invites someone to
    time it and find out the estimate was built on a rate this repository states
-   three different values for. */
+   three different values for.
+
+   FIVE SECOND STEPS BELOW A MINUTE, because vague and STUCK are different
+   things. The bottom rung was everything under 45 s, so a ten minute
+   transcription said "about a minute left" for the first 23 s and then "a few
+   seconds left" for the next 44 s: measured on the fake clock over the whole
+   68 s wait, the phrase changed once. A reading that does not move is read as
+   a reading that has stopped, whatever the clock beside it is doing. Five
+   second steps are inside what the estimate can support -- the seed is 8.5x
+   and Parakeet measures 8.81x, which is 2.7 s over a 68 s job. */
 function roughly(seconds) {
   if (!isFinite(seconds)) return "unknown";
-  if (seconds < 45) return "a few seconds";
+  if (seconds < 5) return "a few seconds";
+  if (seconds < 45) return "about " + Math.round(seconds / 5) * 5 + " seconds";
   if (seconds < 90) return "about a minute";
   if (seconds < 3600) return "about " + Math.round(seconds / 60) + " minutes";
   const h = seconds / 3600;
@@ -1299,6 +1309,39 @@ function roughly(seconds) {
 }
 function note(host, kind, html) {
   host.innerHTML = html ? `<div class="note ${kind}">${html}</div>` : "";
+}
+
+/* THE PRESS IS THE ACKNOWLEDGEMENT, and five presses on this page were not.
+   Measured under the stub harness with every route delayed 300 ms, so nothing
+   could pass by being answered on a microtask:
+
+     Refresh                     changed nothing, and NEVER if the list is
+                                 unchanged, because renderJobs writes the same
+                                 markup back
+     Download the audio          changed nothing at all
+     Retry                       changed nothing at all
+     Stop and keep what's done   605 ms, and the row still said "running"
+     a vocabulary name           305 ms
+
+   RAIL gives a press 100 ms to visibly register and Doherty puts the flow of
+   work at 400 ms, so all five sat over the first and one over the second.
+
+   SYNCHRONOUS BY CONSTRUCTION. It touches only the element that was pressed,
+   so it cannot race a render, and it hands back the undo rather than keeping
+   any state of its own. Restoring a detached button is harmless, which is what
+   makes it safe to call from a listener whose row renderJobs is about to
+   rebuild. aria-busy so the press is announced and not only drawn. */
+function busy(button, label) {
+  if (!button) return () => {};
+  const was = button.textContent, wasDisabled = button.disabled;
+  if (label) button.textContent = label;
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  return () => {
+    button.disabled = wasDisabled;
+    button.removeAttribute("aria-busy");
+    if (label) button.textContent = was;
+  };
 }
 
 /* The two error shapes this stack emits, and both really occur: /v1 routes and
@@ -1656,6 +1699,13 @@ TABS.forEach(button => {
         { duration: (calm ? 120 : 180) * (1 - from),
           easing: "cubic-bezier(.2,.7,.3,1)" });
     }
+    /* THE JOBS TAB ASKS AS SOON AS SOMEBODY LOOKS AT IT. The poller runs on a
+       backoff ladder and only polls while this panel is open, so opening it
+       showed rows as old as the last rung: measured on the fake clock, a job
+       400 s old was next polled in 26,600 ms. Past ten seconds a stale reading
+       stops being a delay and starts being a wrong answer. visibilitychange
+       already does exactly this line; the tab did not. */
+    if (changed && button.dataset.tab === "jobs") schedule(0);
   });
   /* Arrow, Home and End over the strip. It calls next.click() rather than
      repeating what a tab does, so the listener above stays the only thing that
@@ -1842,6 +1892,55 @@ wirePlayer($("jobrate"), $("jobplayer"));
   the honest failure rather than a tab that dies silently.
 */
 const CAN_DECODE = 500 * 1024 * 1024;
+
+/* HOW LONG A METADATA READ MAY TAKE BEFORE IT COUNTS AS NO ANSWER. A media
+   element handed a container it cannot parse is free to fire neither
+   loadedmetadata nor error, so the wait needs an end. Five seconds is far past
+   a local blob's header read and short enough to go unnoticed on the file
+   that fails. */
+const PROBE_MS = 5000;
+
+/* THE LENGTH OF A FILE THIS BROWSER WILL NOT DECODE.
+
+   decodeAudioData needs the whole file resident as float samples, which is why
+   CAN_DECODE exists; a file over it, or one in a container decodeAudioData
+   refuses, therefore reached the Transcribe button with no measured duration
+   at all. sttSeconds() was then 0, so the progress bar had no budget: measured
+   on the fake clock, a 68 s wait painted a moving elapsed clock beside a bar
+   frozen at scaleX(0). That was the one genuinely featureless wait left here,
+   and it is the path a two hour MKV takes.
+
+   A media element reads the container header and stops. It is what a browser
+   does to fill in a <video> duration before a frame is played, it costs a
+   metadata parse rather than a decode, and it is a different code path from
+   decodeAudioData, so it answers for a good deal of what that refuses. A
+   <video> element and not an <audio> one, because it reads an audio-only file
+   just as well and a video container as well again.
+
+   FAILING IS AN ORDINARY ANSWER, and it is 0: the bar then stays the honest
+   elapsed clock it is today rather than moving at a rate nobody measured. */
+function probeSeconds(file) {
+  return new Promise(resolve => {
+    let url = null, media = null, timer = 0, settled = false;
+    const finish = seconds => {
+      if (settled) return;
+      settled = true;
+      if (timer) { clearTimeout(timer); timer = 0; }
+      if (media) { media.removeAttribute("src"); try { media.load(); } catch {} }
+      if (url) URL.revokeObjectURL(url);
+      resolve(isFinite(seconds) && seconds > 0 ? seconds : 0);
+    };
+    try {
+      url = URL.createObjectURL(file);
+      media = document.createElement("video");
+      media.preload = "metadata";
+      media.addEventListener("loadedmetadata", () => finish(media.duration));
+      media.addEventListener("error", () => finish(0));
+      media.src = url;
+      timer = setTimeout(() => finish(0), PROBE_MS);
+    } catch { finish(0); }
+  });
+}
 
 function wav(samples, sampleRate) {
   const buffer = new ArrayBuffer(44 + samples.length * 2);
@@ -2116,7 +2215,7 @@ function glossRender() {
        title="${esc(g.source + ", " + g.terms + " terms")}">${esc(g.name)}</button>`
   ).join("");
   $("glossnames").querySelectorAll("button").forEach(b =>
-    b.addEventListener("click", () => glossOpen(b.dataset.open)));
+    b.addEventListener("click", () => glossOpen(b.dataset.open, b)));
   glossGuards();
 }
 
@@ -2154,9 +2253,21 @@ function glossGuards() {
   $("glosswhy").textContent = ($("glossform").hidden && GLOSS_WRITABLE) ? "" : why;
 }
 
-async function glossOpen(name) {
+async function glossOpen(name, button) {
   note($("glossnote"), "", "");
   $("glossforce").hidden = true;
+  /* THE PRESS IS THE SELECTION, and it was drawn only once the profile had
+     arrived. From a resting state the two lines above clear things that are
+     already clear, so nothing at all moved: measured at 305 ms with the route
+     delayed 300 ms. .seg button[aria-pressed=true] carries the accent, so this
+     is a visible state and not only an announced one. glossRender() below
+     rewrites every one of these buttons from the name box, so this is the
+     pressed state until the answer lands rather than a second opinion. */
+  if (button) {
+    for (const other of $("glossnames").querySelectorAll("[data-open]")) {
+      other.setAttribute("aria-pressed", String(other === button));
+    }
+  }
   try {
     const profile = await json("/glossaries/" + encodeURIComponent(name));
     $("glossname").value = profile.name;
@@ -2257,7 +2368,11 @@ $("glosstext").addEventListener("input", () => {
 });
 
 async function pick(file) {
+  /* stt.seconds WITH THE REST OF IT. It was the one field this did not clear,
+     so a large file picked after a small one inherited the small one's length,
+     and every estimate on the tab was then quoting the wrong recording. */
   stt.file = file; stt.token = null; stt.prepared = null; stt.facts = null;
+  stt.seconds = null;
   stt.captions = false; stt.noVideo = false; syncActionLabel();
   /* The previous run's link, if there was one. Cleared with the token rather
      than left behind: sttSource() prefers a dropped file, so a stale one would
@@ -2288,6 +2403,14 @@ async function pick(file) {
        exists at all, and the container then holds the upload in memory too. */
     note($("stt-note"), "warn", `${human(file.size)} is too large to decode
       here, so it uploads as it is. Expect it to be slow.`);
+    /* NO DECODE, BUT A LENGTH, so the wait gets the same bar every other route
+       on this tab has. See probeSeconds. */
+    stt.seconds = await probeSeconds(file);
+    if (stt.seconds) {
+      note($("stt-note"), "warn", `${human(file.size)} is too large to decode
+        here, so it uploads as it is. ${clock(stt.seconds)}. Transcription
+        takes ${roughly(stt.seconds / rate.stt())}.`);
+    }
     return;
   }
   note($("stt-note"), "flat", "Extracting the audio…");
@@ -2319,8 +2442,13 @@ async function pick(file) {
     /* A container the browser cannot decode (some MKV subtitle tracks, AC-3,
        DTS) is not a failure: stt decodes with libav and will manage it. */
     stt.prepared = null;
+    /* THE LENGTH SURVIVES A DECODE FAILURE, because the container header and
+       the sample decoder are different code paths. See probeSeconds. */
+    stt.seconds = await probeSeconds(file);
     note($("stt-note"), "flat", `This browser could not decode that file
-      (${err.message || err}), so it uploads as it is.`);
+      (${err.message || err}), so it uploads as it is.${stt.seconds
+        ? " " + clock(stt.seconds) + ". Transcription takes "
+          + roughly(stt.seconds / rate.stt()) + "." : ""}`);
   }
   updateRouteAvailability();
 }
@@ -3914,9 +4042,18 @@ let _detectedStem = "";
    free and only the fetch needs to stay rare. */
 async function loadVoices() {
   let kokoro = null, clones = [];
-  try { kokoro = await json("/voices"); }
-  catch (err) { note($("speak-note"), "bad", "Could not list voices: " + err.message); }
-  try { clones = (await json("/ui/clips")).voices || []; } catch { clones = []; }
+  /* TOGETHER, NOT ONE AFTER THE OTHER. One read is tts-stack's voice list
+     through the gateway and the other is this service's own clip directory;
+     neither is an input to the other, and serially they cost 45 ms plus 45 ms
+     on the LAN before the picker can be drawn at all. allSettled rather than
+     all, because a failed clip listing is an empty list and must not take the
+     Kokoro voices down with it, which is what the two separate catches said. */
+  const [listed, clips] = await Promise.allSettled(
+    [json("/voices"), json("/ui/clips")]);
+  if (listed.status === "fulfilled") kokoro = listed.value;
+  else note($("speak-note"), "bad",
+            "Could not list voices: " + (listed.reason || {}).message);
+  if (clips.status === "fulfilled") clones = (clips.value || {}).voices || [];
   VOICES = { kokoro: kokoro || {}, clones };
   renderVoices();
 }
@@ -4418,6 +4555,7 @@ $("go-tts").addEventListener("click", async () => {
 /* tts-stack's own output rate, so nothing is resampled on the way in. */
 const PCM_RATE = 24000;
 
+
 /* MADE AND RESUMED INSIDE THE CLICK, never inside the sink. A context
    constructed outside a gesture starts suspended in Chrome and Safari, and the
    first delta then plays into silence while the headroom arithmetic goes on
@@ -4492,7 +4630,13 @@ function audioSink(ctx, plan) {
   const made = [];             /* {buf, at}, in the piece's own timeline */
   const live = [];             /* scheduled nodes, so a stop can reach them */
   let arrived = 0, deltas = 0, firstAt = 0, lastAt = 0, carry = null;
-  let origin = 0, nextStart = 0, held = 0;
+  let origin = 0, nextStart = 0, held = 0, openedAt = 0, banked = 0, shown = 0;
+  /* HOW MANY CHUNKS THIS STREAM SAID IT WOULD SEND, from X-Chunk-Phonemes.
+     Null until announce() is given a usable header, and null is a first-class
+     answer: an older container, or a proxy that dropped it. Only the count is
+     read. The sizes themselves are the service's arithmetic, and dueSeconds()
+     reads the promise those sizes were planned to keep instead. */
+  let sizes = null;
   let playing = false, closed = false, failed = false, dry = false, quiet = false;
   let watch = 0, said = "";
 
@@ -4526,11 +4670,42 @@ function audioSink(ctx, plan) {
     said = words;
     note($("speak-note"), kind, words);
   }
+  /* BEFORE THE FIRST DELTA THERE IS NOTHING MEASURED, and `arrived / plan.T`
+     is zero. So the bar went up at 55 ms, read scaleX(0) with "0 s of about
+     32 s made" beside it, and stayed there with ZERO repaints for 10.2 s:
+     measured on the fake clock against the wire shape the deployed stack
+     produces today. A bar that does not move is read as a bar that is broken,
+     and the reader is left with the button greying as the only evidence the
+     press did anything.
+
+     THE ESTIMATE UNTIL THERE IS AUDIO, then the measurement, on one scale so
+     the change of source is not a change of reading. See below.
+
+     AND #speak-lead SAYS NOTHING AT ALL UNTIL THERE IS SOMETHING TO SAY.
+     "0 s of about 32 s made" is a fact about the file, not about the wait, and
+     quoting a 32 second total to somebody waiting under two seconds for a
+     sound is the reassurance this page does not do. */
   function paint() {
-    $("speak-bar").style.transform = "scaleX("
-      + Math.min(0.98, plan.T > 0 ? arrived / plan.T : 0).toFixed(4) + ")";
-    $("speak-lead").textContent =
-      Math.round(arrived) + " s of about " + Math.round(plan.T) + " s made";
+    const measured = arrived > 0;
+    /* HOW MUCH OF THE FILE SHOULD EXIST BY NOW, at the rate the plan was made
+       against. It is the same scale as arrived / plan.T, so the step at the
+       first delta is a step of a few thousandths and not a jump: on the
+       measured case the estimate reads 0.128 where the first delta then
+       measures 0.123. textSink already paints exactly this against its own
+       budget, on the same screen. No chunk schedule is needed for it, so the
+       bar moves whether or not the header arrived. */
+    const guessed = plan.R > 0 && plan.T > 0
+      ? (Date.now() - openedAt) / 1000 * plan.R / plan.T : 0;
+    const fraction = measured
+      ? Math.min(0.98, plan.T > 0 ? arrived / plan.T : 0)
+      : Math.min(0.95, guessed);
+    /* NEVER BACKWARDS. The estimate can run ahead of the measurement when the
+       published rate is optimistic, and a bar that retreats is read as an
+       error rather than as a correction. */
+    shown = Math.max(shown, fraction);
+    $("speak-bar").style.transform = "scaleX(" + shown.toFixed(4) + ")";
+    $("speak-lead").textContent = measured
+      ? Math.round(arrived) + " s of about " + Math.round(plan.T) + " s made" : "";
   }
   function stopScheduled() {
     for (const src of live) { try { src.stop(); } catch {} }
@@ -4595,6 +4770,54 @@ function audioSink(ctx, plan) {
   /* Seconds since the last delta landed. The rule below is the belt to
      safe()'s braces, and this is what it is made of. */
   function gapSeconds() { return lastAt ? (Date.now() - lastAt) / 1000 : 0; }
+  /* HOW LATE THE NEXT DELTA ACTUALLY IS, which is a different question from
+     how long it has been waited for.
+
+     The belt used to be `headroom() <= gapSeconds()`. That was right and it
+     was the best available: with no idea how large the next chunk is, the only
+     honest reading of "the next delta is late" is that nothing has arrived for
+     longer than the audio still in hand. It is also expensive, because half
+     the bank goes on proving the stream is alive rather than on keeping it
+     playing, and tts-stack has to plan a schedule where every chunk's
+     generation fits TWICE inside the audio banked in order to survive it.
+
+     X-Chunk-Phonemes says that another chunk is coming and what the schedule
+     promised about it, so the page can subtract the time that chunk was always
+     going to take. A delta that arrives when it was due is not late at any
+     headroom. On the schedule this unlocks, the 60 to 134 phoneme step banks
+     3.9 s of audio against a 2.9 s wait, which the old rule pauses on out loud
+     and this one does not.
+
+     WITHOUT THE HEADER THIS IS ZERO AND THE EXPRESSION IS THE OLD ONE, which
+     is the whole of the degraded mode: an older container, a proxy that
+     stripped the header, or this page in front of a service that never sends
+     it, all keep today's rule exactly. Measured under the harness on the
+     schedule the header unlocks, with the header thrown away: every sample
+     still reaches the ear, first audio is still under two seconds, and the
+     page pauses out loud between chunks rather than breaking. */
+  /* HOW LONG THE CHUNK BEING MADE RIGHT NOW WAS ALWAYS GOING TO TAKE, read
+     back from the promise the service made rather than modelled here.
+
+     tts-stack plans a streamed request so that every chunk's generation fits
+     inside the audio banked when the delta before it landed, with
+     STREAM.safety -- this page's own constant, read from the other end -- as
+     the margin. So the deadline for the next delta IS the bank at the last one
+     over that margin. No rate, no phoneme arithmetic and no model of the
+     generator: the one number needed is one the page already measures.
+
+     MODELLING IT INSTEAD WAS THE FIRST VERSION AND IT WAS WRONG. Estimating
+     the chunk's own generation as its share of the request over the rate has
+     no per-call cost in it, so it undershoots every small chunk, and rateNow()
+     is biased high early because the first delta's whole audio is credited to
+     no elapsed time at all. On the four chunk schedule that combination left
+     0.09 s of margin at the second seam and then lost it at the third.
+
+     ONLY WHILE ANOTHER CHUNK IS COMING. After the last one nothing is due, and
+     the rule falls back to the gap on its own. */
+  function dueSeconds() {
+    return sizes && deltas < sizes.length ? banked / STREAM.safety : 0;
+  }
+  function overdue() { return Math.max(0, gapSeconds() - dueSeconds()); }
   /* THE RULE HAVING BEEN WRONG, made visible rather than papered over. */
   function ranDry(R) {
     dry = true;
@@ -4635,9 +4858,13 @@ function audioSink(ctx, plan) {
        with the largest delta seen instead was the first version and it was
        wrong -- at the moment playback starts headroom IS one delta, so it
        paused a hundred milliseconds after starting, on the fast engine, which
-       is the stutter this whole rule exists to prevent. */
+       is the stutter this whole rule exists to prevent.
+
+       THE GAP IS NOW MEASURED AGAINST WHAT THE STREAM SAID IT WOULD DO. See
+       overdue(): with no announced schedule it is gapSeconds() and this line
+       behaves exactly as it did. */
     if (!closed && (!safe(headroom(), remaining, R)
-                    || headroom() <= gapSeconds())) {
+                    || headroom() <= overdue())) {
       hold();
       say("flat", "Paused to let the voice catch up.");
     }
@@ -4646,6 +4873,9 @@ function audioSink(ctx, plan) {
 
   return {
     open() {
+      /* THE MOMENT OF THE PRESS, because open() now runs inside the click and
+         not after the response headers. paint() measures the wait from here. */
+      openedAt = Date.now();
       $("speak-progress").hidden = false;
       $("speak-stop").hidden = false;
       $("player").hidden = true;
@@ -4655,6 +4885,21 @@ function audioSink(ctx, plan) {
       /* setInterval and NOT requestAnimationFrame: rAF is throttled to a stop
          in a hidden tab and the audio goes on playing there. */
       watch = setInterval(tick, 200);
+    },
+    /* WHAT THIS STREAM IS ABOUT TO DO, before it does any of it. tts-stack
+       puts the phoneme count of every chunk in X-Chunk-Phonemes and it costs
+       nothing to send: plan() has already run when the headers leave, and
+       measured time to first byte on that route is 10 to 15 ms from 4
+       characters to 1495.
+
+       ANYTHING THAT IS NOT A LIST OF POSITIVE NUMBERS IS NO ANSWER AT ALL and
+       is dropped whole, so a malformed header degrades to the behaviour this
+       page had before the header existed rather than to arithmetic on NaN. */
+    announce(header) {
+      if (!header) return;
+      const parsed = String(header).split(",").map(Number);
+      if (!parsed.length || parsed.some(n => !isFinite(n) || n <= 0)) return;
+      sizes = parsed;
     },
     commit(bytes) {
       /* WRAPPED, because playing as it is made is an enhancement over a route
@@ -4670,6 +4915,10 @@ function audioSink(ctx, plan) {
         if (playing && !dry && !quiet) {
           for (let i = before; i < made.length; i++) schedule(made[i], ctx.currentTime);
         }
+        /* THE BANK THE NEXT CHUNK WAS PLANNED AGAINST. Read here, after this
+           delta is in and before anything is played out of it, because that is
+           the moment the service's schedule is describing. */
+        banked = headroom();
         tick();
       } catch (err) {
         failed = true;
@@ -4724,6 +4973,10 @@ function textSink(plan) {
       paint();
       timer = setInterval(paint, 250);
     },
+    /* THE SAME INTERFACE, AND NOTHING TO DO WITH IT. This sink already paints
+       against elapsed time and it plays nothing, so a chunk schedule tells it
+       nothing it can use. */
+    announce() {},
     commit() {},
     close() {
       clearInterval(timer); timer = 0;
@@ -4808,89 +5061,131 @@ async function speakNow(voice, text) {
     if (parts) body.segments = parts; else body.text = text;
   }
 
-  const response = await api(path, {
-    method:"POST", headers:{ "content-type":"application/json" },
-    body: JSON.stringify(body) });
-  if (!response.ok) {
-    let payload = null; try { payload = await response.json(); } catch {}
-    throw new Error(reason(payload, response.status + " " + response.statusText));
-  }
+  /* THE BAR GOES UP IN THE PRESS FRAME. sink.open() is pure synchronous DOM
+     work -- it unhides the progress row and the Stop button, paints once and
+     arms the 200 ms tick -- and it reads nothing from the response. Running it
+     after the response headers meant that between the press and the first
+     delta the page's only change was the button greying: measured on the fake
+     clock against the deployed stack's own wire shape, the bar appeared at
+     55 ms and then read scaleX(0) with zero repaints for 10.2 s.
 
-  const type = response.headers.get("content-type") || "";
-  let blob;
-  if (type.includes("event-stream")) {
-    /* Guarded: a service is free to answer event-stream to a request that did
-       not ask for one, and that must still play rather than throw. */
-    if (sink) sink.open();
-    try {
-      blob = await collectSSE(response, format, sink);
-    } catch (err) {
-      if (sink) sink.close("failed");
-      if (!(err.chunks && err.chunks.length)) throw err;
-      /* WHAT ARRIVED IS KEPT, AND THE READER IS TOLD IT IS SHORT. A truncated
-         file that looks complete is the failure to avoid, so the note is what
-         makes this safe rather than the recovery itself. X-Job-Id is on every
-         streamed response and survives both proxies, so the work already
-         written to disk is reachable from the Jobs tab instead of being run
-         again from the start. */
-      const wrap = sink && sink.wrap;
-      play(wrap ? sink.wrap(err.chunks)
-                : new Blob(err.chunks, { type: "audio/" + format }),
-           "speech." + (wrap ? "wav" : format));
-      let kept = 0;
-      for (const piece of err.chunks) kept += piece.length;
-      const seconds = format === "pcm" ? Math.round(kept / 2 / PCM_RATE) : 0;
-      const jobId = response.headers.get("x-job-id");
-      speakHeld = true;
-      note($("speak-note"), "warn", `The stream ended early.${seconds
-        ? " " + seconds + " s were kept." : " What arrived was kept."}${jobId
-        ? " The rest is on the Jobs tab." : ""}`);
-      if (jobId) { adopt(jobId); refreshJobs(); }
-      return;
+     THE finally IS THE LOAD-BEARING HALF, not tidying up. close() was only
+     ever reached on the event-stream branch, because open() was only ever
+     called there. Hoisting it without this leaves the progress row on screen
+     and the 200 ms interval running for the life of the page on every buffered
+     answer and on every failure before a byte of audio exists. close() is
+     idempotent, so the two calls the streaming branch already makes are
+     unaffected. */
+  if (sink) sink.open();
+  try {
+    /* THIS PAGE READS THE CHUNK SCHEDULE, AND SAYS SO. tts-stack plans a
+       streamed request's chunk sizes against the rule this file enforces: a
+       chunk may be as large as its own generation fits inside the audio
+       already banked. A client that cannot tell a late delta from an expected
+       one has to demand that twice over, so half the buffer goes on proving
+       the stream is alive. Saying the plan will be read halves the demand,
+       which is four chunks to the full window instead of seven, and 20% growth
+       in the length of the speech instead of 26%.
+
+       ASKED FOR ONLY WHERE IT IS USED. Without an AudioContext nothing is
+       played as it is made, so a ramp would buy that request nothing and cost
+       it duration. A service that has never heard of the header ignores it and
+       streams exactly as it does today. Both proxies pass request and response
+       headers through the same RFC hop-by-hop denylist, so this and the answer
+       to it travel together or not at all. */
+    const sending = { "content-type": "application/json" };
+    if (streamed && ctx) sending["X-Chunk-Plan"] = "1";
+    const response = await api(path, {
+      method:"POST", headers: sending,
+      body: JSON.stringify(body) });
+    if (!response.ok) {
+      let payload = null; try { payload = await response.json(); } catch {}
+      throw new Error(reason(payload, response.status + " " + response.statusText));
     }
-    if (sink) sink.close("done");
-  } else if (type.includes("json")) {
-    /* THE THIRD ANSWER. /v1/audio/speech can reply 200-audio, 200-event-stream
-       or 202-with-JSON, and the boundary is arithmetic rather than a constant,
-       so the same request is 200 now and 202 in a minute. Branching on the
-       status code AND the content type is the only way not to write JSON into
-       a .wav. This should not happen on the Kokoro path, and if it does the
-       honest thing is to say so rather than play it. */
-    const payload = await response.json();
-    if (payload.id) { adopt(payload.id); throw new Error(
-      "That came back as a job. Open the Jobs tab."); }
-    throw new Error(reason(payload, "unexpected JSON from a speech request"));
-  } else {
-    blob = await response.blob();
-  }
 
-  /* FOLLOW THE TEXT AS IT PLAYS. X-Segment-Offsets carries where each segment
-     starts, in seconds -- exact, because tts-stack synthesises and splices one
-     segment at a time and knows each one's length as it makes it. Offsets
-     only: this page sent the segments and has them in order, so returning the
-     text too would be the request echoed back. */
-  speakCues(parts, text, response.headers.get("x-segment-offsets"));
+    const type = response.headers.get("content-type") || "";
+    let blob;
+    if (type.includes("event-stream")) {
+      /* Guarded: a service is free to answer event-stream to a request that
+         did not ask for one, and that must still play rather than throw. The
+         sink is already open, from the press frame above.
 
-  const meta = [];
-  const rtf = response.headers.get("x-realtime-factor");
-  if (rtf) {
-    meta.push(Number(rtf).toFixed(1) + "× realtime");
-    /* THE MODEL'S OWN RATE, seeded into the prior the next streamed run reads.
-       A buffered response is the only place this header can appear: on a
-       stream the headers leave before generation starts. */
-    if (Number(rtf) > 0) kokoroObserved = Number(rtf);
+         X-Chunk-Phonemes CARRIES THE SIZES, and absent is a first-class answer
+         that costs the reader nothing: the bar then paints against the whole
+         request and the pause rule stays the one this page has always had. */
+      if (sink) sink.announce(response.headers.get("x-chunk-phonemes"));
+      try {
+        blob = await collectSSE(response, format, sink);
+      } catch (err) {
+        if (sink) sink.close("failed");
+        if (!(err.chunks && err.chunks.length)) throw err;
+        /* WHAT ARRIVED IS KEPT, AND THE READER IS TOLD IT IS SHORT. A truncated
+           file that looks complete is the failure to avoid, so the note is what
+           makes this safe rather than the recovery itself. X-Job-Id is on every
+           streamed response and survives both proxies, so the work already
+           written to disk is reachable from the Jobs tab instead of being run
+           again from the start. */
+        const wrap = sink && sink.wrap;
+        play(wrap ? sink.wrap(err.chunks)
+                  : new Blob(err.chunks, { type: "audio/" + format }),
+             "speech." + (wrap ? "wav" : format));
+        let kept = 0;
+        for (const piece of err.chunks) kept += piece.length;
+        const seconds = format === "pcm" ? Math.round(kept / 2 / PCM_RATE) : 0;
+        const jobId = response.headers.get("x-job-id");
+        speakHeld = true;
+        note($("speak-note"), "warn", `The stream ended early.${seconds
+          ? " " + seconds + " s were kept." : " What arrived was kept."}${jobId
+          ? " The rest is on the Jobs tab." : ""}`);
+        if (jobId) { adopt(jobId); refreshJobs(); }
+        return;
+      }
+      if (sink) sink.close("done");
+    } else if (type.includes("json")) {
+      /* THE THIRD ANSWER. /v1/audio/speech can reply 200-audio, 200-event-stream
+         or 202-with-JSON, and the boundary is arithmetic rather than a constant,
+         so the same request is 200 now and 202 in a minute. Branching on the
+         status code AND the content type is the only way not to write JSON into
+         a .wav. This should not happen on the Kokoro path, and if it does the
+         honest thing is to say so rather than play it. */
+      const payload = await response.json();
+      if (payload.id) { adopt(payload.id); throw new Error(
+        "That came back as a job. Open the Jobs tab."); }
+      throw new Error(reason(payload, "unexpected JSON from a speech request"));
+    } else {
+      blob = await response.blob();
+    }
+
+    /* FOLLOW THE TEXT AS IT PLAYS. X-Segment-Offsets carries where each segment
+       starts, in seconds -- exact, because tts-stack synthesises and splices one
+       segment at a time and knows each one's length as it makes it. Offsets
+       only: this page sent the segments and has them in order, so returning the
+       text too would be the request echoed back. */
+    speakCues(parts, text, response.headers.get("x-segment-offsets"));
+
+    const meta = [];
+    const rtf = response.headers.get("x-realtime-factor");
+    if (rtf) {
+      meta.push(Number(rtf).toFixed(1) + "× realtime");
+      /* THE MODEL'S OWN RATE, seeded into the prior the next streamed run reads.
+         A buffered response is the only place this header can appear: on a
+         stream the headers leave before generation starts. */
+      if (Number(rtf) > 0) kokoroObserved = Number(rtf);
+    }
+    const ignored = response.headers.get("x-ignored-parameters");
+    /* A field that is accepted and ignored is the worst kind, so it is shown. */
+    if (ignored) meta.push("ignored: " + ignored);
+    if (response.headers.get("x-speed-clamped")) meta.push("the server clamped speed");
+    if (sink && sink.report()) meta.push(sink.report());
+    /* WRITTEN HERE AND NOT INSIDE play(). play() took a `meta` argument and
+       dropped it, because the Speak tab had no host for it; #result-meta belongs
+       to the Transcribe tab. The host is written to by id from the call site, so
+       play() itself stays the four lines a test slices it as. */
+    $("speak-meta").textContent = meta.join(" · ");
+    play(blob, "speech." + (format === "pcm" ? "wav" : format));
+  } finally {
+    if (sink) sink.close();
   }
-  const ignored = response.headers.get("x-ignored-parameters");
-  /* A field that is accepted and ignored is the worst kind, so it is shown. */
-  if (ignored) meta.push("ignored: " + ignored);
-  if (response.headers.get("x-speed-clamped")) meta.push("the server clamped speed");
-  if (sink && sink.report()) meta.push(sink.report());
-  /* WRITTEN HERE AND NOT INSIDE play(). play() took a `meta` argument and
-     dropped it, because the Speak tab had no host for it; #result-meta belongs
-     to the Transcribe tab. The host is written to by id from the call site, so
-     play() itself stays the four lines a test slices it as. */
-  $("speak-meta").textContent = meta.join(" · ");
-  play(blob, "speech." + (format === "pcm" ? "wav" : format));
 }
 
 async function collectSSE(response, format, sink) {
@@ -5119,6 +5414,13 @@ function statusClass(status) {
 
 const JOBTEXT = new Map();
 
+/* THE JOBS WHOSE STOP HAS BEEN ASKED FOR AND NOT YET ANSWERED. A separate set
+   rather than a flag on the job object, because refreshJobsInner clears `jobs`
+   and refills it from the listing on every poll, so a flag written onto a job
+   lives about two seconds. Cleared by renderJobs the moment the server reports
+   the job is no longer live, which is the only thing that ends the state. */
+const STOPPING = new Set();
+
 function renderJobs() {
   const all = [...jobs.values()].sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
   /* THE FILTER, and the control that offers it. A finished job whose audio has
@@ -5164,6 +5466,10 @@ function renderJobs() {
                   : job.created_at ? now - job.created_at : 0;
     const budget = job.estimated_seconds || 0;
     const live = job.status === "queued" || job.status === "running";
+    /* The server has answered and the job is finished, so whatever this page
+       asked for has happened one way or the other. */
+    if (!live) STOPPING.delete(job.id);
+    const stopping = live && STOPPING.has(job.id);
     /* THE BAR IS A COUNT NOW, NOT A CLOCK, and that is the whole of the clone
        half of "feels faster". tts-long publishes `offsets` as it makes them --
        one exact boundary per segment, an accumulated sample count rather than
@@ -5217,7 +5523,7 @@ function renderJobs() {
     }
     return `<div class="job ${expired ? "expired" : ""}">
       <div class="top">
-        <span class="status ${statusClass(job.status)}">${job.status}</span>
+        <span class="status ${statusClass(job.status)}">${stopping ? "stopping…" : job.status}</span>
         <strong>${esc(job.voice || (job.recovered ? "voice unknown" : "default"))}</strong>
         <span class="id">${esc(job.id)}</span>
         <span class="spacer"></span>
@@ -5247,7 +5553,7 @@ function renderJobs() {
         ${audio
           ? `<button class="small" data-play="${esc(job.id)}" type="button">Play</button>
              <button class="small" data-get="${esc(job.id)}" type="button">Download the audio</button>` : ""}
-        ${live ? `<button class="small" data-stop="${esc(job.id)}" type="button">Stop and keep what's done</button>` : ""}
+        ${live && !stopping ? `<button class="small" data-stop="${esc(job.id)}" type="button">Stop and keep what's done</button>` : ""}
         ${job.status === "failed" ? `<button class="small" data-retry="${esc(job.id)}" type="button">Retry</button>` : ""}
         ${audio ? `<button class="small" data-delaudio="${esc(job.id)}" type="button">Delete the audio</button>` : ""}
         <button class="small" data-forget="${esc(job.id)}" type="button">${
@@ -5262,12 +5568,14 @@ function renderJobs() {
 
   $("joblist").querySelectorAll("[data-play]").forEach(b =>
     b.addEventListener("click", () => playJob(b.dataset.play)));
+  /* THE BUTTON GOES WITH THE ID, so the press can acknowledge itself before
+     the request is even built. See busy(). */
   $("joblist").querySelectorAll("[data-get]").forEach(b =>
-    b.addEventListener("click", () => downloadJob(b.dataset.get)));
+    b.addEventListener("click", () => downloadJob(b.dataset.get, b)));
   $("joblist").querySelectorAll("[data-stop]").forEach(b =>
-    b.addEventListener("click", () => stopJob(b.dataset.stop)));
+    b.addEventListener("click", () => stopJob(b.dataset.stop, b)));
   $("joblist").querySelectorAll("[data-retry]").forEach(b =>
-    b.addEventListener("click", () => retryJob(b.dataset.retry)));
+    b.addEventListener("click", () => retryJob(b.dataset.retry, b)));
   $("joblist").querySelectorAll("[data-delaudio]").forEach(b =>
     b.addEventListener("click", () => deleteAudio(b.dataset.delaudio)));
   $("joblist").querySelectorAll("[data-forget]").forEach(b =>
@@ -5341,13 +5649,18 @@ $("jobclose").addEventListener("click", () => {
   $("jobplay").hidden = true;
 });
 
-async function downloadJob(id) {
-  const response = await api(`/jobs/${encodeURIComponent(id)}/audio`);
-  if (!response.ok) { alert("Not ready: " + response.status); return; }
-  const url = URL.createObjectURL(await response.blob());
-  const a = document.createElement("a");
-  a.href = url; a.download = id + ".wav"; a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 10000);
+async function downloadJob(id, button) {
+  /* The audio is megabytes off a NAS, so the wait is real and the press had
+     nothing to show for it: measured at NEVER with the route delayed 300 ms. */
+  const release = busy(button, "Fetching…");
+  try {
+    const response = await api(`/jobs/${encodeURIComponent(id)}/audio`);
+    if (!response.ok) { alert("Not ready: " + response.status); return; }
+    const url = URL.createObjectURL(await response.blob());
+    const a = document.createElement("a");
+    a.href = url; a.download = id + ".wav"; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  } finally { release(); }
 }
 
 /* FREE THE DISK, KEEP THE HISTORY. The other button removes both, which is
@@ -5415,19 +5728,33 @@ async function forgetJob(id) {
   renderJobs();
 }
 
-async function stopJob(id) {
+async function stopJob(id, button) {
   /* "Stop and keep what's done", not "Cancel": /jobs/{id}/audio serves a
      `cancelled` job as happily as a `done` one and 409s only while running,
      so the partial audio is genuinely kept. tts-long has had DELETE /jobs/{id}
-     all along; the gateway simply never routed it. */
+     all along; the gateway simply never routed it.
+
+     THE ROW SAYS IT BEFORE THE SERVER DOES, AND IT SAYS "stopping", NEVER
+     "stopped". This was the worst press on the page: measured at 605 ms to any
+     change at all, and the row went on saying "running" through the round trip
+     and only corrected on the poll after it. An optimistic terminal state
+     would be worse than the wait, because a refusal then has to take a word
+     back; a state that says the request is in flight cannot be wrong. */
+  busy(button, "Stopping…");
+  STOPPING.add(id);
+  renderJobs();
   try { await json(`/jobs/${encodeURIComponent(id)}`, { method: "DELETE" }); }
-  catch (err) { alert("Could not stop it: " + err.message); }
+  catch (err) { STOPPING.delete(id); renderJobs();
+                alert("Could not stop it: " + err.message); }
   refreshJobs();
 }
 
-async function retryJob(id) {
+async function retryJob(id, button) {
   const seen = remembered().find(j => j.id === id);
   if (!seen || !seen.params) { alert("The parameters for that job were not kept."); return; }
+  /* A POST against a NAS that may be running Parakeet, and the press showed
+     nothing until the new row appeared: measured at NEVER. */
+  const release = busy(button, "Retrying…");
   /* The identical parameters, resubmitted. No paraphrasing of the backend's
      error into something friendlier and less true, and no quiet edits. */
   try {
@@ -5437,6 +5764,7 @@ async function retryJob(id) {
     jobs.set(payload.id, payload);
     renderJobs(); schedule(0);
   } catch (err) { alert("Retry failed: " + err.message); }
+  finally { release(); }
 }
 
 async function refreshJobs() {
@@ -5566,7 +5894,16 @@ function schedule(delay) {
   }, delay === undefined ? interval() : delay);
 }
 document.addEventListener("visibilitychange", () => schedule(0));
-$("refresh").addEventListener("click", () => { refreshJobs(); });
+$("refresh").addEventListener("click", async () => {
+  /* THE ONE PRESS THAT COULD CHANGE NOTHING FOR EVER. refreshJobs ends in
+     renderJobs, and renderJobs writes the same markup back when the listing has
+     not moved, so a press against an unchanged list was invisible however long
+     the round trip took. Measured at NEVER. */
+  const done = busy($("refresh"), "Refreshing…");
+  /* refreshJobs puts its own failure in the card and then rethrows, so the
+     reason is already on screen and there is nothing to report here. */
+  try { await refreshJobs(); } catch {} finally { done(); }
+});
 /* Redraw from what is already here. Filtering is a question about the rows on
    this page, not a question for the server. */
 $("onlyaudio").addEventListener("change", renderJobs);
@@ -5959,7 +6296,15 @@ $("saveclip").addEventListener("click", async () => {
      Transcribe both read "unknown" there, and the note beside them names the
      probe. CONFIG.probe is still served and is no longer read here. */
 
-  await poll();
+  /* STARTED AND NOT AWAITED, and this is the whole of the cold first paint.
+     /ui/health is proxied to the gateway with a 5 s timeout, the gateway fans
+     out to three backends at GATEWAY_HEALTH_TIMEOUT 5, and one of those
+     reaches over the network to a GPU runner that is somebody's desktop.
+     Measured 2,517 ms on the first read of a session and 50 to 165 ms after.
+     Nothing below it needs the answer except one optgroup label, so awaiting
+     it put a status card in front of the voice picker: measured on the fake
+     clock, 2,690 ms before there was a voice anyone could choose. */
+  const health = poll();
   setInterval(poll, 30000);
   /* BEFORE loadVoices, and once only. The voice list is filtered by whatever
      $("lang") holds, so the language options have to exist before the first
@@ -5970,10 +6315,23 @@ $("saveclip").addEventListener("click", async () => {
   /* The expert panels start out matching the empty page rather than matching
      their markup: nothing is picked, so nothing is ruled out yet. */
   updateRouteAvailability();
-  /* Before loadVoices only because both are awaited and this one is a small
-     JSON read; neither depends on the other. */
-  await loadGlossaries();
-  await loadVoices();
+  /* THE THREE READS THAT DO NOT DEPEND ON EACH OTHER GO TOGETHER. They were
+     awaited one after the other with a comment saying neither depended on the
+     other, which is the argument for running them at once. The jobs this
+     browser remembers are seeded first, because refreshJobs reconciles the
+     listing against them.
+
+     It is six requests either way and the same load on the NAS; they now
+     overlap instead of queueing. */
+  for (const seen of remembered()) if (!jobs.has(seen.id)) jobs.set(seen.id,
+    { id: seen.id, status: "queued", created_at: seen.at });
+  await Promise.all([loadGlossaries(), loadVoices(),
+                     refreshJobs().catch(() => {})]);
+  /* THE ONE THING THAT NEEDED HEALTH: renderVoices labels the clone group with
+     rate.clone(), which reads tts_long's live realtime_factor. Redrawn when the
+     answer lands, which is 2.21 ms of work over 31 options and is guarded by
+     _detectedStem, so nothing a reader has touched is disturbed. */
+  health.then(renderVoices);
   if (!CONFIG.cloning) {
     /* Said once, plainly, rather than letting a saved voice vanish on the next
        restart — which would be the worst possible version of this feature. */
@@ -5982,9 +6340,6 @@ $("saveclip").addEventListener("click", async () => {
       option.textContent = "+ Clone a new voice (unavailable)"; }
   }
   estimate();
-  for (const seen of remembered()) if (!jobs.has(seen.id)) jobs.set(seen.id,
-    { id: seen.id, status: "queued", created_at: seen.at });
-  await refreshJobs();
   schedule();
 })();
 </script>

@@ -1027,3 +1027,156 @@ def test_streaming_is_the_default_when_the_arithmetic_allows_it():
     # realtime Chatterbox needs more lead than the audio is long.
     assert 'currentVoice().kind !== "clone"' in HTML
     assert 'speechPlan("kokoro", text).mode === "audio"' in HTML
+
+
+# ------------------------------------------------- the press, answered --
+#
+# MEASURED UNDER THE STUB HARNESS with every route delayed 300 ms, so nothing
+# passes by being answered on a microtask. Before this change: Refresh,
+# Download the audio and Retry changed nothing at all, Stop and keep what's
+# done took 605 ms and the row still said "running", and a vocabulary name took
+# 305 ms. RAIL gives a press 100 ms to register; Doherty puts the flow of work
+# at 400 ms.
+
+
+def test_every_press_that_waits_on_the_network_answers_before_it_waits():
+    """Five presses on this page changed nothing until the answer came back.
+
+    The helper is the whole fix, so the assertion is that all five reach it and
+    that it cannot itself be asynchronous: it touches only the element that was
+    pressed, which is why it cannot race the render that follows.
+    """
+    assert "function busy(button, label) {" in HTML
+    body = HTML[HTML.index("function busy(button, label) {"):]
+    body = body[:body.index("\n}\n")]
+    assert "await" not in body, "the acknowledgement itself waits on something"
+    assert 'button.setAttribute("aria-busy", "true")' in body, "drawn but not announced"
+    # It hands back the undo rather than keeping state, so a caller cannot
+    # forget which button it greyed.
+    assert "return () => {" in body
+
+    script = bare(SCRIPT)
+    # Refresh: the worst of the five, because renderJobs writes the same markup
+    # back when the listing has not moved, so the press was invisible for ever.
+    assert 'const done = busy($("refresh"), "Refreshing…");' in script
+    assert 'busy(button, "Fetching…")' in script      # downloadJob
+    assert 'busy(button, "Retrying…")' in script      # retryJob
+    assert 'busy(button, "Stopping…")' in script      # stopJob
+    # The listeners hand the pressed element over, which is what makes the
+    # acknowledgement possible at all.
+    for attr, fn in (("data-get", "downloadJob"), ("data-stop", "stopJob"),
+                     ("data-retry", "retryJob")):
+        assert f"{fn}(b.dataset." in script and f"[{attr}]" in script
+
+
+def test_stop_says_stopping_and_never_says_stopped():
+    """The row went on saying "running" across a whole round trip and only
+    corrected on the poll after it: 605 ms to any change at all.
+
+    IT WRITES "stopping" AND NOT "stopped". An optimistic terminal state has to
+    be taken back when the server refuses, and taking a word back is worse than
+    the wait it saved. A state that only says the request is in flight cannot
+    be wrong.
+    """
+    script = bare(SCRIPT)
+    assert "const STOPPING = new Set();" in script
+    body = script[script.index("async function stopJob(id, button)"):]
+    body = body[:body.index("\n}\n")]
+    # Written BEFORE the await, which is the point.
+    assert body.index("STOPPING.add(id)") < body.index("await json(")
+    assert body.index("renderJobs()") < body.index("await json(")
+    # And taken back when the server refuses, rather than left standing.
+    assert "STOPPING.delete(id); renderJobs();" in body
+    assert "stopped" not in body
+    row = HTML[HTML.index("function renderJobs()"):]
+    row = row[:row.index("\n}\n")]
+    assert 'stopping ? "stopping…" : job.status' in row
+    # And the button goes, so the same request cannot be sent twice.
+    assert "live && !stopping ?" in row
+
+
+def test_the_jobs_tab_asks_as_soon_as_somebody_looks_at_it():
+    """The poller runs on a backoff ladder and only polls while the panel is
+    open, so opening it showed rows as old as the last rung: measured on the
+    fake clock, a job 400 s old was next polled in 26,600 ms.
+
+    visibilitychange already did exactly this line. The tab did not.
+    """
+    assert 'if (changed && button.dataset.tab === "jobs") schedule(0);' in HTML
+    assert 'document.addEventListener("visibilitychange", () => schedule(0));' in HTML
+
+
+def test_the_first_paint_does_not_wait_on_a_cold_health_read():
+    """/ui/health is proxied to the gateway at timeout 5, the gateway fans out
+    to three backends at GATEWAY_HEALTH_TIMEOUT 5, and one of those reaches
+    over the network to a GPU runner that is somebody's desktop. Measured
+    2,517 ms on the first read of a session.
+
+    boot() awaited it and then made five more requests one after another, so
+    the voice picker was 2,690 ms away on a cold load. Nothing needs the answer
+    except one optgroup label, which is redrawn when it lands.
+    """
+    boot = HTML[HTML.index("(async function boot()"):]
+    assert "const health = poll();" in boot, "health is on the critical path again"
+    assert "await poll();" not in boot
+    # Nor awaited under its new name, which is the same defect renamed.
+    assert "await health" not in boot
+    assert "await Promise.all([loadGlossaries(), loadVoices()," in boot
+    assert "health.then(renderVoices);" in boot, "the one label that needs it"
+    # loadVoices was itself two serial reads that do not depend on each other.
+    voices = HTML[HTML.index("async function loadVoices()"):]
+    voices = voices[:voices.index("\n}\n")]
+    assert "Promise.allSettled(" in voices
+    # allSettled and not all: a failed clip listing is an empty list and must
+    # not take the Kokoro voices down with it.
+    assert "Promise.all(" not in bare(voices)
+
+
+def test_the_words_left_do_not_stand_still_for_forty_four_seconds():
+    """roughly()'s bottom rung was everything under 45 s, so a ten minute
+    transcription said "about a minute left" for 23 s and then "a few seconds
+    left" for 44 s. Measured over the whole 68 s wait, the phrase changed once.
+
+    A reading that does not move is read as a reading that has stopped,
+    whatever the clock beside it is doing. Five second steps are inside what
+    the estimate can support: the seed is 8.5x, Parakeet measures 8.81x, and
+    that is 2.7 s over a 68 s job.
+    """
+    body = HTML[HTML.index("function roughly(seconds)"):]
+    body = body[:body.index("\n}\n")]
+    assert 'if (seconds < 5) return "a few seconds";' in body
+    assert 'Math.round(seconds / 5) * 5 + " seconds"' in body
+    # Above a minute it stays deliberately vague: a confirm dialog that says
+    # "1m 47s" invites somebody to time it.
+    assert '"about a minute"' in body
+
+
+def test_a_file_this_browser_cannot_decode_still_has_a_length():
+    """sttSeconds() was 0 for a file over CAN_DECODE and for any container
+    decodeAudioData refuses, so the progress bar had no budget: a 68 s wait
+    painted a moving elapsed clock beside a bar frozen at scaleX(0). That was
+    the one genuinely featureless wait left on this page, and it is the path a
+    two hour MKV takes.
+
+    A media element reads the container header and stops, which is a different
+    code path from decodeAudioData and answers for a good deal of what it
+    refuses. Failing is an ordinary answer and it is 0, so the bar then stays
+    the honest elapsed clock rather than moving at a rate nobody measured.
+    """
+    assert "function probeSeconds(file)" in HTML
+    body = HTML[HTML.index("function probeSeconds(file)"):]
+    body = body[:body.index("\n}\n")]
+    assert 'media.preload = "metadata"' in body, "it decodes rather than reads"
+    assert 'media.addEventListener("error", () => finish(0))' in body
+    assert "resolve(isFinite(seconds) && seconds > 0 ? seconds : 0)" in body
+    # A media element handed a container it cannot parse is free to fire
+    # neither event, so the wait needs an end.
+    assert "setTimeout(() => finish(0), PROBE_MS)" in body
+    assert "URL.revokeObjectURL(url)" in body, "one object URL leaked per file"
+    pick = HTML[HTML.index("async function pick(file)"):]
+    pick = pick[:pick.index("\nasync function")]
+    assert pick.count("await probeSeconds(file)") == 2, (
+        "the two paths that reach Transcribe with no measured length")
+    # stt.seconds was the one field pick() did not clear, so a large file
+    # picked after a small one inherited the small one's length.
+    assert "stt.seconds = null;" in pick

@@ -1127,6 +1127,17 @@ def test_the_underrun_is_pre_empted_by_a_timer_that_a_hidden_tab_cannot_stop():
 
     The graph is stopped while it still has audio in hand: a stated pause is
     recoverable, a stutter is not.
+
+    THE SECOND READING MOVED FROM gapSeconds() TO overdue(), and this docstring
+    is the record of why rather than the test being quietly relaxed. The old
+    rule compared the audio in hand with the whole time since the last delta,
+    because with no idea how large the next chunk is that is the only honest
+    reading of "the next delta is late". It costs half the buffer, and it is
+    why tts-stack has to plan a schedule where every chunk's generation fits
+    TWICE inside the audio banked. X-Chunk-Phonemes says how large the chunk
+    being made is, so overdue() subtracts the time it was always going to take.
+    With no header announced, overdue() IS gapSeconds(), which is the property
+    asserted below and the whole of the degraded mode.
     """
     sink = code(body_of("function audioSink(ctx, plan)", "\n/*\n  THE SINK THAT MAKES NO SOUND"))
     assert "setInterval(tick, 200)" in sink
@@ -1134,11 +1145,16 @@ def test_the_underrun_is_pre_empted_by_a_timer_that_a_hidden_tab_cannot_stop():
     # AND NOT AGAINST THE DELTA SIZE. At the moment playback starts, headroom
     # IS one delta, so comparing the two paused a hundred milliseconds after
     # starting on the fast engine -- the stutter the rule exists to prevent.
-    # The second reading is the gap since the last delta: if nothing has
-    # arrived for longer than the audio still in hand, the next one is already
-    # too late, whatever the mean rate says.
-    assert "headroom() <= gapSeconds()" in sink, "no pre-emptive pause at all"
+    assert "headroom() <= overdue()" in sink, "no pre-emptive pause at all"
     assert "biggest" not in sink, "the delta size is back as a threshold"
+    # overdue() falls back to gapSeconds() when nothing was announced, so a
+    # page in front of a service that never sends the header keeps the old
+    # rule exactly. Both halves are asserted: the subtraction, and the floor
+    # that stops an early delta from being counted as spare credit.
+    assert "gapSeconds() - dueSeconds()" in sink
+    assert "Math.max(0, gapSeconds() - dueSeconds())" in sink
+    # The real catch is untouched. Nothing about the schedule may soften it.
+    assert "if (!closed && headroom() <= 0) { ranDry(R); return; }" in sink
     # A suspended context is the browser pausing, not the model falling behind.
     assert 'ctx.state !== "running"' in sink
     assert 'say("flat", "Paused.")' in sink
@@ -1271,3 +1287,89 @@ def test_the_page_makes_one_audio_context_and_not_one_per_press():
     opener = code(body_of("function openAudio()", "\n/* 44 bytes of RIFF"))
     assert "if (!speakCtx || speakCtx.state === \"closed\")" in opener
     assert "if (speakCtx.resume) speakCtx.resume();" in opener
+
+
+# ------------------------------------- the wait before the first sample --
+
+
+def test_the_bar_goes_up_in_the_press_frame_and_is_closed_on_every_path():
+    """sink.open() ran after the response headers, so between the press and the
+    first delta the page's only change was the button greying. Measured on the
+    fake clock against the deployed stack's own wire shape: the bar appeared at
+    55 ms and then read scaleX(0) with zero repaints for 10.2 s.
+
+    open() is pure synchronous DOM work and reads nothing from the response, so
+    it belongs in the click.
+
+    THE finally IS THE LOAD-BEARING HALF, and it is why this test exists at
+    all. close() was only ever reached on the event-stream branch, because
+    open() was only ever called there. Hoisting open() without the finally
+    leaves the progress row on screen and the 200 ms interval running for the
+    life of the page on every buffered answer, every 202 and every failure
+    before a byte of audio exists.
+    """
+    speak = body_of("async function speakNow(voice, text)", "async function collectSSE")
+    flat = code(speak)
+    assert "if (sink) sink.open();" in flat
+    # Before the request is built, not after the headers come back.
+    assert flat.index("sink.open()") < flat.index("await api(path")
+    assert "} finally {\n    if (sink) sink.close();\n  }" in speak
+    # And the streaming branch no longer opens it a second time.
+    assert flat.count("sink.open()") == 1
+
+
+def test_the_bar_moves_before_any_audio_exists_and_promises_nothing():
+    """`arrived / plan.T` is zero until the first delta, so the bar read
+    scaleX(0) with "0 s of about 32 s made" beside it, unchanged, for the whole
+    wait. A bar that does not move is read as a bar that is broken.
+
+    The estimate before the first delta is elapsed x R / T, which is how much
+    of the file should exist by now. It is on the same scale as arrived / T, so
+    the change of source is not a change of reading: on the measured case the
+    estimate reads 0.128 where the first delta then measures 0.123. textSink
+    already paints exactly this against its own budget on the same screen.
+
+    AND #speak-lead SAYS NOTHING UNTIL THERE IS SOMETHING TO SAY. "0 s of about
+    32 s made" is a fact about the file rather than about the wait, and quoting
+    a 32 second total to somebody waiting under two seconds for a sound is the
+    reassurance this page does not do.
+    """
+    sink = body_of("function audioSink(ctx, plan)", "\n/*\n  THE SINK THAT MAKES NO SOUND")
+    body = code(sink)
+    assert "(Date.now() - openedAt) / 1000 * plan.R / plan.T" in body
+    assert "openedAt = Date.now();" in body, "the wait is measured from the press"
+    # Never backwards: the estimate can run ahead when the published rate is
+    # optimistic, and a bar that retreats reads as an error.
+    assert "shown = Math.max(shown, fraction);" in body
+    assert 'Math.round(arrived) + " s of about " + Math.round(plan.T) + " s made" : "";' in body
+
+
+def test_the_page_asks_for_the_chunk_plan_and_reads_the_answer():
+    """tts-stack plans a streamed request's chunk sizes against the rule this
+    file enforces: a chunk may be as large as its own generation fits inside
+    the audio already banked. A client that cannot tell a late delta from an
+    expected one has to demand that twice over, so half the buffer goes on
+    proving the stream is alive. Saying the plan will be read halves the
+    demand: four chunks to the full window instead of seven, and 20% growth in
+    the length of the speech instead of 26%.
+
+    ASKED FOR ONLY WHERE IT IS USED. With no AudioContext nothing is played as
+    it is made, so a ramp would buy that request nothing and cost it duration.
+    """
+    speak = code(body_of("async function speakNow(voice, text)",
+                         "async function collectSSE"))
+    assert 'if (streamed && ctx) sending["X-Chunk-Plan"] = "1";' in speak
+    assert 'sink.announce(response.headers.get("x-chunk-phonemes"))' in speak
+    sink = code(body_of("function audioSink(ctx, plan)",
+                        "\n/*\n  THE SINK THAT MAKES NO SOUND"))
+    # A malformed header is dropped whole rather than read as NaN, so the page
+    # degrades to the behaviour it had before the header existed.
+    assert "parsed.some(n => !isFinite(n) || n <= 0)" in sink
+    # The deadline is the promise the sizes were planned to keep, not a model
+    # of the generator built here.
+    assert "banked / STREAM.safety" in sink
+    assert "banked = headroom();" in sink
+    # And the silent sink carries the same interface, so speakNow does not have
+    # to know which one it has.
+    text_sink = code(body_of("function textSink(plan)", "\n$(\"speak-stop\")"))
+    assert "announce() {}" in text_sink
