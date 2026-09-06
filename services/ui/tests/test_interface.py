@@ -1002,3 +1002,28 @@ def test_the_speed_slider_and_the_delete_button_share_one_slot():
     assert 'id="speedslot"' in HTML
     assert 'id="speedwrap"' in HTML
     assert '$("speedwrap").hidden = !$("delvoice").hidden;' in HTML
+
+
+def test_streaming_is_the_default_when_the_arithmetic_allows_it():
+    """THE DEFECT THIS PREVENTS, reported as "I still have to wait for the
+    whole speak to finish": streaming was built and never happened.
+
+    Both controls that turn it on defaulted to the other option, and both sit
+    inside a collapsed Expert panel. A streaming player behind two dropdowns
+    nobody opens is the same as no streaming player.
+
+    The controls WRITE their values rather than being read around. A first
+    attempt read past them and streamed anyway, which was worse: the panel
+    would have said "audio" while the page streamed, and a control that
+    disagrees with the behaviour is a bug rather than a default.
+    """
+    assert "function streamDefaults()" in HTML
+    assert 'route.value = can ? "v1" : "speak";' in HTML
+    assert 'stream.value = can ? "sse" : "audio";' in HTML
+    # An explicit choice survives. dataset.touched is set by the change
+    # handlers, and streamDefaults returns early when either is set.
+    assert 'route.dataset.touched === "1" || stream.dataset.touched === "1"' in HTML
+    # speechPlan is the gate, not a guess, and a clone never streams: at 0.23x
+    # realtime Chatterbox needs more lead than the audio is long.
+    assert 'currentVoice().kind !== "clone"' in HTML
+    assert 'speechPlan("kokoro", text).mode === "audio"' in HTML

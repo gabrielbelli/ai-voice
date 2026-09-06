@@ -4078,8 +4078,48 @@ function syncSpeakControls() {
   $("segments").querySelectorAll("input,select,button")
     .forEach(control => control.disabled = v1);
 }
-$("x-troute").addEventListener("change", () => { syncSpeakControls(); estimate(); });
-$("x-stream").addEventListener("change", syncSpeakControls);
+/* A CHOICE IS ONLY A CHOICE ONCE SOMEBODY MAKES IT. Until then these follow
+   the arithmetic; after, they stay where they were put. See streamDefaults. */
+$("x-troute").addEventListener("change", () => {
+  $("x-troute").dataset.touched = "1"; syncSpeakControls(); estimate();
+});
+$("x-stream").addEventListener("change", () => {
+  $("x-stream").dataset.touched = "1"; syncSpeakControls();
+});
+
+/* THE CONTROLS SHOW WHAT WILL HAPPEN, which is why this writes their values
+   rather than being read around them.
+
+   Streaming shipped behind two selects that BOTH defaulted to the other
+   option and BOTH sat inside a collapsed Expert panel, so a reader who never
+   opened it waited for the whole file every time. Building a streaming player
+   and leaving it behind two dropdowns nobody turns on is the same as not
+   building it.
+
+   The first attempt at this read PAST the controls and streamed anyway. That
+   was worse: the panel would have said "audio" while the page streamed, and a
+   control that disagrees with the behaviour is a bug, not a default.
+
+   So the value moves instead. speechPlan is the gate: Kokoro measured 2.79x
+   realtime here, so generation outruns playback and the lead is zero. A clone
+   never reaches this path, which is right, because Chatterbox at 0.23x needs
+   over three minutes of lead per minute of audio. Segments turn it off too,
+   since /v1 carries neither segments nor per-segment pauses. */
+function streamDefaults() {
+  const route = $("x-troute"), stream = $("x-stream");
+  if (!route || !stream) return;
+  if (route.dataset.touched === "1" || stream.dataset.touched === "1") return;
+  /* AN EMPTY BOX IS NOT A STREAMABLE JOB. speechPlan on "" gives a lead of
+     zero, which reads as "streaming is fine" and greyed the format control
+     before anybody had typed anything. Nothing is being planned yet. */
+  const text = $("text").value;
+  const can = !!text.trim()
+    && !segments()
+    && currentVoice().kind !== "clone"
+    && speechPlan("kokoro", text).mode === "audio";
+  route.value = can ? "v1" : "speak";
+  stream.value = can ? "sse" : "audio";
+}
 $("delvoice").addEventListener("click", async () => {
   const voice = currentVoice();
   if (voice.kind !== "clone") return;
@@ -4133,6 +4173,7 @@ function estimate() {
      the set of things that can move the detection. A second listener would be
      a second chance to disagree with the number sent. */
   showDetected();
+  streamDefaults();
   $("chars").textContent = text.length;
   $("chars").style.color = text.length > 4096 ? "var(--bad)" : "";
   const voice = currentVoice();
@@ -4691,7 +4732,6 @@ $("speak-stop").addEventListener("click", () => { if (speakSink) speakSink.silen
 $("player").addEventListener("play", () => { if (speakSink) speakSink.silence(); });
 
 async function speakNow(voice, text) {
-  const useV1 = $("x-troute").value === "v1";
   /* THE MODE IS DECIDED BEFORE THE REQUEST IS BUILT, so a browser with no
      usable AudioContext never asks for pcm and the format the reader chose is
      honoured. openAudio() runs here, in the task the click started and before
@@ -4701,6 +4741,25 @@ async function speakNow(voice, text) {
      THE SPEAK TAB NEVER OPENS AN SSE STREAM AGAINST tts-long. Only Kokoro on
      /v1 reaches this, and a cloned voice goes to POST /jobs: closing that
      stream cancels the job. */
+  /* STREAMED BY DEFAULT WHEN THE ARITHMETIC SAYS IT WILL WORK, and this is
+     the difference between the feature existing and the feature happening.
+     It was `useV1 && x-stream === "sse"`, and BOTH of those default to the
+     other option and BOTH live inside a collapsed Expert panel, so a reader
+     who never opened it waited for the whole file every time. Building a
+     streaming player and leaving it behind two dropdowns nobody turns on is
+     the same as not building it.
+
+     The controls still win when a person has touched them: choosing /speak
+     asks for segments and per-segment pauses, which the streamed route does
+     not carry, and choosing audio over sse is a request for the file. What
+     changes is the answer when nobody has expressed a preference.
+
+     speechPlan is the gate, not a guess. Kokoro measured 2.79x realtime on
+     this host, so generation outruns playback and the lead is zero; a clone
+     goes to POST /jobs and never reaches here at all, which is right, because
+     Chatterbox at 0.23x would need three minutes of lead per minute of
+     audio. */
+  const useV1 = $("x-troute").value === "v1";
   const streamed = useV1 && $("x-stream").value === "sse";
   const plan = streamed ? speechPlan("kokoro", text) : null;
   const ctx = plan && plan.mode === "audio" ? openAudio() : null;
