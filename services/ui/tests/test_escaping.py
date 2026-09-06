@@ -770,8 +770,22 @@ def test_the_route_that_has_no_timings_says_it_gives_up_the_sidecar():
 
 def test_stream_format_is_off_on_the_route_that_has_none():
     """It was read inside the /v1 branch only, so on /speak -- the DEFAULT
-    route -- choosing SSE did nothing whatsoever."""
-    assert '$("x-stream").disabled = !v1;' in _fn("function syncSpeakControls()")
+    route -- choosing SSE did nothing whatsoever.
+
+    THE FORMAT CONTROL JOINED IT, for the same reason and by the same idiom. A
+    run that will be played as it is made is forced to pcm: streamed wav writes
+    a RIFF size of 8 and a data size of 0, and mp3, opus, aac and flac carry
+    encoder priming and padding, so a delta boundary is not a segment boundary.
+    A control the request cannot honour is greyed, never hidden.
+
+    It is asked of speechPlan and not of the stream control alone, because a
+    stream the arithmetic sends down the silent path DOES honour the format:
+    nothing is decoded in the browser there.
+    """
+    body = _fn("function syncSpeakControls()")
+    assert '$("x-stream").disabled = !v1;' in body
+    assert '$("x-tfmt").disabled = v1 && $("x-stream").value === "sse"' in body
+    assert 'speechPlan("kokoro", $("text").value).mode === "audio"' in body
 
 
 def test_segments_are_off_on_the_route_that_has_none():

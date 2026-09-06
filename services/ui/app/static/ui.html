@@ -638,6 +638,24 @@ details>summary:active{opacity:.72}
            whose entire subject is work that takes minutes. polite and not
            assertive: it is status, and it sometimes contains #stopdl. -->
       <div id="stt-note" aria-live="polite"></div>
+      <!-- THE 68 SECONDS A TEN MINUTE RECORDING TAKES, shown as a bar.
+           Parakeet cannot stream: asr.py sets can_stream False, stream()
+           raises, and openai_api.py refuses stream=true by name. So this is a
+           progress problem and not a partials problem, and the bar is what
+           says so.
+
+           THE BAR AND THE TICKING FIGURE ARE aria-hidden, and #stt-note above
+           is not. A counter redrawn four times a second inside an aria-live
+           region announces continuously and is unusable with a screen reader.
+           The host announces the state change once; the ticker is for eyes. -->
+      <div id="stt-progress" hidden>
+        <div class="bar-track" aria-hidden="true"><div class="bar-fill" id="stt-bar"></div></div>
+        <div class="row" style="align-items:center">
+          <span class="hint" id="stt-elapsed" aria-hidden="true"></span>
+          <span class="spacer"></span>
+          <button class="small tight" id="stt-cancel" type="button">Stop</button>
+        </div>
+      </div>
 
       <details id="stt-expert">
         <summary>Expert: transcription</summary>
@@ -904,6 +922,17 @@ details>summary:active{opacity:.72}
       <div class="actions">
         <button class="primary" id="go-tts" type="button">Speak</button>
       </div>
+      <!-- Same split as the transcription bar: #speak-note announces, this
+           does not. Which of the two states is running is said by the note and
+           by whether #player is there, never by a paragraph. -->
+      <div id="speak-progress" hidden>
+        <div class="bar-track" aria-hidden="true"><div class="bar-fill" id="speak-bar"></div></div>
+        <div class="row" style="align-items:center">
+          <span class="hint" id="speak-lead" aria-hidden="true"></span>
+          <span class="spacer"></span>
+          <button class="small tight" id="speak-stop" type="button">Stop</button>
+        </div>
+      </div>
       <!-- The spoken text, rendered so it can be highlighted. A <textarea>
            cannot carry spans, so this is a read-only copy that appears with
            the audio and follows it. -->
@@ -917,6 +946,12 @@ details>summary:active{opacity:.72}
         <span class="spacer"></span>
         <button class="small tight" id="dl-audio" type="button">Download</button>
       </div>
+      <!-- WHAT THE RUN COST, which play() accepted as an argument and dropped
+           on the floor: the realtime factor, the fields the server ignored and
+           whether it clamped the speed were all computed and thrown away,
+           because the Speak tab had no host to put them in. #result-meta is
+           the Transcribe tab's. -->
+      <div class="hint tight" id="speak-meta" aria-live="polite"></div>
       <!-- The label says "Playback speed" and the other one says "Synthesis
            speed"; that is the whole distinction and it does not need a
            paragraph under it. Why there is no karaoke highlight on this tab
@@ -1355,24 +1390,74 @@ let HEALTH = null;
    against the gateway's /health instead, read HEALTH.backends.tts_long, found
    undefined, and hid itself on a machine with a runner sitting right there
    answering. Two readers, two spellings, one of them wrong. */
-function ttsLongHealth() {
+/* ONE READER FOR ALL THREE BACKENDS, for the reason in the paragraph above.
+   The path is written out once here and nowhere else, so a second spelling of
+   it cannot exist to be wrong. */
+function backendHealth(name) {
   const g = HEALTH && HEALTH.gateway && HEALTH.gateway.health;
-  const b = g && g.backends && g.backends.tts_long;
+  const b = g && g.backends && g.backends[name];
   return (b && b.health) || {};
+}
+function ttsLongHealth() { return backendHealth("tts_long"); }
+function kokoroHealth() { return backendHealth("tts"); }
+
+/* WHICH MACHINE THE NEXT CLONE JOB RUNS ON, read from the same document that
+   states the rates. tts-long hands a job to the GPU runner when the runner
+   will take work and the service it offers is chatterbox, and runs it on this
+   server's CPU otherwise. */
+function cloneBackend() {
+  const r = ttsLongHealth().runner;
+  return (r && r.can_run && r.service === "chatterbox") ? "runner" : "local";
+}
+
+/* THE RATE OF THE MACHINE THAT WILL RUN IT, or null.
+   realtime_factor_by_backend is keyed "local" and "runner". The merged
+   ttsLongHealth().realtime_factor beside it averages a NAS CPU at 0.21 with a
+   GPU at 0.7 and describes no machine that exists, which is why it is not the
+   one read here.
+
+   NULL IS A REAL ANSWER AND NOT A ZERO. The live payload carries
+   {"local": 0.21} and no "runner" key at all while the runner sits there able
+   to run, so the next job can go to a backend nothing has ever measured. */
+function cloneRate() {
+  const by = ttsLongHealth().realtime_factor_by_backend || {};
+  const f = by[cloneBackend()];
+  return f > 0 ? f : null;
+}
+
+/* WHAT THIS BROWSER HAS SEEN KOKORO DO, this session and no longer. Fed from
+   X-Realtime-Factor on a buffered response, which is the model's own compute
+   rate. DELIBERATELY NOT fed from the streamed wire rate: at the reader, a
+   late delta from a congested link and a late delta from a slow model are the
+   same absence of bytes, and folding the two into one number is how "the
+   connection is the limit" comes out as "the voice is slow". The streamed
+   rule measures the wire separately and says so separately. */
+let kokoroObserved = null;
+function kokoroRate() {
+  if (kokoroObserved > 0) return kokoroObserved;
+  const f = kokoroHealth().realtime_factor;
+  return f > 0 ? f : null;
 }
 
 const rate = {
   stt: () => CONFIG.stt_rtf_seed,
-  /* Chatterbox's own EMA, live from /health, corrected by every finished job.
-     The fallback is only reached when /health has not answered yet. */
+  /* Chatterbox's own EMA, live from /health, for the backend the next job
+     will actually use. The fallback is reached before /health has answered
+     and for a backend nothing has run on yet; 0.275 is what 449 characters
+     measured on this server's own CPU. */
   clone: () => {
-    const f = ttsLongHealth().realtime_factor;
+    const f = cloneRate();
     return f > 0 ? f : 0.275;
   },
-  /* A CONSTANT ON PURPOSE, unlike clone() above. tts-stack's /health has no
-     realtime_factor field at all, so there is nothing to read and nothing to
-     learn from; 1.83 is what a 899-character line measured. */
-  kokoro: () => 1.83,
+  /* tts-stack reports its own realtime factor now, so the constant is a
+     fallback rather than the only figure. 2.79 was measured on this stack at
+     TTS_THREADS=8; the same weights and the same 899-character line gave 1.83
+     at 4 threads. A rate is a property of a machine's configuration, so a
+     constant here is a claim about a machine and has to name it. */
+  kokoro: () => {
+    const f = kokoroRate();
+    return f > 0 ? f : 2.79;
+  },
 };
 
 /* THE TWO ENGINES DO NOT SPEAK AT THE SAME RATE, and one constant for both
@@ -1385,6 +1470,95 @@ const rate = {
 const CHARS_PER_SECOND = { kokoro: 16.3, clone: 12.0 };
 const speechSeconds = (text, engine) =>
   (text || "").length / (CHARS_PER_SECOND[engine] || CHARS_PER_SECOND.kokoro);
+
+/* ================================================ playing as it is made === */
+/*
+  THE RULE THAT OUTRANKS THE FEATURE: the player must never run dry.
+
+  Streaming cannot make the LAST word arrive sooner. Time to the last sample is
+  T/R whichever way the bytes are carried; only the first word moves. So audio
+  is played as it is made when, and only when, the reader can hear it through
+  to the end without the sound stopping, and never for symmetry with the engine
+  next to it.
+
+  THE ARITHMETIC. Let R be the generation rate as a multiple of realtime, T the
+  seconds of audio the whole request will produce, and t0 the lead taken before
+  playback starts. At wall time w, audio made is R*w and audio played is w - t0.
+  Playback never catches generation while R*w >= w - t0 for every w up to the
+  end, w_end = T/R, and the binding case is the end:
+
+      t0 >= T * (1/R - 1)
+
+  Written in the quantity this page can actually measure -- seconds of audio in
+  hand against seconds still to be made -- that is safe() below, and it is the
+  same inequality. Headroom falls at (1-R) for the (T-arrived)/R seconds the
+  generator still has to run, so its minimum is headroom - (1-R)(T-arrived)/R,
+  and requiring that to be non-negative gives the predicate. With arrived =
+  R*t0 at the start it reduces back to the line above.
+
+  MEASURED ON THIS STACK, and this is why the two engines get different
+  treatment rather than the same one twice:
+
+    Kokoro          2.79x at 8 threads   lead is NEGATIVE, play on delta one
+    Chatterbox CPU  0.230x               lead is 3.35*T: a minute of speech
+                                         wants three minutes twenty of silence
+                                         first, which is worse than waiting
+    Chatterbox GPU  0.644x to 0.746x     still under realtime, 20 to 33 s of
+                                         lead for a minute of audio
+
+  Both Chatterbox rates take the silent path. What streams there is everything
+  that can be shown the instant it is true: the segments committed, the
+  boundaries, the progress and the job's own measured rate.
+*/
+const STREAM = {
+  /* R is a mean over segments and segments vary, so the rule asks for a little
+     more lead than the bare arithmetic needs. */
+  safety: 1.15,
+  /* Never start on nothing, however fast the producer is. */
+  floor: 0.35,
+  /* R at submit is a prior rather than a measurement, and a rate only just
+     above realtime buys no lead at all. */
+  minRate: 1.3,
+  /* THE SUSTAIN CEILING, and it is a decision rather than an accident of where
+     the threshold fell. Past about ten seconds a silent wait stops reading as
+     latency and starts reading as a failure, whatever the arithmetic says is
+     survivable, and the bar plus the finished file serve the reader better.
+     It is also the clause that opens the gate on its own the day a runner
+     arrives above realtime. */
+  maxLead: 10,
+};
+
+/* Seconds of audio that have to be in hand before playback can start. */
+function leadSeconds(T, R) {
+  return R > 0 ? Math.max(0, T * (STREAM.safety / R - 1)) : Infinity;
+}
+
+/* THE ONLY THING THAT DECIDES WHETHER AUDIO STARTS OR CARRIES ON. Asked before
+   the first sample, on every delta and on every watchdog tick. No fixed delay,
+   no byte count, no "some buffer". */
+function safe(headroom, remaining, R) {
+  return R > 0 && headroom >= Math.max(0, remaining * (STREAM.safety / R - 1));
+}
+
+/* THE PRIOR, used only until the wire has said otherwise. Null is a real
+   answer: it means nothing has measured the backend this request will run on,
+   and the honest response to that is the silent path, never a default number.
+   tts-long's realtime_factor is an EMA seeded with RTF_SEED, so a figure there
+   can be a seed rather than a measurement -- which is exactly why the rate
+   measured on the wire outranks this one from the second delta on. */
+function priorRate(engine) {
+  return engine === "clone" ? cloneRate() : kokoroRate();
+}
+
+/* ONE FUNCTION, so the rule cannot get a second opinion. */
+function speechPlan(engine, text) {
+  const T = speechSeconds(text, engine);
+  const R = priorRate(engine);
+  if (!(R >= STREAM.minRate)) return { T, R, lead: Infinity, mode: "text" };
+  const lead = leadSeconds(T, R);
+  return { T, R, lead,
+           mode: (lead <= STREAM.maxLead && lead <= T / 2) ? "audio" : "text" };
+}
 
 /* ========================================================== the tabs === */
 
@@ -2563,15 +2737,21 @@ async function transcribeToken() {
   }
   const chosen = chosenGlossaries();
   if (chosen.length) query.set("glossary", chosen.join(","));
+  const signal = sttProgress();
   try {
     const response = await api("/ui/fetch?" + query.toString(), {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token: stt.token }) });
+      body: JSON.stringify({ token: stt.token }), signal });
+    const elapsed = sttSettled();
     await render(response, format);
+    sttMeasured(elapsed);
     note($("stt-note"), "", "");
   } catch (err) {
-    note($("stt-note"), "bad", "Transcription failed: " + err.message);
+    note($("stt-note"), err.name === "AbortError" ? "flat" : "bad",
+         err.name === "AbortError" ? "Stopped."
+         : "Transcription failed: " + err.message);
   } finally {
+    sttSettled();
     $("go-stt").disabled = false;
   }
 }
@@ -2672,12 +2852,88 @@ function renderCaptions(payload) {
   sttPlayback(display, cues, lines);
 }
 
+/* ------------------------------------------- the wait, made legible --- */
+/*
+  PARAKEET CANNOT STREAM AND THIS PAGE MUST NOT PRETEND IT CAN. asr.py sets
+  can_stream False on it, stream() raises, and openai_api.py refuses stream=true
+  by name with the measurement behind it: 5.07 s to the first and only output on
+  a 14.2 s clip, because the model encodes the whole waveform and then runs a
+  decode loop that emits nothing until it ends. The live document says so at
+  runtime too, at gateway.health.backends.stt.health.streaming, which is false
+  on this deployment. Nothing here reads that flag, because nothing on this tab
+  would behave differently if it flipped: the day a Whisper deployment sets it
+  true, transcript.text.delta frames already exist and the change is a route
+  change, not a rewrite of what is below.
+
+  So the eight-and-a-bit realtime factor makes a ten minute recording about 68
+  seconds of compute, and until now those 68 seconds were four words and a
+  disabled button. They become a determinate bar against duration / rate.stt()
+  -- the same expression paintFacts already quotes on the confirm card, from the
+  same function, so the figure during the wait is the figure the reader was
+  given before they pressed. Two opinions here would be worse than none.
+
+  Cutting a finished transcript into timed fake deltas is the one thing the
+  service already refuses to do, and a test pins the refusal.
+*/
+let sttAbort = null, sttTick = 0, sttStarted = 0;
+
+/* Seconds of media, or 0 when nothing has measured it: a file too large to
+   decode here has no duration, and an unprobed link has none either. */
+function sttSeconds() {
+  return stt.seconds || (stt.facts && stt.facts.duration) || 0;
+}
+
+function sttProgress() {
+  const budget = sttSeconds() > 0 ? sttSeconds() / rate.stt() : 0;
+  sttStarted = Date.now();
+  $("stt-progress").hidden = false;
+  clearInterval(sttTick);
+  const paint = () => {
+    const elapsed = (Date.now() - sttStarted) / 1000;
+    $("stt-bar").style.transform = "scaleX("
+      + (budget ? Math.min(0.95, elapsed / budget) : 0).toFixed(4) + ")";
+    /* THE SAME TWO SENTENCES THE JOBS BAR USES, so one reading serves both.
+       With no measured duration there is no bar and no estimate, only the
+       elapsed time, which is the honest form rather than a bar that moves at a
+       rate nobody measured. */
+    $("stt-elapsed").textContent = !budget ? clock(elapsed) + " in"
+      : elapsed > budget ? clock(elapsed) + " in, past the " + clock(budget) + " estimate"
+      : clock(elapsed) + " in, " + roughly(budget - elapsed) + " left · estimate";
+  };
+  paint();
+  sttTick = setInterval(paint, 250);
+  sttAbort = new AbortController();
+  return sttAbort.signal;
+}
+
+function sttSettled() {
+  clearInterval(sttTick); sttTick = 0;
+  $("stt-progress").hidden = true;
+  sttAbort = null;
+  return (Date.now() - sttStarted) / 1000;
+}
+
+/* WHAT IT ACTUALLY DID, on the run that just finished. Appended to the result
+   meta rather than fed back into rate.stt(): a rate learnt from one file and
+   quoted on the next is the learner this page removed, and the seed is 4% out
+   at the length where the answer matters. */
+function sttMeasured(elapsed) {
+  const seconds = sttSeconds();
+  if (!(seconds > 0) || !(elapsed > 0)) return;
+  $("result-meta").textContent += " · " + (seconds / elapsed).toFixed(1) + "× realtime";
+}
+
+/* Sixty-eight seconds with no way out is half of what makes a wait feel long.
+   One controller over the single await, on both routes that have one. */
+$("stt-cancel").addEventListener("click", () => { if (sttAbort) sttAbort.abort(); });
+
 $("go-stt").addEventListener("click", async () => {
   if (stt.token && !stt.file) return stt.captions ? captionsToken() : transcribeToken();
   const file = stt.prepared || stt.file;
   if (!file) return;
   $("go-stt").disabled = true;
   note($("stt-note"), "flat", "Transcribing…");
+  const signal = sttProgress();
 
   const native = $("x-route").value === "native" && !!stt.prepared;
   const form = new FormData();
@@ -2719,12 +2975,17 @@ $("go-stt").addEventListener("click", async () => {
     }
   }
   try {
-    const response = await api(path, { method: "POST", body: form });
+    const response = await api(path, { method: "POST", body: form, signal });
+    const elapsed = sttSettled();
     await render(response, format);
+    sttMeasured(elapsed);
     note($("stt-note"), "", "");
   } catch (err) {
-    note($("stt-note"), "bad", "Transcription failed: " + (err.message || err));
+    note($("stt-note"), err.name === "AbortError" ? "flat" : "bad",
+         err.name === "AbortError" ? "Stopped."
+         : "Transcription failed: " + (err.message || err));
   } finally {
+    sttSettled();
     $("go-stt").disabled = false;
   }
 });
@@ -3750,12 +4011,21 @@ $("voice").addEventListener("change", onVoiceChange);
 function syncSpeakControls() {
   const v1 = !$("tts-expert-fast").hidden && $("x-troute").value === "v1";
   $("x-stream").disabled = !v1;
+  /* THE STREAMED PLAYER TAKES pcm AND ONLY pcm, so on a run that will be
+     played as it is made the format control cannot be honoured and is greyed
+     rather than hidden -- the same idiom as the three controls below it.
+     Asked of speechPlan rather than of the stream control alone, because a
+     stream the arithmetic sends down the silent path does honour the format:
+     nothing is decoded in the browser there. */
+  $("x-tfmt").disabled = v1 && $("x-stream").value === "sse"
+    && speechPlan("kokoro", $("text").value).mode === "audio";
   $("lang").disabled = v1;
   $("addseg").disabled = v1;
   $("segments").querySelectorAll("input,select,button")
     .forEach(control => control.disabled = v1);
 }
 $("x-troute").addEventListener("change", () => { syncSpeakControls(); estimate(); });
+$("x-stream").addEventListener("change", syncSpeakControls);
 $("delvoice").addEventListener("click", async () => {
   const voice = currentVoice();
   if (voice.kind !== "clone") return;
@@ -3793,6 +4063,14 @@ $("lang").addEventListener("change", () => loadVoices().then(showDetected));
 /* True while a request is in flight, so the rule below cannot re-enable the
    button under a running one the moment somebody types. */
 let speaking = false;
+/* AND TRUE WHILE THE LAST RUN'S MESSAGE STILL MATTERS. estimate() runs on
+   every keystroke and cleared #speak-note unconditionally, so a message the
+   run left there was wiped by the finally that called estimate() one line
+   later. That took out every failure on this tab -- the error the catch had
+   just written was gone before it painted -- and it would have taken out "The
+   stream ended early. 8 s were kept." on the one path where the file in the
+   player is short and the reader has to be told. The next run clears it. */
+let speakHeld = false;
 
 function estimate() {
   const text = $("text").value;
@@ -3818,10 +4096,15 @@ function estimate() {
      button rather than behind it. */
   $("go-tts").disabled = speaking || voice.kind === "new"
                        || !(text.trim() || segments());
+  /* The format control's greying depends on the length of the text, through
+     speechPlan, so it is re-asked wherever the text changes rather than only
+     when the route does. */
+  syncSpeakControls();
 
   if (voice.kind !== "clone") {
     $("go-tts").textContent = "Speak";
-    note($("speak-note"), "", "");
+    /* NOT WHILE A RUN IS IN FLIGHT, and not over what the last one said. */
+    if (!speaking && !speakHeld) note($("speak-note"), "", "");
   } else {
     const compute = speechSeconds(text, "clone") / rate.clone();
     /* THE ETA IS IN THE BUTTON. Nobody presses "Generate (about 36 minutes)"
@@ -4002,12 +4285,14 @@ $("go-tts").addEventListener("click", async () => {
   const text = $("text").value;
   if (!text.trim() && !segments()) return;
   speaking = true;
+  speakHeld = false;
   $("go-tts").disabled = true;
   try {
     if (voice.kind === "clone") await queueJob(voice.name, text);
     else await speakNow(voice.name, text);
   } catch (err) {
     note($("speak-note"), "bad", err.message || String(err));
+    speakHeld = true;
   } finally {
     /* Through estimate(), so the button comes back only if there is still
        something to say -- and comes back with the right label on it. */
@@ -4016,9 +4301,361 @@ $("go-tts").addEventListener("click", async () => {
   }
 });
 
+/* --------------------------------------------- two sinks, one rule --- */
+/*
+  ONE INTERFACE, TWO IMPLEMENTATIONS, CHOSEN BY speechPlan AT SUBMIT TIME:
+  open(), commit(bytes), close(reason). audioSink makes a sound; textSink never
+  does. A sink NEVER changes kind after the first sample has been scheduled,
+  because going silent mid-sentence is worse than either behaviour on its own.
+*/
+
+/* tts-stack's own output rate, so nothing is resampled on the way in. */
+const PCM_RATE = 24000;
+
+/* MADE AND RESUMED INSIDE THE CLICK, never inside the sink. A context
+   constructed outside a gesture starts suspended in Chrome and Safari, and the
+   first delta then plays into silence while the headroom arithmetic goes on
+   saying everything is fine. Returning null is a first-class answer: the page
+   takes the buffered path and promises nothing. */
+/* ONE CONTEXT FOR THE PAGE, not one per press. Chrome allows about six per
+   document and refuses the seventh, so a context made per run turns the
+   seventh Speak of a session into a silent failure. Resumed again on every
+   press because the browser is free to suspend it between them. */
+let speakCtx = null;
+function openAudio() {
+  try {
+    const Ctor = window.AudioContext || window.webkitAudioContext;
+    if (!Ctor) return null;
+    if (!speakCtx || speakCtx.state === "closed") {
+      speakCtx = new Ctor({ sampleRate: PCM_RATE });
+    }
+    if (speakCtx.resume) speakCtx.resume();
+    return speakCtx;
+  } catch { return null; }
+}
+
+/* 44 bytes of RIFF in front of the pcm the deltas carried. tts-stack's
+   audio_out.py records that its hand-written header is byte-identical to
+   libsndfile's and that its pcm and wav samples match exactly, so the file the
+   reader downloads after a streamed run is the file a buffered wav request
+   would have produced. The bytes themselves are untouched: this prepends a
+   header to a copy and adds nothing to the audio. */
+function wavFrom(chunks, hz) {
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const header = new ArrayBuffer(44);
+  const view = new DataView(header);
+  const ascii = (at, text) => {
+    for (let i = 0; i < text.length; i++) view.setUint8(at + i, text.charCodeAt(i));
+  };
+  ascii(0, "RIFF");            view.setUint32(4, 36 + total, true);
+  ascii(8, "WAVEfmt ");        view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, hz, true); view.setUint32(28, hz * 2, true);
+  view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  ascii(36, "data");           view.setUint32(40, total, true);
+  return new Blob([header, ...chunks], { type: "audio/wav" });
+}
+
+/* The live sink, so the Stop button and the <audio> element can reach it.
+   Cleared by the next run rather than at the end of this one: the graph goes
+   on making a sound after the response has finished arriving. */
+let speakSink = null;
+
+/*
+  THE SINK THAT MAKES A SOUND.
+
+  AudioBufferSourceNode on an absolute timeline, and not MSE: the byte stream
+  format registry admits only WebM, ISO BMFF, MPEG-2 TS and MPEG audio, so raw
+  pcm cannot be appended to a SourceBuffer at all, and the one containerless
+  option is refused by Firefox. Not AudioWorklet either: this page's CSP is
+  script-src 'self' 'unsafe-inline' with no blob:, and a worklet module load
+  falls back through worker-src to child-src to script-src, so addModule of an
+  object URL is blocked. Two tests pin that header. createBuffer and
+  createBufferSource need no CSP change and no library.
+
+  pcm AND ONLY pcm. Streamed wav writes a RIFF size of 8 and a data size of 0;
+  mp3, opus, aac and flac carry encoder priming and padding, so a delta
+  boundary is not a segment boundary and a delta count is not a segment count.
+  For pcm, _RawEncoder.write returns the piece whole and close() returns
+  nothing, so one delta is one synthesis chunk and its byte length over
+  2 x 24000 is that chunk's exact duration.
+*/
+function audioSink(ctx, plan) {
+  const hz = ctx.sampleRate;
+  const made = [];             /* {buf, at}, in the piece's own timeline */
+  const live = [];             /* scheduled nodes, so a stop can reach them */
+  let arrived = 0, deltas = 0, firstAt = 0, lastAt = 0, carry = null;
+  let origin = 0, nextStart = 0, held = 0;
+  let playing = false, closed = false, failed = false, dry = false, quiet = false;
+  let watch = 0, said = "";
+
+  /* getOutputTimestamp reports the frame the output device is actually
+     rendering, which is the honest position. currentTime is the scheduler's
+     clock and runs ahead of it. */
+  function clockNow() {
+    const stamp = ctx.getOutputTimestamp ? ctx.getOutputTimestamp() : null;
+    return (stamp && stamp.contextTime) || ctx.currentTime;
+  }
+  function position() {
+    return playing ? Math.min(arrived, Math.max(0, clockNow() - origin)) : held;
+  }
+  /* Seconds of audio scheduled and not yet played. Before playback starts it
+     is simply everything that has arrived. */
+  function headroom() {
+    return playing ? Math.max(0, nextStart - clockNow()) : arrived;
+  }
+  /* MEASURED ON THE WIRE, and it outranks health from the second delta on.
+     pcm makes arrival self-describing, so this figure includes the network and
+     both proxies rather than the model alone. One delta measures warm-up. */
+  function wireRate() {
+    const elapsed = (Date.now() - firstAt) / 1000;
+    return deltas >= 2 && elapsed > 0 ? arrived / elapsed : null;
+  }
+  function rateNow() { const w = wireRate(); return w > 0 ? w : plan.R; }
+  /* Written only when it CHANGES. #speak-note is aria-live, and a sentence
+     rewritten five times a second announces five times a second. */
+  function say(kind, words) {
+    if (said === words) return;
+    said = words;
+    note($("speak-note"), kind, words);
+  }
+  function paint() {
+    $("speak-bar").style.transform = "scaleX("
+      + Math.min(0.98, plan.T > 0 ? arrived / plan.T : 0).toFixed(4) + ")";
+    $("speak-lead").textContent =
+      Math.round(arrived) + " s of about " + Math.round(plan.T) + " s made";
+  }
+  function stopScheduled() {
+    for (const src of live) { try { src.stop(); } catch {} }
+    live.length = 0;
+  }
+  function hold() {
+    if (!playing) return;
+    held = position();
+    playing = false;
+    stopScheduled();
+  }
+  function schedule(piece, floorAt) {
+    const when = origin + piece.at;
+    const end = when + piece.buf.duration;
+    if (end <= floorAt) return;
+    const src = ctx.createBufferSource();
+    src.buffer = piece.buf;
+    src.connect(ctx.destination);
+    /* ABSOLUTE, AND THAT IS THE WHOLE TRICK. pcm has no priming and no
+       padding, so consecutive buffers abut sample-exactly. Scheduling against
+       ctx.currentTime inside the loop -- a clock that advances while the loop
+       runs -- is what produces overlap and clicks. */
+    src.start(Math.max(when, floorAt), Math.max(0, floorAt - when));
+    /* A free "the queue emptied" signal, on top of the watchdog. */
+    src.onended = () => {
+      const at = live.indexOf(src);
+      if (at >= 0) live.splice(at, 1);
+      if (!live.length && playing && !closed && !dry) ranDry(rateNow());
+    };
+    live.push(src);
+    nextStart = end;
+  }
+  function startFrom() {
+    const base = ctx.currentTime + 0.05;
+    /* Seeded ONCE per start, and every piece is placed against it. */
+    origin = base - held;
+    nextStart = origin + held;
+    for (const piece of made) schedule(piece, base);
+    playing = true;
+  }
+  function push(bytes) {
+    if (carry) {
+      const joined = new Uint8Array(carry.length + bytes.length);
+      joined.set(carry); joined.set(bytes, carry.length);
+      bytes = joined; carry = null;
+    }
+    /* A ONE-BYTE CARRY, defensively. For pcm a delta is a whole segment and is
+       therefore an even number of bytes, but a proxy is free to split a frame,
+       and half a sample desynchronises every sample after it. */
+    if (bytes.length & 1) { carry = bytes.slice(-1); bytes = bytes.subarray(0, -1); }
+    if (!bytes.length) return;
+    const samples = bytes.length >> 1;
+    /* DataView, not Int16Array: a subarray can start on an odd byte offset and
+       Int16Array would throw on it. */
+    const view = new DataView(bytes.buffer, bytes.byteOffset, samples * 2);
+    const buf = ctx.createBuffer(1, samples, PCM_RATE);
+    const channel = buf.getChannelData(0);
+    for (let i = 0; i < samples; i++) channel[i] = view.getInt16(i * 2, true) / 32768;
+    made.push({ buf, at: arrived });
+    arrived += buf.duration;
+  }
+  /* Seconds since the last delta landed. The rule below is the belt to
+     safe()'s braces, and this is what it is made of. */
+  function gapSeconds() { return lastAt ? (Date.now() - lastAt) / 1000 : 0; }
+  /* THE RULE HAVING BEEN WRONG, made visible rather than papered over. */
+  function ranDry(R) {
+    dry = true;
+    hold();
+    say("warn", "The voice fell behind. Waiting for the rest.");
+    speakHeld = true;
+    $("speak-meta").textContent = "The voice fell behind at "
+      + (R > 0 ? R.toFixed(1) : "?") + "× realtime on the wire.";
+  }
+  function tick() {
+    if (failed || quiet || dry) { paint(); return; }
+    /* A SUSPENDED CONTEXT IS THE BROWSER PAUSING, not the model falling
+       behind. Saying the wrong one of those teaches people to distrust the
+       right one. */
+    if (ctx.state !== "running") { say("flat", "Paused."); return; }
+    const R = rateNow();
+    const remaining = Math.max(0, plan.T - arrived);
+    if (!playing) {
+      if (arrived >= STREAM.floor && safe(headroom(), remaining, R)) {
+        startFrom();
+        say("flat", "Playing as it is made.");
+      }
+      paint();
+      return;
+    }
+    if (!closed && headroom() <= 0) { ranDry(R); return; }
+    /* PRE-EMPTED, NOT REPORTED. The graph is stopped while it still has audio
+       in hand, at a boundary, so nothing is ever heard to break. A stated
+       pause is recoverable; a stutter is not.
+
+       TWO CONDITIONS, AND THE SECOND IS NOT THE DELTA SIZE. safe() is the
+       arithmetic and it is the rule; but R is a MEAN since the first delta, so
+       a producer that ran fast and then stopped dead keeps a mean above
+       realtime while the buffer drains, and the arithmetic goes on saying all
+       is well until the sound stops. The honest second reading is the gap: if
+       nothing has arrived for longer than the audio still in hand, the next
+       delta is already too late whatever the mean says. Comparing headroom
+       with the largest delta seen instead was the first version and it was
+       wrong -- at the moment playback starts headroom IS one delta, so it
+       paused a hundred milliseconds after starting, on the fast engine, which
+       is the stutter this whole rule exists to prevent. */
+    if (!closed && (!safe(headroom(), remaining, R)
+                    || headroom() <= gapSeconds())) {
+      hold();
+      say("flat", "Paused to let the voice catch up.");
+    }
+    paint();
+  }
+
+  return {
+    open() {
+      $("speak-progress").hidden = false;
+      $("speak-stop").hidden = false;
+      $("player").hidden = true;
+      $("playrow").hidden = true;
+      $("speak-meta").textContent = "";
+      paint();
+      /* setInterval and NOT requestAnimationFrame: rAF is throttled to a stop
+         in a hidden tab and the audio goes on playing there. */
+      watch = setInterval(tick, 200);
+    },
+    commit(bytes) {
+      /* WRAPPED, because playing as it is made is an enhancement over a route
+         that already works and must never be able to take it down. A failure
+         here stops the sound and lets the buffered path finish and play. */
+      try {
+        if (failed) return;
+        if (!deltas) firstAt = Date.now();
+        deltas++;
+        lastAt = Date.now();
+        const before = made.length;
+        push(bytes);
+        if (playing && !dry && !quiet) {
+          for (let i = before; i < made.length; i++) schedule(made[i], ctx.currentTime);
+        }
+        tick();
+      } catch (err) {
+        failed = true;
+        stopScheduled();
+        playing = false;
+        say("flat", "");
+      }
+    },
+    close() {
+      closed = true;
+      clearInterval(watch); watch = 0;
+      $("speak-progress").hidden = true;
+    },
+    /* STOP MEANS STOP THE SOUND, NOT THROW THE WORK AWAY. The body is still
+       read to the end. Abandoning the reader trips tts-long's _sse_events
+       finally, which cancels a queued or running job, and the reader gets the
+       whole file at the end either way. visibilitychange never calls this. */
+    silence() { quiet = true; hold(); say("flat", ""); },
+    wrap(chunks) { return wavFrom(chunks, hz); },
+    report() {
+      const w = wireRate();
+      return w > 0 ? w.toFixed(1) + "× on the wire" : "";
+    },
+  };
+}
+
+/*
+  THE SINK THAT MAKES NO SOUND, and it is the honest answer rather than the
+  lesser one. It is chosen whenever playback would catch generation, which on
+  this stack is every Chatterbox rate on both machines. It cannot run dry
+  because it plays nothing: the file goes to the unchanged play() when it is
+  whole, and what streams meanwhile is the progress.
+*/
+function textSink(plan) {
+  let started = 0, timer = 0;
+  const budget = plan.R > 0 ? plan.T / plan.R : plan.T / rate.kokoro();
+  function paint() {
+    const elapsed = (Date.now() - started) / 1000;
+    $("speak-bar").style.transform = "scaleX("
+      + (budget ? Math.min(0.95, elapsed / budget) : 0).toFixed(4) + ")";
+    $("speak-lead").textContent = budget && elapsed > budget
+      ? clock(elapsed) + " in, past the " + clock(budget) + " estimate"
+      : clock(elapsed) + " in, " + roughly(budget - elapsed) + " left · estimate";
+  }
+  return {
+    open() {
+      started = Date.now();
+      $("speak-progress").hidden = false;
+      /* Nothing to stop: no sound was started and the request runs to the end
+         whichever way. */
+      $("speak-stop").hidden = true;
+      paint();
+      timer = setInterval(paint, 250);
+    },
+    commit() {},
+    close() {
+      clearInterval(timer); timer = 0;
+      $("speak-progress").hidden = true;
+      $("speak-stop").hidden = false;
+    },
+    silence() {},
+    wrap: null,
+    report() { return ""; },
+  };
+}
+
+$("speak-stop").addEventListener("click", () => { if (speakSink) speakSink.silence(); });
+/* ONE VOICE AT A TIME, and this is the whole guard. The <audio> element with
+   the assembled file and the Web Audio graph can both make a sound, and
+   forgetting this is the most likely audible bug in the design. */
+$("player").addEventListener("play", () => { if (speakSink) speakSink.silence(); });
+
 async function speakNow(voice, text) {
   const useV1 = $("x-troute").value === "v1";
-  const format = $("x-tfmt").value || (useV1 ? "mp3" : "wav");
+  /* THE MODE IS DECIDED BEFORE THE REQUEST IS BUILT, so a browser with no
+     usable AudioContext never asks for pcm and the format the reader chose is
+     honoured. openAudio() runs here, in the task the click started and before
+     the first await, because that is the only place a context starts running
+     rather than suspended.
+
+     THE SPEAK TAB NEVER OPENS AN SSE STREAM AGAINST tts-long. Only Kokoro on
+     /v1 reaches this, and a cloned voice goes to POST /jobs: closing that
+     stream cancels the job. */
+  const streamed = useV1 && $("x-stream").value === "sse";
+  const plan = streamed ? speechPlan("kokoro", text) : null;
+  const ctx = plan && plan.mode === "audio" ? openAudio() : null;
+  const sink = !streamed ? null : ctx ? audioSink(ctx, plan) : textSink(plan);
+  if (speakSink) speakSink.silence();
+  speakSink = sink;
+  /* pcm is forced only where it is played as it is made, and syncSpeakControls
+     greys the format control to say so. */
+  const format = ctx ? "pcm" : ($("x-tfmt").value || (useV1 ? "mp3" : "wav"));
   const speed = Number($("speed").value);
   /* Both read INSIDE the branch that sends them. They used to be read here and
      used on one branch, which is how the Language control and the segments
@@ -4058,7 +4695,36 @@ async function speakNow(voice, text) {
   const type = response.headers.get("content-type") || "";
   let blob;
   if (type.includes("event-stream")) {
-    blob = await collectSSE(response, format);
+    /* Guarded: a service is free to answer event-stream to a request that did
+       not ask for one, and that must still play rather than throw. */
+    if (sink) sink.open();
+    try {
+      blob = await collectSSE(response, format, sink);
+    } catch (err) {
+      if (sink) sink.close("failed");
+      if (!(err.chunks && err.chunks.length)) throw err;
+      /* WHAT ARRIVED IS KEPT, AND THE READER IS TOLD IT IS SHORT. A truncated
+         file that looks complete is the failure to avoid, so the note is what
+         makes this safe rather than the recovery itself. X-Job-Id is on every
+         streamed response and survives both proxies, so the work already
+         written to disk is reachable from the Jobs tab instead of being run
+         again from the start. */
+      const wrap = sink && sink.wrap;
+      play(wrap ? sink.wrap(err.chunks)
+                : new Blob(err.chunks, { type: "audio/" + format }),
+           "speech." + (wrap ? "wav" : format));
+      let kept = 0;
+      for (const piece of err.chunks) kept += piece.length;
+      const seconds = format === "pcm" ? Math.round(kept / 2 / PCM_RATE) : 0;
+      const jobId = response.headers.get("x-job-id");
+      speakHeld = true;
+      note($("speak-note"), "warn", `The stream ended early.${seconds
+        ? " " + seconds + " s were kept." : " What arrived was kept."}${jobId
+        ? " The rest is on the Jobs tab." : ""}`);
+      if (jobId) { adopt(jobId); refreshJobs(); }
+      return;
+    }
+    if (sink) sink.close("done");
   } else if (type.includes("json")) {
     /* THE THIRD ANSWER. /v1/audio/speech can reply 200-audio, 200-event-stream
        or 202-with-JSON, and the boundary is arithmetic rather than a constant,
@@ -4083,41 +4749,71 @@ async function speakNow(voice, text) {
 
   const meta = [];
   const rtf = response.headers.get("x-realtime-factor");
-  if (rtf) meta.push(Number(rtf).toFixed(1) + "× realtime");
+  if (rtf) {
+    meta.push(Number(rtf).toFixed(1) + "× realtime");
+    /* THE MODEL'S OWN RATE, seeded into the prior the next streamed run reads.
+       A buffered response is the only place this header can appear: on a
+       stream the headers leave before generation starts. */
+    if (Number(rtf) > 0) kokoroObserved = Number(rtf);
+  }
   const ignored = response.headers.get("x-ignored-parameters");
   /* A field that is accepted and ignored is the worst kind, so it is shown. */
   if (ignored) meta.push("ignored: " + ignored);
   if (response.headers.get("x-speed-clamped")) meta.push("the server clamped speed");
-  play(blob, meta.join(" · "), "speech." + format);
+  if (sink && sink.report()) meta.push(sink.report());
+  /* WRITTEN HERE AND NOT INSIDE play(). play() took a `meta` argument and
+     dropped it, because the Speak tab had no host for it; #result-meta belongs
+     to the Transcribe tab. The host is written to by id from the call site, so
+     play() itself stays the four lines a test slices it as. */
+  $("speak-meta").textContent = meta.join(" · ");
+  play(blob, "speech." + (format === "pcm" ? "wav" : format));
 }
 
-async function collectSSE(response, format) {
+async function collectSSE(response, format, sink) {
   /* Bare `data:` frames, a blank line after every one including the last, and
-     no [DONE] sentinel — so the end of the stream is the end of the stream. */
+     no [DONE] sentinel — so the end of the stream is the end of the stream.
+     A line that is not a `data:` line is skipped, which is what makes the `:`
+     keepalive comment tts-long sends every TTS_SSE_KEEPALIVE seconds free.
+
+     THE CONCATENATION IS UNCHANGED. Every delta is still kept in arrival order
+     and nothing is added to the bytes; the sink is handed the same array it
+     already builds. A tts-long test pins the streamed deltas byte-equal to the
+     buffered body, and that property is what makes the wav header safe. */
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   const chunks = [];
   let buffer = "";
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let cut;
-    while ((cut = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, cut).trim();
-      buffer = buffer.slice(cut + 1);
-      if (!line.startsWith("data:")) continue;
-      let frame; try { frame = JSON.parse(line.slice(5)); } catch { continue; }
-      if (frame.error) throw new Error(reason(frame, "the audio stream failed"));
-      if (frame.type === "speech.audio.delta" && frame.audio) {
-        const raw = atob(frame.audio);
-        const bytes = new Uint8Array(raw.length);
-        for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-        chunks.push(bytes);
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let cut;
+      while ((cut = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, cut).trim();
+        buffer = buffer.slice(cut + 1);
+        if (!line.startsWith("data:")) continue;
+        let frame; try { frame = JSON.parse(line.slice(5)); } catch { continue; }
+        if (frame.error) throw new Error(reason(frame, "the audio stream failed"));
+        if (frame.type === "speech.audio.delta" && frame.audio) {
+          const raw = atob(frame.audio);
+          const bytes = new Uint8Array(raw.length);
+          for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+          chunks.push(bytes);
+          if (sink) sink.commit(bytes);
+        }
       }
     }
+  } catch (err) {
+    /* THE BYTES ALREADY IN HAND GO WITH THE FAILURE. A stream that dies
+       half-way still made audio, and discarding it is how a reader loses
+       thirty seconds of speech to a dropped connection or to a runner that
+       yielded after delivering segments. */
+    err.chunks = chunks;
+    throw err;
   }
-  return new Blob(chunks, { type: "audio/" + (format === "mp3" ? "mpeg" : format) });
+  return sink && sink.wrap ? sink.wrap(chunks)
+       : new Blob(chunks, { type: "audio/" + (format === "mp3" ? "mpeg" : format) });
 }
 
 /* Builds the highlight for the Speak tab, from the segments this page sent and
@@ -4166,7 +4862,7 @@ function speakCues(parts, plain, header) {
 }
 
 let lastAudio = null;
-function play(blob, meta, name) {
+function play(blob, name) {
   if (lastAudio) URL.revokeObjectURL(lastAudio.url);
   const url = URL.createObjectURL(blob);
   lastAudio = { url, name };
@@ -4194,6 +4890,9 @@ $("dl-audio").addEventListener("click", () => {
 const TTL = 86400;
 const jobs = new Map();
 let jobTimer = null, poller = 0;
+/* How many boundaries each job had published at the previous poll. */
+const OFFSETS_SEEN = new Map();
+let growing = false;
 
 function remembered() { return store.get("jobs", []); }
 function adopt(id, params) {
@@ -4341,13 +5040,21 @@ function renderJobs() {
                   : job.created_at ? now - job.created_at : 0;
     const budget = job.estimated_seconds || 0;
     const live = job.status === "queued" || job.status === "running";
-    /* HONEST ABOUT THE BAR. GET /jobs/{id} carries `chunks` but no per-chunk
-       counter, so the only bar available is time against estimated_seconds. It
-       is capped at 95% until the job actually says done, and it relabels
-       itself when it overruns: a bar that reaches the end and sits there
-       teaches people to distrust every bar you ever show them. The real fix is
-       a completed-chunk counter in tts-long's worker, which is a handful of
-       lines and would turn this estimate into a fact. */
+    /* THE BAR IS A COUNT NOW, NOT A CLOCK, and that is the whole of the clone
+       half of "feels faster". tts-long publishes `offsets` as it makes them --
+       one exact boundary per segment, an accumulated sample count rather than
+       duration x (chars so far / chars total) -- so a live job can report what
+       it has actually produced. The time-against-estimate bar stays as the
+       fallback for the window before the first segment lands, capped at 95%
+       and relabelled on overrun, because a bar that reaches the end and sits
+       there teaches people to distrust every bar you ever show them.
+
+       PARTIAL BOUNDARIES ARE A LEGAL STATE HERE, and only here: offsets.length
+       is at most job.chunks and every entry in it is a fact the synthesiser
+       measured. Nothing is interpolated to fill the gap, and the count is not
+       turned into a highlight -- the passage would have to be rebuilt on every
+       poll to light it, which is the defect the in-place highlight fix
+       removed. */
     /* The server's preview, or this browser's own memory of what it asked
        for. The second matters for a job submitted before the preview existed,
        and costs nothing -- adopt() already keeps the parameters for Retry. */
@@ -4365,11 +5072,24 @@ function renderJobs() {
        this string is innerHTML, and a comment inside it ships into the DOM
        once per row. */
     const audio = hasAudio(job);
-    const percent = budget ? Math.min(95, elapsed / budget * 100) : 0;
+    const madeCount = Array.isArray(job.offsets) ? job.offsets.length : 0;
+    const counting = live && madeCount > 0 && job.chunks > 0;
+    /* SECONDS OF AUDIO ALREADY MADE, from the last boundary published. */
+    const madeSeconds = madeCount ? job.offsets[madeCount - 1] : 0;
+    /* THIS JOB'S OWN REALTIME FACTOR, live, and it corrects the remaining
+       estimate without waiting for the server's EMA to finish the job. */
+    const wire = counting && elapsed > 0 && madeSeconds > 0
+               ? madeSeconds / elapsed : null;
+    /* Extrapolated from segments done rather than from any rate: the job is
+       its own best evidence once it has produced anything. */
+    const leftBySegments = counting
+      ? elapsed * (job.chunks - madeCount) / madeCount : null;
+    const percent = counting ? Math.min(95, madeCount / job.chunks * 100)
+                  : budget ? Math.min(95, elapsed / budget * 100) : 0;
     const over = budget && elapsed > budget;
-    if (live && budget) {
-      const left = budget - elapsed;
-      if (soonest === null || left < soonest) soonest = left;
+    if (live) {
+      const left = counting ? leftBySegments : budget ? budget - elapsed : null;
+      if (left !== null && (soonest === null || left < soonest)) soonest = left;
     }
     return `<div class="job ${expired ? "expired" : ""}">
       <div class="top">
@@ -4381,9 +5101,14 @@ function renderJobs() {
           job.queued_ahead ? " · " + job.queued_ahead + " ahead" : ""}</span>
       </div>
       ${live ? `<div class="bar-track"><div class="bar-fill" style="transform:scaleX(${(percent / 100).toFixed(4)})"></div></div>
-        <div class="hint">${over
-          ? `${clock(elapsed)} in, past the ${clock(budget)} estimate`
-          : `${clock(elapsed)} in, ${roughly(budget - elapsed)} left`} · estimate</div>` : ""}
+        <div class="hint">${counting
+          ? `${madeCount} of ${job.chunks} segments · ${roughly(leftBySegments)} left · measured`
+          : over
+          ? `${clock(elapsed)} in, past the ${clock(budget)} estimate · estimate`
+          : `${clock(elapsed)} in, ${roughly(budget - elapsed)} left · estimate`}</div>` : ""}
+      ${job.status === "queued" && madeCount ? `<div class="hint">Waiting for the GPU.</div>` : ""}
+      ${wire ? `<div class="hint">${madeSeconds.toFixed(0)} s of audio so far ·
+        ${wire.toFixed(3)}× realtime</div>` : ""}
       ${preview ? `<details class="jobtext"${openRows.has(job.id) ? " open" : ""}><summary>${esc(preview)}</summary>
         <div class="body" data-text="${esc(job.id)}">Loading…</div></details>`
         : job.recovered ? `<div class="hint">The server recovered this job after a
@@ -4631,6 +5356,14 @@ async function refreshJobs() {
       : was);
   }
   store.set("jobs", keep);
+  /* GREW SINCE THE LAST POLL, measured here because this is the only place
+     that sees both the old counts and the new ones. Read by interval(). */
+  growing = false;
+  for (const [id, job] of jobs) {
+    const boundaries = Array.isArray(job.offsets) ? job.offsets.length : 0;
+    if (job.status === "running" && boundaries > (OFFSETS_SEEN.get(id) || 0)) growing = true;
+    OFFSETS_SEEN.set(id, boundaries);
+  }
   for (const [id, job] of jobs) {
     const was = before.get(id);
     if (was && was.status !== job.status && (job.status === "done" || job.status === "failed")) {
@@ -4668,6 +5401,16 @@ function interval() {
   const live = [...jobs.values()].filter(j => j.status === "queued" || j.status === "running");
   if (!live.length) return 30000;
   if (document.visibilityState === "hidden") return 30000;
+  /* HELD AT TWO SECONDS WHILE A JOB IS ACTUALLY PRODUCING. The ladder used to
+     drop to ten seconds once a job was thirty seconds old, which is most of a
+     clone job's life, so boundaries that now arrive per segment would have
+     been delivered to the reader in ten-second jumps.
+
+     THREE CLAUSES, ALL THREE NEEDED: running, its boundary list grew since the
+     last poll, and the tab is visible. A stalled job stops growing and falls
+     back to the ladder on its own, which is what keeps a thirty-six minute job
+     off a thousand polls against a NAS that is also running CPU Parakeet. */
+  if (growing) return 2000;
   const youngest = Math.min(...live.map(j =>
     (Date.now() / 1000) - (j.started_at || j.created_at || 0)));
   return youngest < 30 ? 2000 : youngest < 300 ? 10000 : 30000;

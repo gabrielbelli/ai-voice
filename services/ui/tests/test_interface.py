@@ -404,7 +404,7 @@ def test_every_status_host_announces_what_it_writes():
     attribute. polite and not assertive: they are status, and #stt-note
     sometimes contains the Stop button."""
     hosts = ("stt-note", "speak-note", "clipnote", "cliplinkhint",
-             "linkhint", "jobplaying", "result-meta")
+             "linkhint", "jobplaying", "result-meta", "speak-meta")
     for host in hosts:
         tag = HTML[HTML.index(f'id="{host}"'):]
         tag = tag[:tag.index(">")]
@@ -718,15 +718,41 @@ def test_every_rate_on_this_page_is_one_that_was_measured():
     (the 8.5 seed is 4% out and stays), Kokoro 1.83x where the page said 1.3,
     Chatterbox 0.275x where the page fell back to 0.138. The last two were 41%
     and 100% out, and both were quoted from a timeout comment in the gateway.
+
+    THE KOKORO FIGURE MOVED, AND THAT IS WHY THIS DOCSTRING CHANGED RATHER THAN
+    THE TEST BEING WEAKENED. 1.83x was measured at TTS_THREADS=4. The same
+    weights and the same 899-character line measured 2.79x at 8, so a rate here
+    is a claim about a machine's configuration and has to name the machine and
+    the thread count that produced it. Both are true; neither is the rate.
+
+    So the constant is a fallback now and not the only figure: tts-stack
+    reports its own realtime factor, absent until it has actually synthesised
+    something, and the page prefers what it has seen over what it assumed. The
+    property this test defends is unchanged -- every number in this table is
+    one somebody measured, and each says where.
     """
-    # Scoped to the rate table. Both old figures still appear elsewhere in the
+    # Scoped to the rate table. The old figures still appear elsewhere in the
     # file, quoted inside comments that record what they were and why they
     # were wrong -- which is the point of keeping them.
     table = HTML[HTML.index("const rate = {"):HTML.index("const CHARS_PER_SECOND")]
-    assert "kokoro: () => 1.83" in table, "the measured Kokoro rate"
+    assert "return f > 0 ? f : 2.79;" in table, "the measured Kokoro fallback"
+    assert "TTS_THREADS=8" in table, "a rate constant that does not name its machine"
     assert "1.3," not in table, "the quoted 1.3 is back in the rate table"
     assert "return f > 0 ? f : 0.275;" in table, "the measured clone fallback"
     assert "0.138" not in table, "the old clone fallback is back"
+    # AND THE PER-BACKEND READ, which is the whole reason the table moved. The
+    # merged realtime_factor averages a NAS CPU at 0.21 with a GPU at 0.7 and
+    # describes no machine that exists, so the rate the rule reads is keyed on
+    # the backend the next job will actually run on.
+    assert "realtime_factor_by_backend" in HTML
+    assert "function cloneBackend()" in HTML
+    assert 'r.service === "chatterbox"' in HTML
+    # A backend with no key has never been measured, and that is a state rather
+    # than a zero: the live payload carries {"local": 0.21} and no "runner" key
+    # at all while the runner sits there able to run.
+    body = HTML[HTML.index("function cloneRate()"):]
+    body = body[:body.index("\n}\n")]
+    assert "f > 0 ? f : null" in body, "an unmeasured backend gets a default number"
 
 
 def test_the_two_engines_do_not_share_one_speech_rate():
@@ -858,3 +884,84 @@ def test_managing_vocabulary_is_a_tab_and_choosing_it_is_not():
         "the chooser left the Transcribe panel"
     assert HTML.index('id="tab-vocab"') < HTML.index('id="glossman"'), \
         "the manager is not inside its own tab"
+
+
+# ================================= a wait that can be watched, and left =====
+
+
+def _tag(source: str, element_id: str) -> str:
+    """The one opening tag that carries this id, whole.
+
+    Sliced backwards from the id to its own "<": counting characters instead
+    lands in the middle of the tag before it, which is how the first version of
+    this test read a row's style attribute and passed on nothing.
+    """
+    at = source.index(f'id="{element_id}"')
+    return source[source.rindex("<", 0, at):source.index(">", at) + 1]
+
+
+def test_a_ticking_figure_never_lands_in_a_live_region():
+    """THE aria-live TICKER TRAP, and it is the one accessibility defect this
+    whole feature was most likely to ship.
+
+    A bar and a counter redrawn four times a second inside aria-live="polite"
+    announce four times a second and make the page unusable with a screen
+    reader. The split is: the announcing host says the state once
+    ("Transcribing...", then the result), and the bar and the moving figure sit
+    in an aria-hidden span where they are for eyes only.
+
+    The Stop button is in neither: it is a control, it must stay reachable, and
+    it is outside the hidden span for exactly that reason.
+    """
+    for host, ticker in (("stt-progress", "stt-elapsed"), ("speak-progress", "speak-lead")):
+        block = HTML[HTML.index(f'id="{host}"'):]
+        block = block[:block.index("</div>\n      </div>")]
+        assert 'aria-live' not in block, f"#{host} announces on every tick"
+        assert 'aria-hidden="true"' in _tag(block, ticker), \
+            f"#{ticker} is announced as it counts"
+        assert 'class="bar-track" aria-hidden="true"' in block, \
+            f"#{host}'s bar is announced as it moves"
+    for control in ("stt-cancel", "speak-stop"):
+        assert "aria-hidden" not in _tag(HTML, control), \
+            f"#{control} is hidden from a screen reader"
+
+
+def test_the_transcription_wait_is_a_bar_and_a_way_out():
+    """A ten minute recording is about 68 seconds of compute at the measured
+    8.81x, and for all of it the page showed four words and a disabled button.
+
+    Parakeet cannot stream: asr.py sets can_stream False, stream() raises, and
+    openai_api.py refuses stream=true by name with the measurement behind it,
+    5.07 s to the first and only output on a 14.2 s clip. So this is a progress
+    problem and not a partials problem, and cutting a finished transcript into
+    timed fake deltas is the one thing the service already refuses to do.
+
+    The bar is driven by duration / rate.stt(), which is the same expression
+    paintFacts already quotes on the confirm card. Two opinions about the same
+    wait would be worse than none.
+    """
+    assert 'id="stt-progress"' in HTML
+    body = HTML[HTML.index("function sttProgress()"):]
+    body = body[:body.index("\n}\n")]
+    assert "sttSeconds() / rate.stt()" in body, "the bar and the card disagree"
+    # The same two sentences the jobs bar uses, so one reading serves both.
+    assert "past the " in body and " estimate" in body
+    # No measured duration means no bar rather than a bar moving at a rate
+    # nobody measured.
+    assert "!budget ? clock(elapsed)" in body
+    # AND A WAY OUT. Sixty-eight seconds with no escape is half of what makes a
+    # wait feel long. One controller over the single await, on both routes.
+    assert "sttAbort = new AbortController();" in HTML
+    assert HTML.count("body: form, signal }") == 1
+    assert 'err.name === "AbortError"' in HTML
+
+
+def test_the_page_invents_no_transcription_partials():
+    """The frames exist and Parakeet refuses them by name. Nothing here may
+    manufacture the deltas the service will not produce."""
+    live = visible()
+    assert "transcript.text.delta" not in live
+    # And the request never asks for a stream the loaded model cannot give.
+    form = HTML[HTML.index('$("go-stt").addEventListener'):]
+    form = form[:form.index("/* ================================================== karaoke")]
+    assert 'append("stream"' not in form

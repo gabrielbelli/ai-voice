@@ -438,20 +438,26 @@ def test_the_follow_loop_is_not_driven_by_timeupdate_alone():
 
 
 def test_the_speech_direction_offers_no_highlight_and_says_why():
-    """Nothing in the speech direction returns a timing, so nothing is faked.
+    """Nothing play() can see returns a timing, so play() fakes nothing.
 
-    /speak answers audio and a usage count, /v1/audio/speech the same, and
-    tts-long's _public() strips `segments` from every job it reports -- leaving
-    chunks, audio_seconds and compute_seconds, and no chunk boundaries. The
-    only thing constructible from that is duration x (chars so far / chars
-    total), and it is wrong from the first sentence: Chatterbox inserts
-    per-segment pauses, chunk_text() splits where the server decides, and
-    speech rate moves with punctuation.
+    THE DOCSTRING CHANGED AND THE ASSERTION DID NOT, which is the right way
+    round. It used to say tts-long's _public() strips every chunk boundary from
+    the jobs it reports. That stopped being true twice over: `offsets` is in
+    SIDECAR_KEYS, and tts-long now publishes it PER SEGMENT while the job runs,
+    so a live clone job states exact boundaries. tts-stack returns them in
+    X-Segment-Offsets on the buffered route.
 
-    THIS IS ABOUT THE CODE, NOT THE COPY. The explanation used to be three
-    sentences under the player and was cut as interface clutter: why a backend
-    cannot return timings is a fact for a commit message, not for someone
-    mid-task. What must stay true is that nothing FAKES a highlight here.
+    None of that reaches play(). play() is handed a finished blob and a
+    filename; the boundaries belong to speakCues, which has the segments this
+    page sent and can map them, and to the job row, which has a count. The one
+    route with neither is /v1 over SSE: synth.plan splits by CHUNK_PHONEMES
+    rather than by the caller's sentences, so the page cannot reconstruct the
+    text of a delta, and counting deltas to index segments would be exactly the
+    drifting estimate this ban exists to prevent.
+
+    THIS IS ABOUT THE CODE, NOT THE COPY. Why a backend cannot return timings
+    is a fact for a commit message, not for someone mid-task. What must stay
+    true is that nothing FAKES a highlight here.
     """
     speak = HTML[HTML.index("function play(blob"):]
     speak = speak[:speak.index("\n}\n")]
@@ -674,10 +680,26 @@ def test_paragraphs_survive_into_the_highlight():
 
 def test_a_mismatched_offset_count_is_ignored_rather_than_guessed():
     """Fewer offsets than segments would silently misalign every highlight
-    after the gap, which is worse than showing none."""
+    after the gap, which is worse than showing none.
+
+    THE GUARD IS UNCHANGED AND MUST STAY UNCHANGED. speakCues is handed a
+    FINISHED response, so a count that does not match is a disagreement and not
+    a partial: padding it is guessing.
+
+    A growing list is a different thing and it lives somewhere else. A running
+    clone job publishes offsets per segment, so offsets.length <= chunks is a
+    legal state on the jobs tab -- and there it is used as a COUNT and never as
+    a highlight, because the passage would have to be rebuilt on every poll to
+    light it and that is the defect the in-place fix removed. The two rules do
+    not meet, and this test is what keeps them apart.
+    """
     body = HTML[HTML.index("function speakCues("):]
     body = body[:body.index("\n}\n")]
     assert "offsets.length !== texts.length" in body
+    # The jobs tab counts what it was given and interpolates nothing between.
+    rows = code(body_of("function renderJobs()", "let jobUrl = null;"))
+    assert "job.offsets.length" in rows, "the live boundaries are not read"
+    assert "chars" not in rows, "a character-count estimate is back on the row"
 
 
 # ================================================ subtitles as transcript ==
@@ -993,3 +1015,261 @@ def test_the_rendered_text_preserves_whitespace():
     measured against, so the highlight would land in the wrong place."""
     assert "white-space:pre-wrap" in HTML[HTML.index(".out{"):
                                           HTML.index(".out{") + 120]
+
+
+# ============================================== playing as it is made ======
+#
+# THE RULE THAT OUTRANKS THE FEATURE: the player must never run dry. An honest
+# progress bar beats audio that stutters, and a player that runs dry teaches
+# people to distrust every one they meet afterwards.
+#
+# Everything below is that rule, in the four places it can be broken: the
+# arithmetic that decides, the format that makes the arithmetic possible, the
+# scheduling that makes the joins exact, and the engine that must never be
+# allowed to stream because the numbers say it cannot sustain.
+
+
+def _rule() -> str:
+    return HTML[HTML.index("const STREAM = {"):HTML.index("/* ========================================================== the tabs")]
+
+
+def test_one_function_owns_the_lead_time_rule():
+    """A second opinion about whether it is safe to play is how the two
+    disagree at the one moment it matters.
+
+    safe(headroom, remaining, R) is the whole decision, and it is the brief's
+    t0 >= T * (1/R - 1) written in the quantity the page can measure. Headroom
+    falls at (1-R) for the (T-arrived)/R seconds the generator still has to
+    run, so its minimum is headroom - (1-R)(T-arrived)/R, and requiring that to
+    be non-negative gives the predicate. With arrived = R*t0 at the start it
+    reduces back to the brief's line.
+    """
+    rule = _rule()
+    assert "function safe(headroom, remaining, R)" in rule
+    assert "remaining * (STREAM.safety / R - 1)" in rule
+    # A margin, a floor and a minimum rate, each with its reason beside it.
+    for named in ("safety:", "floor:", "minRate:", "maxLead:"):
+        assert named in rule, f"{named} is not a named constant any more"
+    # No second decision anywhere: nothing else may gate the sound.
+    script = code(HTML)
+    assert script.count("function safe(") == 1
+
+
+def test_nothing_starts_playing_on_a_fixed_delay():
+    """"wait a second and hope" is the design this replaces. Every serious
+    player has a named pre-roll and one second is the usual default for a
+    source known to outrun playback; this source is not known to, and on one
+    engine it provably does not."""
+    sink = code(body_of("function audioSink(ctx, plan)", "\n/*\n  THE SINK THAT MAKES NO SOUND"))
+    assert "safe(headroom(), remaining, R)" in sink, "the sink decides for itself"
+    assert "arrived >= STREAM.floor" in sink
+    # Not a byte count and not a delta count.
+    assert "deltas >=" not in sink.split("function wireRate")[1].split("}")[1] \
+        if "function wireRate" in sink else True
+
+
+def test_the_rate_is_measured_on_the_wire_and_health_is_only_the_prior():
+    """tts-long's realtime_factor is an EMA seeded with RTF_SEED, so the field
+    is never absent and a seed reads exactly like a measurement. A rule that
+    trusts health blindly trusts a constant and will authorise a stream that
+    stalls.
+
+    pcm makes arrival self-describing -- bytes over 2 over 24000 is the seconds
+    of audio that actually landed -- so the measured figure includes the
+    network and both proxies rather than the model alone.
+    """
+    sink = body_of("function audioSink(ctx, plan)", "\n/*\n  THE SINK THAT MAKES NO SOUND")
+    assert "function wireRate()" in sink
+    assert "arrived / elapsed" in code(sink), "the wire rate is not measured"
+    # TWO DELTAS, NOT ONE. One delta measures model warm-up, not a rate.
+    assert "deltas >= 2" in code(sink)
+    # And the measurement outranks the prior once it exists.
+    assert "const w = wireRate(); return w > 0 ? w : plan.R;" in code(sink)
+
+
+def test_the_streamed_format_is_pcm_and_only_pcm():
+    """Streamed wav writes a RIFF size of 8 and a data size of 0, so a
+    concatenation of wav deltas decodes to nothing. mp3, opus, aac and flac
+    carry encoder priming and padding, and their deltas lag the segments by up
+    to TTS_ENCODER_FLUSH_WAIT with a tail delta after the last one, so a delta
+    boundary is not a segment boundary there.
+
+    For pcm, _RawEncoder.write returns the piece whole and close() returns
+    nothing, so one delta is one synthesis chunk and its byte length over
+    2 x 24000 is that chunk's exact duration. The sink requires it rather than
+    degrading quietly into a format whose boundaries are a guess.
+    """
+    speak = code(body_of("async function speakNow(voice, text)", "async function collectSSE"))
+    assert 'const format = ctx ? "pcm"' in speak, "the streamed format is not forced"
+    assert "const PCM_RATE = 24000;" in HTML
+
+
+def test_buffer_start_times_are_absolute_and_never_the_current_time():
+    """THE CLASSIC DEFECT, and it is inaudible in a test that does not record
+    the `when` argument. ctx.currentTime advances while the scheduling loop
+    runs, so start times computed from it land in the past, where a buffer
+    plays immediately and overlaps the one before it.
+
+    pcm has no priming and no padding, so consecutive buffers abut
+    sample-exactly if, and only if, the timeline is absolute.
+    """
+    sink = code(body_of("function audioSink(ctx, plan)", "\n/*\n  THE SINK THAT MAKES NO SOUND"))
+    assert "src.start(Math.max(when, floorAt)" in sink
+    assert "const when = origin + piece.at;" in sink
+    # Seeded once per start, from the context clock, and never inside the loop.
+    assert sink.count("ctx.currentTime + 0.05") == 1
+
+
+def test_the_underrun_is_pre_empted_by_a_timer_that_a_hidden_tab_cannot_stop():
+    """requestAnimationFrame is throttled to a stop in a background tab and the
+    audio goes on playing there, so the watchdog would stop watching exactly
+    where nobody is looking.
+
+    The graph is stopped while it still has audio in hand: a stated pause is
+    recoverable, a stutter is not.
+    """
+    sink = code(body_of("function audioSink(ctx, plan)", "\n/*\n  THE SINK THAT MAKES NO SOUND"))
+    assert "setInterval(tick, 200)" in sink
+    assert "requestAnimationFrame" not in sink, "the watchdog is throttled in a hidden tab"
+    # AND NOT AGAINST THE DELTA SIZE. At the moment playback starts, headroom
+    # IS one delta, so comparing the two paused a hundred milliseconds after
+    # starting on the fast engine -- the stutter the rule exists to prevent.
+    # The second reading is the gap since the last delta: if nothing has
+    # arrived for longer than the audio still in hand, the next one is already
+    # too late, whatever the mean rate says.
+    assert "headroom() <= gapSeconds()" in sink, "no pre-emptive pause at all"
+    assert "biggest" not in sink, "the delta size is back as a threshold"
+    # A suspended context is the browser pausing, not the model falling behind.
+    assert 'ctx.state !== "running"' in sink
+    assert 'say("flat", "Paused.")' in sink
+
+
+def test_the_clone_path_never_streams_audio_and_the_warning_stays():
+    """0.230x on this server's CPU means a lead of 3.35 x T: a minute of speech
+    would cost three minutes twenty of silence first, which is strictly worse
+    than waiting for the file. The GPU runner at 0.644x to 0.746x is still
+    under realtime.
+
+    The arithmetic refuses it, so the player contains no engine name. What
+    keeps the clone on 202-and-poll is a second, separate fact: tts-long's
+    _sse_events finally marks a queued or running job cancelled when the reader
+    hangs up, so closing a laptop lid would kill a thirty-six minute job.
+    """
+    queue = body_of("async function queueJob(voice, text)", "function hasAudio(job)")
+    assert "stream_format" not in code(queue), "the clone path can open a stream"
+    # Whitespace collapsed: a comment wraps at whatever column it wraps at, and
+    # matching the raw text would pin the line breaks rather than the warning.
+    flat = re.sub(r"\s+", " ", queue)
+    assert "closing the stream CANCELS the job" in flat
+    # And the submit path says the same thing where it chooses the route.
+    speak = re.sub(r"\s+", " ", body_of("async function speakNow(voice, text)",
+                                        "async function collectSSE"))
+    assert "closing that stream cancels the job" in speak
+    # And the decision is arithmetic, not a name.
+    sink = code(body_of("function audioSink(ctx, plan)", "\n/*\n  THE SINK THAT MAKES NO SOUND"))
+    for name in ("chatterbox", "clone", "kokoro"):
+        assert name not in sink.lower(), f"the player knows about {name!r}"
+
+
+def test_a_stream_that_dies_half_way_still_hands_over_what_it_made():
+    """A short file that looks complete is the failure to avoid, so the bytes
+    are kept AND the reader is told the file is short.
+
+    X-Job-Id is on every streamed response and survives both proxies, so work
+    already written to disk is reachable from the Jobs tab rather than being
+    run again from the start.
+    """
+    collect = code(body_of("async function collectSSE", "/* Builds the highlight"))
+    assert "err.chunks = chunks;" in collect, "the bytes die with the error"
+    speak = code(body_of("async function speakNow(voice, text)", "async function collectSSE"))
+    assert "The stream ended early." in speak
+    assert 'response.headers.get("x-job-id")' in speak
+    assert "adopt(jobId)" in speak
+
+
+def test_the_bytes_that_reach_the_file_are_the_bytes_that_arrived():
+    """A tts-long test pins the streamed deltas byte-equal to the buffered
+    body, and tts-stack's audio_out.py records that its hand-written 44 byte
+    header is byte-identical to libsndfile's. Both properties are what make it
+    safe to write the header here, and both die the moment this page adds
+    anything to the audio."""
+    collect = code(body_of("async function collectSSE", "/* Builds the highlight"))
+    assert "chunks.push(bytes);" in collect
+    wav = code(body_of("function wavFrom(chunks, hz)", "\n/* The live sink"))
+    # A header in front of a copy, and nothing else: no gain, no resample, no
+    # normalisation. Normalising the audio is a defect this stack has had.
+    assert "new Blob([header, ...chunks]" in wav
+    assert "44" in body_of("function wavFrom(chunks, hz)", "\n/* The live sink")
+
+
+def test_two_players_cannot_speak_at_once():
+    """The <audio> element with the assembled file and the Web Audio graph can
+    both make a sound. This is the whole guard, and forgetting it is the most
+    likely audible bug in the design."""
+    assert '$("player").addEventListener("play", () => { if (speakSink) speakSink.silence(); });' in HTML
+
+
+def test_stopping_the_sound_does_not_throw_the_work_away():
+    """Abandoning the reader trips tts-long's _sse_events finally, which
+    cancels a queued or running job. Stop means stop the sound; the body is
+    still read to the end and the reader still gets the whole file.
+
+    The same rule governs visibilitychange, which must never abort a reader.
+    """
+    sink = body_of("function audioSink(ctx, plan)", "\n/*\n  THE SINK THAT MAKES NO SOUND")
+    silence = sink[sink.index("silence()"):]
+    silence = silence[:silence.index("\n")]
+    assert "abort" not in silence.lower(), "Stop cancels the work"
+    assert "quiet = true" in silence
+    body = code(HTML)
+    assert "visibilitychange" in body
+    assert 'visibilitychange", () => { schedule(0); }' in body.replace(
+        'visibilitychange", () => schedule(0)', 'visibilitychange", () => { schedule(0); }')
+
+
+def test_a_failure_inside_the_sink_cannot_take_the_route_down():
+    """Playing as it is made is an enhancement over a route that already works.
+    A throw in the audio path stops the sound and lets the buffered path finish
+    and play the file."""
+    sink = code(body_of("function audioSink(ctx, plan)", "\n/*\n  THE SINK THAT MAKES NO SOUND"))
+    commit = sink[sink.index("commit(bytes)"):sink.index("close()")]
+    assert "try {" in commit and "catch" in commit
+    assert "failed = true;" in commit
+    assert "stopScheduled();" in commit
+
+
+def test_a_browser_with_no_audio_context_is_never_promised_anything():
+    """Decided BEFORE the request is built, so response_format is never forced
+    to pcm on a browser that cannot decode it, and the format the reader chose
+    is honoured. No message, because nothing was promised."""
+    speak = code(body_of("async function speakNow(voice, text)", "async function collectSSE"))
+    assert "const ctx = plan && plan.mode === \"audio\" ? openAudio() : null;" in speak
+    opener = code(body_of("function openAudio()", "\n/* 44 bytes of RIFF"))
+    assert "return null" in opener
+    # And it is resumed inside the gesture, before the first await: a context
+    # made outside one starts suspended in Chrome and Safari, and the first
+    # delta then plays into silence while the arithmetic says all is well.
+    assert "speakCtx.resume()" in opener
+    assert speak.index("openAudio()") < speak.index("await api(")
+
+
+def test_the_odd_byte_survives_a_proxy_that_splits_a_frame():
+    """For pcm a delta is a whole segment and therefore an even number of
+    bytes, but a proxy is free to split a frame, and half a sample
+    desynchronises every sample after it."""
+    sink = code(body_of("function audioSink(ctx, plan)", "\n/*\n  THE SINK THAT MAKES NO SOUND"))
+    assert "bytes.length & 1" in sink
+    assert "carry = bytes.slice(-1)" in sink
+    # DataView and not Int16Array: a subarray can start on an odd byte offset.
+    assert "new DataView(bytes.buffer" in sink
+    assert "new Int16Array(" not in sink
+
+
+def test_the_page_makes_one_audio_context_and_not_one_per_press():
+    """Chrome allows about six AudioContexts per document and refuses the
+    seventh, so a context made per run turns the seventh Speak of a session
+    into a silent failure with the headroom arithmetic still reporting that
+    everything is fine."""
+    opener = code(body_of("function openAudio()", "\n/* 44 bytes of RIFF"))
+    assert "if (!speakCtx || speakCtx.state === \"closed\")" in opener
+    assert "if (speakCtx.resume) speakCtx.resume();" in opener
