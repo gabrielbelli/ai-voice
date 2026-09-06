@@ -561,6 +561,8 @@ details>summary:active{opacity:.72}
               aria-controls="tab-speak" aria-selected="false" tabindex="-1">Speak</button>
       <button role="tab" id="tab-btn-jobs" data-tab="jobs"
               aria-controls="tab-jobs" aria-selected="false" tabindex="-1">Jobs <span id="jobcount"></span></button>
+      <button role="tab" id="tab-btn-vocab" data-tab="vocab"
+              aria-controls="tab-vocab" aria-selected="false" tabindex="-1">Vocabulary</button>
     </nav>
   </div>
 </header>
@@ -733,86 +735,6 @@ details>summary:active{opacity:.72}
         </div>
       </details>
 
-      <!-- READING AND MANAGING THE PROFILES, on the tab where they are chosen.
-           #glossbox above is the CHOICE and stays a row of toggles; this is
-           the other half, and until now the page had none: there was no way to
-           see what a profile contains, and no way to add, change or remove
-           one. That work went through curl, so the terms a transcript depends
-           on were invisible to the person depending on them.
-
-           A <details> and not a fourth tab. Managing vocabulary is rarer than
-           transcribing and belongs one disclosure away, which is the pattern
-           this page already uses for its secondary depth; a tab would put a
-           permanent third of the wayfinding in front of a job most sessions
-           never do.
-
-           HIDDEN UNTIL THE SERVICE ANSWERS. GET /glossaries is what says which
-           profiles exist and whether the deployment can be written to at all,
-           so with no answer there is nothing honest to draw.
-
-           EVERY REFUSAL IS PRE-EMPTED WHERE THE PAGE CAN SEE IT COMING. A
-           built-in is a 409, a bad name is a 400 and an unwritable deployment
-           is a 503, and all three are decidable here from the listing. So Save
-           and Delete grey with the reason beside them rather than offering a
-           write that the server is certain to refuse. The server stays the
-           authority: glossSave() still reads the status it gets back. -->
-      <details id="glossman" hidden>
-        <summary>Vocabulary profiles</summary>
-        <div class="body">
-          <div class="row" style="align-items:center">
-            <div class="seg tight" id="glossnames"></div>
-            <span class="spacer"></span>
-            <button class="small tight" id="glossnew" type="button">New profile</button>
-          </div>
-
-          <div id="glossform" hidden>
-            <div class="row fields">
-              <div class="tight">
-                <label for="glossname">Name</label>
-                <!-- 64 is profiles.NAME_PATTERN's own ceiling. Stopping the
-                     keystroke is kinder than greying Save after it. -->
-                <input type="text" id="glossname" maxlength="64"
-                       autocomplete="off" spellcheck="false">
-              </div>
-              <div class="tight">
-                <label>Source</label>
-                <div class="pills"><span class="pill" id="glosssource"></span>
-                  <span class="pill" id="glossterms"></span>
-                  <span class="pill" id="glossbytes"></span></div>
-              </div>
-            </div>
-            <!-- The file text, not the parsed halves. GET /glossaries/{name}
-                 returns both, and the text is the one that carries the
-                 comments: a glossary's comments are where it says why a rule
-                 is a hotword rather than a replacement, and rebuilding the
-                 file from two JSON objects would drop all of them. -->
-            <label for="glosstext">Terms</label>
-            <textarea id="glosstext" spellcheck="false" autocomplete="off"
-                      autocapitalize="off"></textarea>
-            <div class="actions">
-              <button class="primary small" id="glosssave" type="button">Save</button>
-              <!-- Hidden until the server refuses lines it would accept under
-                   force, and hidden again the moment the text changes: a
-                   second press must never send a body the reader has edited
-                   since the refusal it answers. -->
-              <button class="small" id="glossforce" type="button" hidden>Save anyway</button>
-              <span class="spacer"></span>
-              <button class="small" id="glossdelete" type="button">Delete</button>
-            </div>
-          </div>
-
-          <!-- THE REASON, BESIDE THE GREYED CONTROL. Same job as
-               #x-route-hint: glossGuards() writes why Save or Delete is off,
-               and it is a hint rather than a note because it is a standing
-               property of the field and not the result of anything. It does
-               not announce for that reason; it changes on every keystroke. -->
-          <div class="hint" id="glosswhy"></div>
-          <!-- OUTSIDE #glossform, because the first thing this has to be able
-               to say is that the deployment cannot write at all, and that is
-               true with no profile open. -->
-          <div id="glossnote" aria-live="polite"></div>
-        </div>
-      </details>
     </div>
 
     <div class="card" id="result" hidden>
@@ -1166,6 +1088,79 @@ details>summary:active{opacity:.72}
       <div id="joblist"></div>
     </div>
   </section>
+
+  <!-- VOCABULARY, ON ITS OWN. It was a disclosure under the chooser on the
+       Transcribe tab, on the argument that managing profiles is rarer than
+       transcribing. The user asked for a tab instead, which is their call
+       about their own wayfinding.
+
+       The chooser on the Transcribe tab is untouched and stays there: PICKING
+       a profile happens while you are transcribing, and EDITING one does not.
+
+       HIDDEN UNTIL THE SERVICE ANSWERS. GET /glossaries says which profiles
+       exist and whether this deployment can be written to at all, so with no
+       answer there is nothing honest to draw. -->
+  <section id="tab-vocab" role="tabpanel" aria-labelledby="tab-btn-vocab" hidden>
+    <div class="card">
+      <h2 class="tight">Vocabulary profiles</h2>
+<div id="glossman" hidden>
+          <div class="row" style="align-items:center">
+            <div class="seg tight" id="glossnames"></div>
+            <span class="spacer"></span>
+            <button class="small tight" id="glossnew" type="button">New profile</button>
+          </div>
+
+          <div id="glossform" hidden>
+            <div class="row fields">
+              <div class="tight">
+                <label for="glossname">Name</label>
+                <!-- 64 is profiles.NAME_PATTERN's own ceiling. Stopping the
+                     keystroke is kinder than greying Save after it. -->
+                <input type="text" id="glossname" maxlength="64"
+                       autocomplete="off" spellcheck="false">
+              </div>
+              <div class="tight">
+                <label>Source</label>
+                <div class="pills"><span class="pill" id="glosssource"></span>
+                  <span class="pill" id="glossterms"></span>
+                  <span class="pill" id="glossbytes"></span></div>
+              </div>
+            </div>
+            <!-- The file text, not the parsed halves. GET /glossaries/{name}
+                 returns both, and the text is the one that carries the
+                 comments: a glossary's comments are where it says why a rule
+                 is a hotword rather than a replacement, and rebuilding the
+                 file from two JSON objects would drop all of them. -->
+            <label for="glosstext">Terms</label>
+            <textarea id="glosstext" spellcheck="false" autocomplete="off"
+                      autocapitalize="off"></textarea>
+            <div class="actions">
+              <button class="primary small" id="glosssave" type="button">Save</button>
+              <!-- Hidden until the server refuses lines it would accept under
+                   force, and hidden again the moment the text changes: a
+                   second press must never send a body the reader has edited
+                   since the refusal it answers. -->
+              <button class="small" id="glossforce" type="button" hidden>Save anyway</button>
+              <span class="spacer"></span>
+              <button class="small" id="glossdelete" type="button">Delete</button>
+            </div>
+          </div>
+
+          <!-- THE REASON, BESIDE THE GREYED CONTROL. Same job as
+               #x-route-hint: glossGuards() writes why Save or Delete is off,
+               and it is a hint rather than a note because it is a standing
+               property of the field and not the result of anything. It does
+               not announce for that reason; it changes on every keystroke. -->
+          <div class="hint" id="glosswhy"></div>
+          <!-- OUTSIDE #glossform, because the first thing this has to be able
+               to say is that the deployment cannot write at all, and that is
+               true with no profile open. -->
+          <div id="glossnote" aria-live="polite"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
 </div>
 
 <!-- ============================================ CONFIRM BEFORE FETCH == -->
@@ -1420,8 +1415,16 @@ TABS.forEach(button => {
          the tablist pattern exists to avoid. */
       b.tabIndex = b === button ? 0 : -1;
     });
-    ["transcribe","speak","jobs"].forEach(name =>
-      $("tab-" + name).hidden = name !== button.dataset.tab);
+    /* FROM THE BUTTONS, NOT A LIST WRITTEN OUT HERE. This was
+       ["transcribe","speak","jobs"], so adding a fourth tab gave you a button
+       that set aria-selected, hid the old panel and never showed the new one:
+       a click that emptied the page. Every tab is in TABS by definition, and
+       its panel id is "tab-" plus its data-tab, so there is nothing left to
+       keep in step by hand. */
+    TABS.forEach(b => {
+      const panel = $("tab-" + b.dataset.tab);
+      if (panel) panel.hidden = b !== button;
+    });
     /* THE ONE PLACE THIS PAGE FELT LIKE A DOCUMENT: an instant `hidden`
        toggle. 4px and 180 ms on the INCOMING panel only -- hint the direction,
        do not stage a slide -- and deliberately NO exit animation, so a click

@@ -243,8 +243,12 @@ def test_the_tab_change_never_makes_a_click_wait():
     over a state change that has already completed."""
     handler = SCRIPT[SCRIPT.index("const TABS = Array.from"):]
     handler = handler[:handler.index("const scrollEdge")]
-    assert 'hidden = name !== button.dataset.tab' in handler
-    assert handler.index("hidden = name !==") < handler.index(".animate("), (
+    # The hide/show used to be `hidden = name !== button.dataset.tab` over a
+    # hand-written list of tab names; it derives the set from TABS now, because
+    # adding a fourth tab to that list was forgotten and the button emptied the
+    # page. The ORDER is what this test is about and it is unchanged.
+    assert "panel.hidden = b !== button" in handler
+    assert handler.index("panel.hidden = b !== button") < handler.index(".animate("), (
         "the panel is animated before it is shown, so the click waits on it")
     assert "finished" not in handler and "await" not in handler
 
@@ -814,3 +818,43 @@ def test_the_runner_panel_asks_the_three_questions_separately():
     assert "if (!r) { box.hidden = true; return; }" in HTML
     # The reason is the runner's words, not a guess from the state name.
     assert "r.reason" in HTML
+
+
+def test_every_tab_button_has_a_panel_and_the_switch_finds_it():
+    """THE DEFECT THIS PREVENTS: a tab that empties the page.
+
+    The switch hid and showed panels from a list written out in the script,
+    ["transcribe","speak","jobs"]. Adding Vocabulary as a fourth tab gave a
+    button that set aria-selected, hid the panel you were on, and never showed
+    the new one, because its name was not in that list. The button worked; the
+    page went blank.
+
+    Every tab is in TABS by definition and its panel id is "tab-" plus its
+    data-tab, so the switch derives the set instead of being told it.
+    """
+    # visible(), because the comment on the fix quotes the old list on purpose.
+    assert '["transcribe","speak","jobs"]' not in visible(), \
+        "the hand-written list is back"
+    assert 'const panel = $("tab-" + b.dataset.tab);' in HTML
+
+    # And the markup keeps its half of the bargain: one panel per button.
+    buttons = re.findall(r'role="tab"[^>]*data-tab="([a-z]+)"', HTML)
+    assert len(buttons) >= 4, buttons
+    for name in buttons:
+        assert f'id="tab-{name}"' in HTML, f"the {name} tab has no panel"
+        assert f'aria-controls="tab-{name}"' in HTML
+
+
+def test_managing_vocabulary_is_a_tab_and_choosing_it_is_not():
+    """The user asked for a tab after it shipped as a disclosure on Transcribe.
+
+    The two controls are deliberately not together: PICKING a profile happens
+    while you are setting up a transcription, and EDITING one does not.
+    """
+    assert 'id="tab-btn-vocab"' in HTML
+    assert 'id="tab-vocab"' in HTML
+    # The manager moved; the chooser did not.
+    assert HTML.index('id="glossbox"') < HTML.index('id="tab-vocab"'), \
+        "the chooser left the Transcribe panel"
+    assert HTML.index('id="tab-vocab"') < HTML.index('id="glossman"'), \
+        "the manager is not inside its own tab"
