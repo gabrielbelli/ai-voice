@@ -323,6 +323,39 @@ details.jobtext .body{padding:var(--s2) 0 var(--s2) var(--s3);
    bar -- and the 95% cap is now a 0.95 cap. */
 .bar-fill{height:100%;width:100%;background:var(--accent);
   transform:scaleX(0);transform-origin:left}
+
+/* ------------------------------------------------------- transport ----- */
+/* THE SCRUB IS NOT #speak-bar, and the two are deliberately different shapes.
+   #speak-bar says how much of the file has been MADE; this says where the ear
+   is. They are different clocks, and one bar carrying both would be read as
+   one fact. So the transport draws the position over the made extent -- the
+   two-layer reading a video scrubber already teaches -- and the range input on
+   top of it is what makes the thing keyboard-operable for free. */
+.scrub{position:relative;flex:1;min-width:8rem;height:14px;display:flex;
+  align-items:center;touch-action:none}
+.scrub .lane{position:absolute;left:0;right:0;height:6px;border-radius:999px;
+  background:var(--line);overflow:hidden}
+.scrub .made,.scrub .played{position:absolute;inset:0;transform:scaleX(0);
+  transform-origin:left}
+/* WHAT EXISTS, BEHIND, and it is the reason the seek cannot outrun the model:
+   the pale band is exactly the region a drag is clamped to, so the limit is
+   visible rather than a correction that happens after the thumb is let go. */
+.scrub .made{background:var(--dim);opacity:.4}
+.scrub .played{background:var(--accent)}
+.seekbar{position:absolute;inset:0;width:100%;height:14px;margin:0;
+  background:transparent;-webkit-appearance:none;appearance:none;cursor:pointer}
+.seekbar::-webkit-slider-runnable-track{background:transparent;height:14px}
+.seekbar::-moz-range-track{background:transparent;height:14px}
+.seekbar::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;
+  width:12px;height:12px;border-radius:50%;background:var(--accent);
+  border:2px solid var(--panel);margin-top:1px}
+.seekbar::-moz-range-thumb{width:12px;height:12px;border-radius:50%;
+  background:var(--accent);border:2px solid var(--panel)}
+.seekbar:focus-visible{outline:2px solid var(--accent);outline-offset:3px;
+  border-radius:999px}
+/* Tabular so the digits do not jitter the row as the seconds tick over. */
+.tnum{font-family:var(--mono);font-size:var(--t-micro);color:var(--dim);
+  font-variant-numeric:tabular-nums;white-space:nowrap}
 .job{border:1px solid var(--line);border-radius:var(--radius);
   padding:var(--s3);margin-bottom:var(--s2);background:var(--panel)}
 .job.expired{opacity:.55}
@@ -930,8 +963,18 @@ details>summary:active{opacity:.72}
       </div>
 
       <div id="speak-note" aria-live="polite"></div>
+      <!-- TWO ANSWERS TO ONE PRESS, because they are two different jobs.
+           "Generate" wants the file: nothing plays, nothing can run dry, and
+           the wait is a bar. "Generate & listen" wants the sound now, and
+           accepts that a stream is slower end to end than the same request
+           made whole -- small chunks generate less efficiently, measured at
+           1.1x realtime against 2.43x at full width.
+
+           One button could not be both. It streamed, so the reader who only
+           wanted a .wav paid the streaming tax and got no say in it. -->
       <div class="actions">
-        <button class="primary" id="go-tts" type="button">Speak</button>
+        <button class="primary" id="go-tts" type="button">Generate &amp; listen</button>
+        <button id="go-tts-quiet" type="button">Generate</button>
       </div>
       <!-- Same split as the transcription bar: #speak-note announces, this
            does not. Which of the two states is running is said by the note and
@@ -943,6 +986,31 @@ details>summary:active{opacity:.72}
           <span class="spacer"></span>
           <button class="small tight" id="speak-stop" type="button">Stop</button>
         </div>
+      </div>
+      <!-- THE TRANSPORT FOR THE SOUND BEING MADE. The <audio> element below
+           cannot serve this: it has no src until the stream is whole, because
+           raw pcm cannot be appended to a SourceBuffer at all. So the graph
+           that is playing gets its own transport, and it is the same three
+           controls anyone expects -- stop, position, scrub.
+
+           NO SPEED CONTROL HERE, and that is a limit rather than an oversight.
+           playbackRate on an AudioBufferSourceNode is resampling: it moves the
+           pitch with the rate, so 1.5x is a chipmunk. The <audio> element
+           time-stretches instead and holds the pitch, which is why the speed
+           picker appears with the finished file and not before it. Offering a
+           control here that sounds different from the identical control two
+           seconds later is worse than not offering it. -->
+      <div class="row" id="speak-transport" hidden style="align-items:center">
+        <button class="small tight" id="speak-play" type="button">Pause</button>
+        <div class="scrub">
+          <div class="lane" aria-hidden="true">
+            <div class="made" id="speak-made"></div>
+            <div class="played" id="speak-played"></div>
+          </div>
+          <input type="range" class="seekbar" id="speak-seek" min="0" max="1000"
+                 step="1" value="0" aria-label="Position in the audio so far">
+        </div>
+        <span class="tnum" id="speak-pos">0:00 / 0:00</span>
       </div>
       <!-- The spoken text, rendered so it can be highlighted. A <textarea>
            cannot carry spans, so this is a read-only copy that appears with
@@ -1279,6 +1347,12 @@ function human(bytes) {
   const mb = bytes / 1048576;
   return mb >= 1024 ? (mb / 1024).toFixed(1) + " GB" : mb.toFixed(mb < 10 ? 1 : 0) + " MB";
 }
+function mmss(seconds) {
+  if (!isFinite(seconds) || seconds < 0) seconds = 0;
+  const t = Math.floor(seconds), m = Math.floor(t / 60), r = t % 60;
+  return m + ":" + String(r).padStart(2, "0");
+}
+
 function clock(seconds) {
   if (seconds === null || seconds === undefined || !isFinite(seconds)) return "unknown";
   seconds = Math.max(0, Math.round(seconds));
@@ -4326,15 +4400,27 @@ function estimate() {
      anything had been read at all -- the single most direct version of "the
      buttons do nothing". Both states are visible from here, so both are on the
      button rather than behind it. */
-  $("go-tts").disabled = speaking || voice.kind === "new"
-                       || !(text.trim() || segments());
+  const idle = speaking || voice.kind === "new"
+             || !(text.trim() || segments());
+  $("go-tts").disabled = idle;
+  $("go-tts-quiet").disabled = idle;
   /* The format control's greying depends on the length of the text, through
      speechPlan, so it is re-asked wherever the text changes rather than only
      when the route does. */
   syncSpeakControls();
 
+  /* A CLONE HAS NO LISTEN BUTTON, because there is nothing to listen to yet.
+     Chatterbox measures 0.23x realtime on this stack, so speechPlan sends it
+     down the silent path every time and a cloned voice does not stream at all
+     -- it posts a job and collects the finished audio, which is also what lets
+     the reader close the page while it runs. Two buttons that did the same
+     thing under different names would be a promise this backend cannot keep. */
+  $("go-tts").hidden = voice.kind === "clone";
+  $("go-tts-quiet").classList.toggle("primary", voice.kind === "clone");
+
   if (voice.kind !== "clone") {
-    $("go-tts").textContent = "Speak";
+    $("go-tts").textContent = "Generate & listen";
+    $("go-tts-quiet").textContent = "Generate";
     /* NOT WHILE A RUN IS IN FLIGHT, and not over what the last one said. */
     if (!speaking && !speakHeld) note($("speak-note"), "", "");
   } else {
@@ -4342,7 +4428,7 @@ function estimate() {
     /* THE ETA IS IN THE BUTTON. Nobody presses "Generate (about 36 minutes)"
        by accident, and nobody has to go looking for a warning. Kokoro's button
        just says "Speak"; the asymmetry is the message. */
-    $("go-tts").textContent = text.trim()
+    $("go-tts-quiet").textContent = text.trim()
       ? "Generate (" + roughly(compute) + ")" : "Generate";
     if (compute > 600) {
       /* A WARNING WITH NO ESCAPE IS JUST AN OBSTACLE. The cheap path is
@@ -4366,7 +4452,10 @@ function estimate() {
          answers: one switches the voice, the other goes ahead. */
       $("anyway").addEventListener("click", () => {
         note($("speak-note"), "", "");
-        $("go-tts").click();
+        /* THE BUTTON THAT IS ON SCREEN. #go-tts is hidden for a clone, and a
+           click on a hidden button is a press that does nothing -- which is
+           precisely the failure the warning's own comment was written about. */
+        $("go-tts-quiet").click();
       });
     } else {
       note($("speak-note"), "", "");
@@ -4511,7 +4600,11 @@ function segments() {
 }
 
 /* --------------------------------------------------------- speaking --- */
-$("go-tts").addEventListener("click", async () => {
+/* ONE RUN, TWO INTENTIONS. `listen` is the only thing the two buttons disagree
+   about, and it is threaded through rather than branched on here so that
+   everything else -- the clone path, the error handling, the button coming
+   back with the right label on it -- cannot drift between them. */
+async function runSpeak(listen) {
   const voice = currentVoice();
   if (voice.kind === "new") return;
   const text = $("text").value;
@@ -4519,6 +4612,7 @@ $("go-tts").addEventListener("click", async () => {
   speaking = true;
   speakHeld = false;
   $("go-tts").disabled = true;
+  $("go-tts-quiet").disabled = true;
   try {
     /* A CLONE DOES NOT STREAM, and this is a deliberate reversal of my own
        change rather than the original design reasserting itself.
@@ -4532,7 +4626,7 @@ $("go-tts").addEventListener("click", async () => {
        So a clone posts a job and collects the finished audio, which is also
        what lets the reader close the page while it runs. */
     if (voice.kind === "clone") await queueJob(voice.name, text);
-    else await speakNow(voice.name, text);
+    else await speakNow(voice.name, text, listen);
   } catch (err) {
     note($("speak-note"), "bad", err.message || String(err));
     speakHeld = true;
@@ -4542,7 +4636,9 @@ $("go-tts").addEventListener("click", async () => {
     speaking = false;
     estimate();
   }
-});
+}
+$("go-tts").addEventListener("click", () => runSpeak(true));
+$("go-tts-quiet").addEventListener("click", () => runSpeak(false));
 
 /* --------------------------------------------- two sinks, one rule --- */
 /*
@@ -4639,6 +4735,18 @@ function audioSink(ctx, plan) {
   let sizes = null;
   let playing = false, closed = false, failed = false, dry = false, quiet = false;
   let watch = 0, said = "";
+  /* THE READER'S PAUSE IS NOT THE RULE'S PAUSE, and conflating them is the bug
+     this flag exists to stop. tick() stops playback when the bank runs thin
+     and starts it again when it recovers, which is the whole design; if a
+     press used the same state, the watchdog would undo it a fifth of a second
+     later and the Pause button would look broken. */
+  let byHand = false;
+  /* A DRAG IS NOT A SEEK UNTIL IT IS LET GO. Rescheduling the graph on every
+     input event stops and restarts the sound dozens of times across one drag,
+     which is audible. So the sound is held for the length of the drag and
+     resumed once, on change -- and dragWas remembers whether it was playing
+     when the drag STARTED, because by the second input event it is not. */
+  let dragging = false, dragWas = false;
 
   /* getOutputTimestamp reports the frame the output device is actually
      rendering, which is the honest position. currentTime is the scheduler's
@@ -4648,7 +4756,17 @@ function audioSink(ctx, plan) {
     return (stamp && stamp.contextTime) || ctx.currentTime;
   }
   function position() {
-    return playing ? Math.min(arrived, Math.max(0, clockNow() - origin)) : held;
+    /* NEVER BEHIND WHERE IT WAS STARTED FROM. startFrom() schedules against
+       `ctx.currentTime + 0.05`, so for the first fifty milliseconds after a
+       resume the arithmetic returns a position slightly EARLIER than the one
+       just asked for: seeking to 2.000 s and reading it back gave 1.950 s,
+       which rounds down to a readout one second short of the seek. Measured on
+       the fake clock, both on a drag and on the Play button.
+
+       It corrects itself within one tick, which is exactly what makes it worth
+       stopping: a readout that disagrees with the seek that caused it teaches
+       people the seek was inaccurate. */
+    return playing ? Math.min(arrived, Math.max(held, clockNow() - origin)) : held;
   }
   /* Seconds of audio scheduled and not yet played. Before playback starts it
      is simply everything that has arrived. */
@@ -4706,6 +4824,29 @@ function audioSink(ctx, plan) {
     $("speak-bar").style.transform = "scaleX(" + shown.toFixed(4) + ")";
     $("speak-lead").textContent = measured
       ? Math.round(arrived) + " s of about " + Math.round(plan.T) + " s made" : "";
+    paintTransport();
+  }
+  /* THE SCALE IS THE WHOLE EXPECTED FILE, not what has arrived. A scrub whose
+     right-hand end is "the last sample that exists" moves its own scale every
+     delta, so the thumb slides backwards while the audio plays forwards. The
+     estimate is the axis until the stream closes and the measurement replaces
+     it -- and max() rather than plan.T alone, because an estimate that came in
+     short must never put the position off the end of its own bar. */
+  function span() { return closed ? arrived : Math.max(plan.T, arrived); }
+  function paintTransport() {
+    const total = span();
+    const at = position();
+    const scale = total > 0 ? 1 / total : 0;
+    $("speak-made").style.transform = "scaleX(" + (arrived * scale).toFixed(4) + ")";
+    $("speak-played").style.transform = "scaleX(" + (at * scale).toFixed(4) + ")";
+    /* NOT WHILE IT IS BEING DRAGGED. Writing the element's own value back into
+       it mid-gesture fights the pointer: the thumb jumps to the played
+       position between two input events and the drag is unusable. */
+    if (!dragging) $("speak-seek").value = String(Math.round(at * scale * 1000));
+    $("speak-pos").textContent = mmss(at) + " / " + mmss(total);
+    $("speak-play").textContent = playing ? "Pause" : "Play";
+    /* The button is a lie while there is nothing to play. */
+    $("speak-play").disabled = quiet || failed || arrived <= 0;
   }
   function stopScheduled() {
     for (const src of live) { try { src.stop(); } catch {} }
@@ -4745,6 +4886,43 @@ function audioSink(ctx, plan) {
     nextStart = origin + held;
     for (const piece of made) schedule(piece, base);
     playing = true;
+  }
+  /* THE READER'S PAUSE. It clears `dry` on the way back up, which is the one
+     place that flag is ever lifted: running dry stops the graph for the rest
+     of the run and leaves the file to play at the end, and before this there
+     was no way to say "there is plenty of audio now, carry on". Pressing play
+     is that sentence. */
+  function toggle() {
+    if (quiet || failed) return;
+    if (playing) {
+      byHand = true;
+      hold();
+      /* The button now reads Play. A sentence saying the same thing in the
+         live region as well would announce it twice. */
+      say("flat", "");
+    } else if (arrived > held) {
+      byHand = false;
+      dry = false;
+      startFrom();
+      say("flat", "Playing as it is made.");
+    }
+    paint();
+  }
+  /* SEEKING CANNOT OUTRUN THE MODEL, and this clamp is the whole of that
+     promise: `arrived` is every sample that exists, so the furthest the thumb
+     can be let go is the last one made. Everything past it on the bar is the
+     estimate of a file that has not been synthesised yet, and dropping the
+     playhead there would be asking to hear silence. */
+  function scrub(fraction, commit) {
+    if (quiet || failed) return;
+    if (!dragging) { dragging = true; dragWas = playing && !byHand; }
+    if (playing) { stopScheduled(); playing = false; }
+    held = Math.max(0, Math.min(arrived, fraction * span()));
+    if (commit) {
+      dragging = false;
+      if (dragWas) { dry = false; startFrom(); }
+    }
+    paint();
   }
   function push(bytes) {
     if (carry) {
@@ -4828,6 +5006,17 @@ function audioSink(ctx, plan) {
       + (R > 0 ? R.toFixed(1) : "?") + "× realtime on the wire.";
   }
   function tick() {
+    /* THE END OF THE SOUND, not the end of the download. `live` empties as the
+       scheduled nodes finish, and once the body is closed too there is nothing
+       further to paint or to wait for. */
+    if (closed && playing && !live.length) {
+      playing = false;
+      held = arrived;
+      paint();
+      clearInterval(watch); watch = 0;
+      $("speak-transport").hidden = true;
+      return;
+    }
     if (failed || quiet || dry) { paint(); return; }
     /* A SUSPENDED CONTEXT IS THE BROWSER PAUSING, not the model falling
        behind. Saying the wrong one of those teaches people to distrust the
@@ -4836,6 +5025,9 @@ function audioSink(ctx, plan) {
     const R = rateNow();
     const remaining = Math.max(0, plan.T - arrived);
     if (!playing) {
+      /* PAUSED ON PURPOSE, OR MID-DRAG. Either way the watchdog has no opinion
+         about when the sound comes back: that is the reader's to say. */
+      if (byHand || dragging) { paint(); return; }
       if (arrived >= STREAM.floor && safe(headroom(), remaining, R)) {
         startFrom();
         say("flat", "Playing as it is made.");
@@ -4878,6 +5070,8 @@ function audioSink(ctx, plan) {
       openedAt = Date.now();
       $("speak-progress").hidden = false;
       $("speak-stop").hidden = false;
+      $("speak-transport").hidden = false;
+      $("speak-seek").value = "0";
       $("player").hidden = true;
       $("playrow").hidden = true;
       $("speak-meta").textContent = "";
@@ -4929,14 +5123,31 @@ function audioSink(ctx, plan) {
     },
     close() {
       closed = true;
-      clearInterval(watch); watch = 0;
       $("speak-progress").hidden = true;
+      /* THE GRAPH OUTLIVES THE RESPONSE, which is exactly what "playing as it
+         is made" means at the end: the last delta lands, the body finishes,
+         and there are still several seconds of scheduled audio to hear. Before
+         this the watchdog was cleared here, so the transport froze at the
+         moment the download completed and the position readout lied for the
+         rest of the playback. tick() now clears it once the graph is empty. */
+      if (!playing) { clearInterval(watch); watch = 0; }
+      paint();
     },
     /* STOP MEANS STOP THE SOUND, NOT THROW THE WORK AWAY. The body is still
        read to the end. Abandoning the reader trips tts-long's _sse_events
        finally, which cancels a queued or running job, and the reader gets the
        whole file at the end either way. visibilitychange never calls this. */
-    silence() { quiet = true; hold(); say("flat", ""); },
+    silence() {
+      quiet = true;
+      hold();
+      say("flat", "");
+      $("speak-transport").hidden = true;
+    },
+    /* THE TRANSPORT'S TWO VERBS, reaching the graph that is making the sound.
+       They are on the sink and not on the page because everything they touch
+       -- the scheduled nodes, the origin, the bank -- lives in this closure. */
+    toggle,
+    scrub,
     wrap(chunks) { return wavFrom(chunks, hz); },
     report() {
       const w = wireRate();
@@ -4984,18 +5195,35 @@ function textSink(plan) {
       $("speak-stop").hidden = false;
     },
     silence() {},
+    /* NOTHING IS PLAYING, so there is nothing to pause or to seek in. The
+       transport is never shown for this sink, and the methods exist so the
+       page can call them without asking which sink it has. */
+    toggle() {},
+    scrub() {},
     wrap: null,
     report() { return ""; },
   };
 }
 
 $("speak-stop").addEventListener("click", () => { if (speakSink) speakSink.silence(); });
+$("speak-play").addEventListener("click", () => { if (speakSink) speakSink.toggle(); });
+/* input WHILE DRAGGING, change WHEN LET GO, and they mean different things:
+   the first previews the position with the sound held, the second is the seek.
+   A range fires both on a keyboard press, which is what makes an arrow key one
+   complete seek rather than a drag that never ends. */
+const seekAt = () => Number($("speak-seek").value) / 1000;
+$("speak-seek").addEventListener("input", () => {
+  if (speakSink) speakSink.scrub(seekAt(), false);
+});
+$("speak-seek").addEventListener("change", () => {
+  if (speakSink) speakSink.scrub(seekAt(), true);
+});
 /* ONE VOICE AT A TIME, and this is the whole guard. The <audio> element with
    the assembled file and the Web Audio graph can both make a sound, and
    forgetting this is the most likely audible bug in the design. */
 $("player").addEventListener("play", () => { if (speakSink) speakSink.silence(); });
 
-async function speakNow(voice, text) {
+async function speakNow(voice, text, listen) {
   /* THE MODE IS DECIDED BEFORE THE REQUEST IS BUILT, so a browser with no
      usable AudioContext never asks for pcm and the format the reader chose is
      honoured. openAudio() runs here, in the task the click started and before
@@ -5024,10 +5252,31 @@ async function speakNow(voice, text) {
      Chatterbox at 0.23x would need three minutes of lead per minute of
      audio. */
   const useV1 = $("x-troute").value === "v1";
-  const streamed = useV1 && $("x-stream").value === "sse";
-  const plan = streamed ? speechPlan("kokoro", text) : null;
-  const ctx = plan && plan.mode === "audio" ? openAudio() : null;
-  const sink = !streamed ? null : ctx ? audioSink(ctx, plan) : textSink(plan);
+  /* NOT LISTENING MEANS NOT STREAMING, and that is a saving rather than a
+     restriction. A stream that plays nothing is strictly the slower way to get
+     the same bytes: the first chunks are small so the first sound arrives
+     early, and small chunks generate less efficiently -- 1.1x realtime at the
+     narrow end against 2.43x at full width. Measured end to end on the
+     deployed stack, the same 528 characters take 19.2 s streamed and 14.0 s
+     whole. So "Generate" asks for the file.
+
+     This overrides the Expert panel's stream control, which is a route
+     preference expressed before the reader chose which button to press. The
+     route itself -- /v1 or /speak -- is still theirs. */
+  const streamed = listen && useV1 && $("x-stream").value === "sse";
+  /* THERE IS ALWAYS A SINK NOW, and the reason is the button that was just
+     added. `Generate` deliberately does not stream, and with `sink` null the
+     whole of its feedback was the button greying -- no bar, no elapsed time,
+     nothing on screen for the fourteen seconds it runs. That is the exact
+     failure the press-frame bar was built to fix, reintroduced by the new
+     button rather than by the old code.
+
+     textSink needs no stream: it paints elapsed time against the plan's own
+     budget and plays nothing. So the buffered answer and the /speak route get
+     the same bar the silent streamed path already had. */
+  const plan = speechPlan("kokoro", text);
+  const ctx = streamed && plan.mode === "audio" ? openAudio() : null;
+  const sink = ctx ? audioSink(ctx, plan) : textSink(plan);
   if (speakSink) speakSink.silence();
   speakSink = sink;
   /* pcm is forced only where it is played as it is made, and syncSpeakControls
@@ -5052,7 +5301,7 @@ async function speakNow(voice, text) {
        this route means giving those up. */
     path = "/v1/audio/speech";
     body = { model:"kokoro", input:text, voice, response_format:format, speed };
-    if ($("x-stream").value === "sse") body.stream_format = "sse";
+    if (streamed) body.stream_format = "sse";
   } else {
     /* /speak is extra="forbid": an unknown field is a 422, so nothing
        speculative is sent. The field is `format`, not `response_format`. */

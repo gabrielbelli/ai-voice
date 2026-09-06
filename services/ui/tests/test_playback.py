@@ -1099,7 +1099,7 @@ def test_the_streamed_format_is_pcm_and_only_pcm():
     2 x 24000 is that chunk's exact duration. The sink requires it rather than
     degrading quietly into a format whose boundaries are a guess.
     """
-    speak = code(body_of("async function speakNow(voice, text)", "async function collectSSE"))
+    speak = code(body_of("async function speakNow(voice, text, listen)", "async function collectSSE"))
     assert 'const format = ctx ? "pcm"' in speak, "the streamed format is not forced"
     assert "const PCM_RATE = 24000;" in HTML
 
@@ -1177,7 +1177,7 @@ def test_the_clone_path_does_not_stream():
     Kokoro is the opposite case and is unaffected: 2.39x measured live, so
     generation outruns playback and the stream plays through.
     """
-    body = body_of("async function speakNow(voice, text)", "async function collectSSE")
+    body = body_of("async function speakNow(voice, text, listen)", "async function collectSSE")
     flat = re.sub(r"\s+", " ", code(body))
     assert 'model:"chatterbox"' not in flat, "a clone reaches the streaming path again"
     assert 'model:"kokoro"' in flat, "the Kokoro path went with it"
@@ -1195,7 +1195,7 @@ def test_a_stream_that_dies_half_way_still_hands_over_what_it_made():
     """
     collect = code(body_of("async function collectSSE", "/* Builds the highlight"))
     assert "err.chunks = chunks;" in collect, "the bytes die with the error"
-    speak = code(body_of("async function speakNow(voice, text)", "async function collectSSE"))
+    speak = code(body_of("async function speakNow(voice, text, listen)", "async function collectSSE"))
     assert "The stream ended early." in speak
     assert 'response.headers.get("x-job-id")' in speak
     assert "adopt(jobId)" in speak
@@ -1231,8 +1231,11 @@ def test_stopping_the_sound_does_not_throw_the_work_away():
     The same rule governs visibilitychange, which must never abort a reader.
     """
     sink = body_of("function audioSink(ctx, plan)", "\n/*\n  THE SINK THAT MAKES NO SOUND")
+    # The whole method, not its first line: silence() grew a body when the
+    # transport arrived, because stopping the sound has to take the transport
+    # with it.
     silence = sink[sink.index("silence()"):]
-    silence = silence[:silence.index("\n")]
+    silence = silence[:silence.index("\n    }")]
     assert "abort" not in silence.lower(), "Stop cancels the work"
     assert "quiet = true" in silence
     body = code(HTML)
@@ -1256,8 +1259,11 @@ def test_a_browser_with_no_audio_context_is_never_promised_anything():
     """Decided BEFORE the request is built, so response_format is never forced
     to pcm on a browser that cannot decode it, and the format the reader chose
     is honoured. No message, because nothing was promised."""
-    speak = code(body_of("async function speakNow(voice, text)", "async function collectSSE"))
-    assert "const ctx = plan && plan.mode === \"audio\" ? openAudio() : null;" in speak
+    speak = code(body_of("async function speakNow(voice, text, listen)", "async function collectSSE"))
+    assert "const ctx = streamed && plan.mode === \"audio\" ? openAudio() : null;" in speak
+    # AND `streamed` IS FALSE WHENEVER THE READER DID NOT ASK TO LISTEN, so
+    # pressing Generate cannot force pcm either.
+    assert "const streamed = listen && useV1" in speak
     opener = code(body_of("function openAudio()", "\n/* 44 bytes of RIFF"))
     assert "return null" in opener
     # And it is resumed inside the gesture, before the first await: a context
@@ -1308,7 +1314,7 @@ def test_the_bar_goes_up_in_the_press_frame_and_is_closed_on_every_path():
     life of the page on every buffered answer, every 202 and every failure
     before a byte of audio exists.
     """
-    speak = body_of("async function speakNow(voice, text)", "async function collectSSE")
+    speak = body_of("async function speakNow(voice, text, listen)", "async function collectSSE")
     flat = code(speak)
     assert "if (sink) sink.open();" in flat
     # Before the request is built, not after the headers come back.
@@ -1356,7 +1362,7 @@ def test_the_page_asks_for_the_chunk_plan_and_reads_the_answer():
     ASKED FOR ONLY WHERE IT IS USED. With no AudioContext nothing is played as
     it is made, so a ramp would buy that request nothing and cost it duration.
     """
-    speak = code(body_of("async function speakNow(voice, text)",
+    speak = code(body_of("async function speakNow(voice, text, listen)",
                          "async function collectSSE"))
     assert 'if (streamed && ctx) sending["X-Chunk-Plan"] = "1";' in speak
     assert 'sink.announce(response.headers.get("x-chunk-phonemes"))' in speak
@@ -1373,3 +1379,169 @@ def test_the_page_asks_for_the_chunk_plan_and_reads_the_answer():
     # to know which one it has.
     text_sink = code(body_of("function textSink(plan)", "\n$(\"speak-stop\")"))
     assert "announce() {}" in text_sink
+
+
+# ------------------------------------------------- the streamed transport --
+#
+# The <audio> element cannot serve a stream: it has no src until the file is
+# whole, because raw pcm cannot be appended to a SourceBuffer at all. So the
+# graph that is playing carries its own transport, and these are the properties
+# that separate it from a decorative one.
+
+
+def _sink() -> str:
+    return code(body_of("function audioSink(ctx, plan)",
+                        "\n/*\n  THE SINK THAT MAKES NO SOUND"))
+
+
+def test_the_seek_is_clamped_to_what_exists_not_to_the_bar_it_is_drawn_on():
+    """The rule the whole streaming design rests on -- playback must never win
+    the race against the model -- gets a new way to be broken the moment a
+    person can drag the playhead.
+
+    The bar is drawn against the ESTIMATED length of the finished file, because
+    a scale whose right-hand end is the last sample made would slide backwards
+    every delta. `arrived` is what actually exists. They are different numbers
+    for the whole of every stream, and the clamp has to be the second one.
+    """
+    sink = _sink()
+    assert "Math.min(arrived, fraction * span())" in sink, \
+        "a seek can land past the last sample that exists"
+
+
+def test_the_readers_pause_is_not_the_watchdogs_pause():
+    """tick() stops playback when the bank runs thin and starts it again when it
+    recovers; that is the design. If a press used the same state the watchdog
+    would undo it a fifth of a second later, and the Pause button would look
+    broken rather than the rule looking clever.
+    """
+    sink = _sink()
+    assert "let byHand = false;" in sink
+    assert "if (byHand || dragging) { paint(); return; }" in sink, \
+        "the watchdog can restart audio the reader paused"
+
+
+def test_a_drag_does_not_rebuild_the_graph_on_every_event():
+    """Rescheduling on each input event stops and restarts the sound dozens of
+    times across one drag, which is audible. The sound is held for the length of
+    the gesture and resumed once, on change."""
+    sink = _sink()
+    assert "if (!dragging) { dragging = true; dragWas = playing && !byHand; }" in sink
+    # And the paint must not fight the pointer by writing the played position
+    # back into the element the reader is dragging.
+    assert "if (!dragging) $(\"speak-seek\").value" in sink
+
+
+def test_the_position_never_reads_behind_the_seek_that_caused_it():
+    """startFrom() schedules against `ctx.currentTime + 0.05`, so for fifty
+    milliseconds after a resume the arithmetic returns a position EARLIER than
+    the one just asked for: seeking to 2.000 s read back 1.950 s, which rounds
+    down to a readout a whole second short. It corrects itself within one tick,
+    which is exactly what makes it worth stopping -- a readout that disagrees
+    with the seek teaches people the seek was inaccurate.
+    """
+    sink = _sink()
+    assert "Math.min(arrived, Math.max(held, clockNow() - origin))" in sink
+
+
+def test_the_transport_offers_no_speed_control():
+    """playbackRate on an AudioBufferSourceNode is resampling: it moves the
+    pitch with the rate, so 1.5x is a chipmunk. The <audio> element
+    time-stretches and holds the pitch, which is why the speed picker appears
+    with the finished file and not before it. The same control sounding
+    different two seconds apart is worse than the control being absent.
+    """
+    start = HTML.index('id="speak-transport"')
+    row = HTML[start:HTML.index("</div>", HTML.index('id="speak-pos"'))]
+    assert "playrate" not in row and "class=\"rate\"" not in row
+    assert "playbackRate" not in _sink(), "the streamed graph resamples for speed"
+
+
+def test_running_dry_is_recoverable_by_hand():
+    """`dry` stops the graph for the rest of the run and leaves the file to play
+    at the end, which is the rule being wrong out loud rather than papered over.
+    Before the transport there was no way to say "there is plenty of audio now,
+    carry on"; pressing play is that sentence, and it is the only place the flag
+    is ever lifted."""
+    sink = _sink()
+    toggle = sink[sink.index("function toggle()"):]
+    toggle = toggle[:toggle.index("\n  }")]
+    assert "dry = false;" in toggle
+
+
+def test_the_transport_outlives_the_download():
+    """The last delta lands, the body finishes, and there are still several
+    seconds of scheduled audio to hear -- which is what "playing as it is made"
+    means at the end. Clearing the watchdog in close() froze the transport at
+    the moment the download completed, so the position readout lied for the rest
+    of the playback."""
+    sink = _sink()
+    close = sink[sink.index("close() {"):]
+    close = close[:close.index("\n    }")]
+    assert "if (!playing) { clearInterval(watch); watch = 0; }" in close
+    # And it retires itself once the graph is empty rather than lingering.
+    assert 'if (closed && playing && !live.length) {' in sink
+
+
+# ----------------------------------------------------------- two presses --
+
+
+def test_there_are_two_buttons_and_only_one_of_them_listens():
+    """They are two different jobs. "Generate" wants the file: nothing plays and
+    nothing can run dry. "Generate & listen" wants the sound now, and accepts
+    that a stream is slower end to end -- small chunks generate less
+    efficiently, and the same 528 characters measured 19.2 s streamed against
+    14.0 s whole. One button could not be both, so the reader who only wanted a
+    .wav paid the streaming tax with no say in it.
+    """
+    assert 'id="go-tts"' in HTML and 'id="go-tts-quiet"' in HTML
+    speak = code(body_of("async function speakNow(voice, text, listen)",
+                         "async function collectSSE"))
+    assert "const streamed = listen && useV1" in speak
+    # The stream_format field follows the same decision, rather than being read
+    # a second time from the Expert control it was just overruled by.
+    assert "if (streamed) body.stream_format" in speak
+
+
+def test_both_buttons_go_dead_together():
+    """A press that produces no audio, no error and no sign that anything was
+    read is the most direct version of "the buttons do nothing" -- and adding a
+    second button is a second chance to have it."""
+    est = code(body_of("function estimate()", "\n/* The nearest instant voice"))
+    assert '$("go-tts").disabled = idle;' in est
+    assert '$("go-tts-quiet").disabled = idle;' in est
+    run = code(body_of("async function runSpeak(listen)",
+                       '\n$("go-tts").addEventListener'))
+    assert '$("go-tts").disabled = true;' in run
+    assert '$("go-tts-quiet").disabled = true;' in run
+
+
+def test_a_clone_has_no_listen_button():
+    """Chatterbox measures 0.23x realtime, so speechPlan sends it down the silent
+    path every time and a cloned voice does not stream at all -- it posts a job
+    and collects the finished audio, which is also what lets the reader close
+    the page. Two buttons doing the same thing under different names would be a
+    promise this backend cannot keep."""
+    est = code(body_of("function estimate()", "\n/* The nearest instant voice"))
+    assert '$("go-tts").hidden = voice.kind === "clone";' in est
+    assert '$("go-tts-quiet").classList.toggle("primary", voice.kind === "clone");' in est
+
+
+def test_the_quiet_press_still_gets_a_bar_in_the_press_frame():
+    """With `sink` null the whole of Generate's feedback was the button greying:
+    no bar, no elapsed time, nothing on screen for the fourteen seconds it runs.
+    That is the exact failure the press-frame bar exists to fix, reintroduced by
+    the new button rather than by the old code. textSink needs no stream."""
+    speak = code(body_of("async function speakNow(voice, text, listen)",
+                         "async function collectSSE"))
+    assert "const sink = ctx ? audioSink(ctx, plan) : textSink(plan);" in speak
+    assert "!streamed ? null" not in speak
+
+
+def test_the_position_readout_is_a_measurement_not_an_estimate():
+    """clock() is deliberately vague -- "about 2 minutes", five second steps --
+    because everywhere it is used it is quoting an ESTIMATE. A position readout
+    is a measurement, and rounding it the same way would be a different kind of
+    lie."""
+    sink = _sink()
+    assert "mmss(at)" in sink and "clock(at)" not in sink

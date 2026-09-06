@@ -836,8 +836,11 @@ def test_queue_it_anyway_queues_it():
     named still had to be started from the button the warning was covering.
     """
     start = HTML.index('$("anyway").addEventListener')
-    body = _code(HTML[start:start + 400])
-    assert '$("go-tts").click();' in body
+    body = _code(HTML[start:start + 600])
+    # AND IT PRESSES THE BUTTON THAT IS ON SCREEN. #go-tts is hidden for a
+    # cloned voice -- it offers to play a stream this backend never produces --
+    # so clicking it would be the same do-nothing press under a new name.
+    assert '$("go-tts-quiet").click();' in body
 
 
 def test_the_quick_voice_offered_is_one_the_picker_actually_has():
