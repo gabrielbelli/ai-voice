@@ -965,3 +965,40 @@ def test_the_page_invents_no_transcription_partials():
     form = HTML[HTML.index('$("go-stt").addEventListener'):]
     form = form[:form.index("/* ================================================== karaoke")]
     assert 'append("stream"' not in form
+
+
+def test_detecting_a_language_narrows_the_voices():
+    """THE DEFECT THIS PREVENTS, reported from a screenshot: the picker said
+    "Auto-detect (Portuguese)" above a list of every voice on the machine.
+
+    Narrowing the list is what detecting a language is FOR, and two things
+    stopped it. The filter read the control, which says the literal "auto", so
+    it never applied for anybody who left the default alone, which is
+    everybody. And nothing rebuilt the picker when the detection changed:
+    loadVoices is the only thing that builds it and it ran on a language
+    change, which auto-detect never causes.
+
+    Re-fetching per keystroke would have been two network calls per character.
+    The list is already in VOICES, so rendering is free and only the fetch
+    stays rare.
+    """
+    assert "function renderVoices()" in HTML, "the render half was never split out"
+    assert 'resolved.why === "detected" && resolved.iso ? resolved.iso : "auto"' in HTML
+    # Only when the answer changes: this runs on every keystroke, and
+    # rebuilding a 54-option select each time fights the person using it.
+    assert "if (stem !== _detectedStem) {" in HTML
+    assert "renderVoices();" in HTML
+
+
+def test_the_speed_slider_and_the_delete_button_share_one_slot():
+    """They overlapped on screen, and they can never both be meaningful.
+
+    Delete exists only for a cloned voice, and `speed` is a Kokoro request
+    field that Chatterbox answers with a 400. So a clone could never use the
+    slider and a Kokoro voice could never use the button: a clone was being
+    shown a control that could not work even before it collided with the one
+    next to it.
+    """
+    assert 'id="speedslot"' in HTML
+    assert 'id="speedwrap"' in HTML
+    assert '$("speedwrap").hidden = !$("delvoice").hidden;' in HTML

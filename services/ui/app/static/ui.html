@@ -851,17 +851,28 @@ details>summary:active{opacity:.72}
         <div>
           <label for="voice">Voice</label>
           <select id="voice"></select>
-          <button class="small link" id="delvoice" type="button" hidden>Delete this voice</button>
         </div>
-        <div>
+        <div id="speedslot">
           <!-- SYNTHESIS speed, not playback speed. Renamed the day a playback
                control arrived below: this one is a request field, it is sent
                to Kokoro, it is baked into the samples, it changes the file you
                download, and it is a 400 on Chatterbox. The one under the
                player is none of those things. Two controls both called "Speed"
                on one tab is a collision, and naming is the whole fix. -->
-          <label for="speed">Synthesis speed <output id="speedout" class="num">1.00</output></label>
-          <input type="range" id="speed" min="0.5" max="2" step="0.05" value="1">
+          <!-- ONE SLOT, TWO OCCUPANTS, AND NEVER BOTH AT ONCE. "Delete this
+               voice" used to sit under the picker and overlapped this label at
+               the widths the user actually browses at.
+               They are mutually exclusive by nature rather than by luck:
+               Delete exists only for a CLONED voice, and `speed` is a Kokoro
+               request field that Chatterbox refuses with a 400. So a cloned
+               voice can never use the slider and a Kokoro voice can never use
+               the button. Sharing the slot is the honest layout, and it also
+               stops the row growing a third column nobody needs. -->
+          <div id="speedwrap">
+            <label for="speed">Synthesis speed <output id="speedout" class="num">1.00</output></label>
+            <input type="range" id="speed" min="0.5" max="2" step="0.05" value="1">
+          </div>
+          <button class="small link" id="delvoice" type="button" hidden>Delete this voice</button>
         </div>
       </div>
 
@@ -3796,10 +3807,18 @@ function populateLanguages() {
     ? previous : "auto";
 }
 
-/* Which Kokoro voices belong to the chosen language. Auto-detect shows every
-   one of them: with no language chosen there is nothing to filter by, and
-   hiding voices behind a guess about half-typed text would be worse than
-   showing them all. */
+/* Which Kokoro voices belong to the language in force.
+   AUTO-DETECT FILTERS TOO, and not filtering was the defect. This used to
+   return every voice whenever the control read "auto", on the argument that
+   hiding voices behind a guess about half-typed text is worse than showing
+   them all. That argument holds for a guess and not for an answer: the picker
+   said "Auto-detect (English)" while offering Japanese and Mandarin voices,
+   which is the page disagreeing with itself on one line of the screen.
+   Narrowing the list IS what detecting a language is for.
+
+   Only a real reading narrows anything. resolvedLanguage() returns why it
+   chose, and `unsupported` and `undetected` still show everything, because
+   those mean the page does not know rather than knows something. */
 function voicesForLanguage(kokoro, code) {
   const all = (kokoro && kokoro.voices) || [];
   if (!code || code === "auto") return all;
@@ -3869,26 +3888,57 @@ function showDetected() {
   const name = resolved.why === "detected"
     && LANG_NAMES[(resolved.iso || "").split("-")[0]];
   auto.textContent = name ? `Auto-detect (${name})` : "Auto-detect";
+
+  /* AND THE VOICES FOLLOW, which is the point of detecting at all. Only when
+     the answer CHANGES: this runs on every keystroke and rebuilding a
+     54-option select each time would fight the person using it, including
+     taking the focus off an open dropdown. */
+  const stem = name ? (resolved.iso || "").split("-")[0] : "";
+  if (stem !== _detectedStem) {
+    _detectedStem = stem;
+    if (VOICES && VOICES.kokoro) renderVoices();
+  }
 }
+let _detectedStem = "";
 
 
+/* FETCH ONCE, RENDER WHENEVER THE LANGUAGE MOVES.
+   These were one function, and that is why detecting a language changed the
+   label and not the list: the picker is only ever built here, and on
+   auto-detect nothing called this again after the first load. Typing
+   Portuguese therefore said "Auto-detect (Portuguese)" above a list of every
+   voice on the machine, which is the page contradicting itself on one line.
+
+   Re-fetching on every keystroke was the obvious fix and the wrong one: two
+   network calls per character. The list is already in VOICES, so rendering is
+   free and only the fetch needs to stay rare. */
 async function loadVoices() {
-  const select = $("voice");
   let kokoro = null, clones = [];
   try { kokoro = await json("/voices"); }
   catch (err) { note($("speak-note"), "bad", "Could not list voices: " + err.message); }
   try { clones = (await json("/ui/clips")).voices || []; } catch { clones = []; }
   VOICES = { kokoro: kokoro || {}, clones };
+  renderVoices();
+}
+
+function renderVoices() {
+  const select = $("voice");
+  const kokoro = VOICES.kokoro || {};
+  const clones = VOICES.clones || [];
 
   const group = (label, names) => names && names.length
     ? `<optgroup label="${label}">` +
       names.map(n => `<option value="k:${n}">${n}</option>`).join("") + "</optgroup>"
     : "";
 
-  const chosenLang = $("lang").value;
-  /* FILTERED BY THE LANGUAGE ABOVE. On auto-detect this is every voice, so the
-     picker is unchanged from before for anyone who never touches the control;
-     choose a language and the 54 become the handful that can speak it. */
+  /* THE LANGUAGE IN FORCE, which on auto-detect is what was detected rather
+     than the literal string "auto". Reading the control alone is what made the
+     filter dead for everybody who never opened it, which is everybody, since
+     auto-detect is the default. */
+  const picked = $("lang").value;
+  const resolved = resolvedLanguage();
+  const chosenLang = picked !== "auto" ? picked
+                   : (resolved.why === "detected" && resolved.iso ? resolved.iso : "auto");
   const all = voicesForLanguage(kokoro, chosenLang);
   const known = new Set([...(kokoro && kokoro.en_us || []),
                          ...(kokoro && kokoro.en_gb || []),
@@ -3975,6 +4025,10 @@ function onVoiceChange() {
      "default": it is the model's own speaker, there is no file behind it, and
      the delete would 404 on a voice the user cannot break. */
   $("delvoice").hidden = !clone || builtin;
+  /* The slider goes when the button arrives. See the comment on #speedslot:
+     Chatterbox answers 400 to `speed`, so a clone showing a speed control was
+     offering something that could not work even before it overlapped. */
+  $("speedwrap").hidden = !$("delvoice").hidden;
   syncSpeakControls();
   /* populateLanguages() is NOT called here any more. The list used to be built
      from the chosen voice's engine, so it had to be rebuilt whenever the voice
