@@ -104,6 +104,16 @@ def _health_details() -> dict[str, object]:
         "vad": pipeline.VAD_ENABLED,
         "threads": pipeline.THREADS,
         "max_concurrent": pipeline.MAX_CONCURRENT,
+        # WHICH MACHINE ANSWERED. Every run record carries this label, so a
+        # reader looking at a listing needs somewhere to check what it means.
+        "host_label": pipeline.runlog.host,
+        # A DROPPED RECORD IS INVISIBLE AS AN ABSENCE. The record queue is
+        # bounded and drops rather than delaying a transcript, which is only
+        # the right trade while somebody can see it happening: `dropped` going
+        # up, or `last_error` holding a status, is the difference between
+        # "nothing ran" and "the log could not keep up". Reading two counters
+        # off an object does not block, which is this function's one rule.
+        "runlog": pipeline.runlog.stats(),
     }
 
 
@@ -163,6 +173,11 @@ def transcribe(
         # telling a client its audio is the wrong rate is the documented
         # behaviour it was built with.
         allow_resample=False,
+        # Which door this came in by, for the run record and nothing else. The
+        # client is left null on purpose: the page, a script and a shell all
+        # send the same multipart body here, and a guess made from a user agent
+        # would be stored as a fact.
+        origin=pipeline.Origin(route="/transcribe"),
     )
     return Transcript(
         text=result.text,

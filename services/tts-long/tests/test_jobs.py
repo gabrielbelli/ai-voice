@@ -3,6 +3,7 @@
 # ------------------------------------------- surviving a restart --
 
 
+import json
 from pathlib import Path
 
 def test_finished_jobs_are_recovered_from_disk(tmp_path, monkeypatch):
@@ -126,7 +127,7 @@ def test_a_recovered_cancelled_job_does_not_claim_to_be_done(speech):
     job = speech.post("/jobs", json={"text": "A line to cancel."}).json()
     _wait(speech, job["id"])
     main.jobs[job["id"]]["status"] = "cancelled"
-    main._write_sidecar(main.jobs[job["id"]])
+    main._write_record(main.jobs[job["id"]])
 
     main.jobs.clear()
     main._recover()
@@ -141,7 +142,7 @@ def test_the_sidecar_is_removed_with_the_audio(speech):
 
     job = speech.post("/jobs", json={"text": "A line to discard."}).json()
     _wait(speech, job["id"])
-    sidecar = main.OUT_DIR / f"{job['id']}.json"
+    sidecar = main._sidecar(job["id"])
     assert sidecar.exists(), "nothing was written to remove"
 
     assert speech.delete(f"/jobs/{job['id']}").json()["status"] == "deleted"
@@ -187,18 +188,37 @@ def test_a_corrupt_sidecar_still_recovers_the_audio(tmp_path, monkeypatch):
     assert "voice" not in main.jobs["abc-123"], "half a file is not a fact"
 
 
-def test_an_orphan_sidecar_is_not_left_on_disk(tmp_path, monkeypatch):
-    """Audio deleted from outside leaves a {id}.json describing nothing that
-    can be played or listed. Removed for the same reason the sweeper exists."""
+def test_a_record_whose_audio_went_from_outside_is_kept_and_says_so(
+        tmp_path, monkeypatch):
+    """THE RULE THAT WAS INVERTED, and the reason it had to be.
+
+    This used to assert the opposite: a {id}.json with no audio behind it was
+    an ORPHAN and was deleted, because _recover walked audio files and a record
+    with no file described nothing anybody could play. That rule already needed
+    one exemption, for audio deleted on purpose -- and instant speech and
+    transcriptions keep no audio at all, so records with no file are now the
+    majority. A rule that needs a second exemption is the wrong rule.
+
+    The record is the index now. The row survives, with no player, and says
+    `expired` rather than `deleted`: nobody pressed anything, so saying they
+    did would be a lie about the reader's own actions.
+    """
     from app import main
 
     monkeypatch.setattr(main, "OUT_DIR", tmp_path)
     monkeypatch.setattr(main, "jobs", {})
-    orphan = tmp_path / "gone-999.json"
-    orphan.write_text('{"voice": "narrator"}')
+    legacy = tmp_path / "gone-999.json"
+    legacy.write_text('{"voice": "narrator", "status": "done"}')
 
-    assert main._recover() == 0
-    assert not orphan.exists()
+    assert main._recover() == 1
+    row = main.jobs["gone-999"]
+    assert row["voice"] == "narrator", "the record went with the audio"
+    assert row["audio_expired"] is True
+    assert not row.get("audio_deleted"), "nobody pressed anything"
+    # Moved out of the audio directory on the way, once, so nothing has to look
+    # in two places for the same fact ever again.
+    assert not legacy.exists()
+    assert (tmp_path / "runs" / "gone-999.json").exists()
 
 
 def test_a_segments_only_job_does_not_break_the_whole_listing(speech):
@@ -284,19 +304,23 @@ def test_chatterbox_is_the_slower_talker_and_the_constant_says_so(speech):
 def test_a_job_that_vanished_before_it_ran_does_not_kill_the_worker(speech):
     """THE DEFECT THIS PREVENTS: one lost id silently stopping every later job.
 
-    `jobs` is read from the event loop and from the worker thread while DELETE
-    and the sweeper both pop from it. The worker used to read `jobs[job_id]`
+    `jobs` is read from the event loop and from the lane threads while DELETE
+    and the sweeper both pop from it. The old worker read `jobs[job_id]`
     OUTSIDE its try block, so an id whose row had gone raised KeyError straight
     out of the `while True` loop and ended the only thread that runs anything.
     Nothing logged it and nothing restarted it: every job submitted afterwards
     would sit at `queued` for ever, and the service would look alive.
+
+    With lanes the same mistake would kill ONE lane and leave the other, which
+    is worse -- the service would look half-well and nothing would say which
+    half. The id is dropped in the chooser, before any lane is given it.
 
     So the failure is deliberately provoked, and then a real job has to prove
     the queue still works.
     """
     from app import main
 
-    main.queue.put("a-job-id-that-is-not-in-the-dict")
+    main.dispatch.submit("a-job-id-that-is-not-in-the-dict")
 
     job = speech.post("/jobs", json={"text": "One short line, spoken once.",
                                      "voice": "default"}).json()
@@ -395,13 +419,11 @@ def _paced(monkeypatch):
     started: list[str] = []
     release = threading.Event()
 
-    def paced(self, text, language, exaggeration, cfg_weight, temperature,
-              reference):
+    def paced(self, text, language, controls, reference):
         started.append(text)
         if len(started) > 1:
             assert release.wait(20), "the worker was never released"
-        return original(self, text, language, exaggeration, cfg_weight,
-                        temperature, reference)
+        return original(self, text, language, controls, reference)
 
     monkeypatch.setattr(synth_module.Synth, "_speak", paced)
     return started, release
@@ -484,3 +506,59 @@ def test_the_published_boundaries_are_a_copy_of_the_workers_list(speech, monkeyp
     _wait(speech, created["id"])
     assert held == [0.0], "the published list grew: it was the worker's own"
     assert len(main.jobs[created["id"]]["offsets"]) == 3
+
+
+# ------------------------------------------------- honoured or refused ------
+
+
+def test_an_unknown_field_on_jobs_is_refused_not_dropped(speech):
+    """THE MOST DANGEROUS LINE IN THIS RELEASE, AND IT PREDATES IT.
+
+    `JobRequest` had no `model_config`, so POST /jobs accepted and SILENTLY
+    DISCARDED any unknown field -- `{"model": "chatterbox-turbo"}` included,
+    before a second engine existed. The page uses /jobs exclusively and always
+    will, so shipping the engine selector on /v1/audio/speech and not here would
+    ship a page that asks for turbo, gets the other engine, and reports no error
+    anywhere in the stack.
+    """
+    refused = speech.post("/jobs", json={"text": "hello", "voice": "default",
+                                         "totally_unknown_field": 123})
+    assert refused.status_code == 422, refused.text
+    said = json.dumps(refused.json())
+    assert "totally_unknown_field" in said
+
+
+def test_the_jobs_error_shape_is_still_detail(speech):
+    """/jobs has answered `{"detail": ...}` since before OpenAI's envelope
+    existed here and something out there parses it. One function decides WHAT is
+    refused; each route decides how its own callers are told, and unifying the
+    two would be a wire change nobody asked for."""
+    pydantic = speech.post("/jobs", json={"text": "hi", "voice": "default",
+                                          "nope": 1})
+    assert "detail" in pydantic.json() and "error" not in pydantic.json()
+
+    ours = speech.post("/jobs", json={"text": "hi", "voice": "no-such-voice"})
+    assert ours.status_code == 400
+    assert "detail" in ours.json() and "error" not in ours.json()
+
+
+def test_a_model_this_service_does_not_have_is_refused_by_name(speech):
+    """Named, listed, and with the OpenAI aliases explained -- because the
+    commonest reason to see this is a typo and the second commonest is a client
+    that assumed `tts-1-hd` meant something different here."""
+    refused = speech.post("/jobs", json={"text": "hi", "voice": "default",
+                                         "model": "chatterbox-ultra"})
+    assert refused.status_code == 400
+    said = refused.json()["detail"]
+    assert "chatterbox-ultra" in said and "chatterbox" in said
+
+
+def test_the_model_openai_names_resolve_to_this_services_default(speech):
+    """They have always meant this; the difference is that saying so is now a
+    decision with an alternative rather than a description of the only thing
+    there was."""
+    for name in ("tts-1", "tts-1-hd", "gpt-4o-mini-tts", "tts-long"):
+        created = speech.post("/jobs", json={"text": "hi", "voice": "default",
+                                             "model": name})
+        assert created.status_code == 202, (name, created.text)
+        assert created.json()["engine"] == "chatterbox"

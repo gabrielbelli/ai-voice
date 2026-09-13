@@ -248,6 +248,23 @@ label{display:block;font-size:var(--t-label);line-height:1.45;color:var(--dim);
 .note.flat{background:none;color:var(--dim);border-left:2px solid var(--line);
   border-radius:0;padding:var(--s1) 0 var(--s1) var(--s3)}
 .note .acts{margin-top:var(--s2);display:flex;gap:var(--s2);flex-wrap:wrap}
+/* THE ENGINE PICKER IS A RADIO GROUP AND NOT A SELECT, which is the one place
+   this tab departs from the shape of the controls beside it. A closed <select>
+   shows one line, and the whole decision here is a COMPARISON -- 23 languages
+   and expression controls against English only and quicker. A control that
+   hides the alternative until it is opened is a control that answers the
+   question after the choice has been made.
+   .off is a refusal that stays on screen: an engine this voice or this
+   deployment cannot use is greyed WITH ITS REASON BESIDE IT, never removed.
+   Hiding it is how a second engine stays invisible for its whole life. */
+#enginerow{border:0;padding:0;margin:var(--s4) 0 0;min-width:0}
+#enginerow>legend{padding:0;font-size:var(--t-label);font-weight:600;
+  color:var(--dim);letter-spacing:.005em}
+.engine{display:flex;gap:var(--s2);align-items:baseline;padding:var(--s1) 0;
+  cursor:pointer}
+.engine input{flex:0 0 auto;margin:0;accent-color:var(--accent)}
+.engine .why{color:var(--dim);font-size:var(--t-label)}
+.engine.off{cursor:default;color:var(--dim)}
 [hidden]{display:none !important}
 
 /* ------------------------------------------------------------- expert -- */
@@ -440,6 +457,10 @@ dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
    names. The second is that listening rates are chosen from a short list;
    nobody wants 1.07x, and a range invites it. */
 .rate{width:auto;min-width:6rem;padding-right:6px}
+/* The two job filters sit on the card header beside an h2 and a button, so
+   they size to their own longest option rather than taking the width:100%
+   every other select on this page is given. Same reason .rate exists. */
+.jobsel{width:auto;min-width:0;max-width:13rem}
 
 /* -------------------------------------------------------- karaoke ----- */
 /* THREE REDUNDANT CHANNELS, NOT ONE: background, weight, and an underline.
@@ -880,6 +901,12 @@ details>summary:active{opacity:.72}
         <div>
           <label for="lang">Language</label>
           <select id="lang"></select>
+          <!-- WHY THE CONTROL IS GREY, BESIDE THE CONTROL. An engine whose
+               speakers are per-language embeddings takes no language field at
+               all, and greying a control with no sentence next to it reads as
+               a bug rather than as an answer. Empty and invisible otherwise;
+               syncLanguageForEngine is the only writer. -->
+          <div class="hint" id="langsaid"></div>
         </div>
         <div>
           <label for="voice">Voice</label>
@@ -908,6 +935,25 @@ details>summary:active{opacity:.72}
           <button class="small link" id="delvoice" type="button" hidden>Delete this voice</button>
         </div>
       </div>
+
+      <!-- THE ENGINE IS A REQUEST FIELD, so it sits with the request controls
+           and not inside the voice list. A second Chatterbox optgroup would
+           have doubled every clone in the picker, changed the `c:` prefix that
+           bookmarks and stored jobs are keyed on, and made "which model" a
+           property of the speaker rather than of the request -- which it is
+           not: the same clip is read by either engine.
+
+           EMPTY AND HIDDEN UNTIL /health SAYS OTHERWISE. Every option, every
+           label, every language and every speed under it is rendered from
+           GET /health.engines, because a list written here would be the fifth
+           model table on this stack and the only one with no way to be right.
+           One engine offered, or a tts-long that predates the block, draws no
+           control at all and the page behaves exactly as it did. -->
+      <fieldset id="enginerow" hidden>
+        <legend>Engine</legend>
+        <div id="engineopts"></div>
+        <div class="hint" id="enginenote" aria-live="polite"></div>
+      </fieldset>
 
       <!-- The clone sheet: ONE revealed row, and it appears only when the
            picker's last option is chosen. Recording is primary and uploading
@@ -1107,13 +1153,25 @@ details>summary:active{opacity:.72}
                THREE SLIDERS AT NON-STOCK VALUES is the state people get lost
                in, which is why Reset to defaults exists. CLONE_DEFAULTS holds
                the values it restores. -->
-          <div class="grid2">
+          <!-- TWO OF THESE THREE SLIDERS ARE NOT UNIVERSAL, and the day a
+               second engine arrived they stopped being controls at all on it.
+               Chatterbox Turbo builds no emotion-conditioning layer and has no
+               classifier-free-guidance path, so exaggeration and cfg_weight
+               reach generate(), are logged as a warning and are discarded --
+               and this service refuses them by name rather than passing that
+               on. A slider whose value is refused is worse than an absent one:
+               it is a promise the request cannot keep.
+
+               So the pair is a group that can leave, with one line in its
+               place saying why. Temperature survives on both engines and
+               stays. Reset to defaults stays with the sliders that are there;
+               CLONE_DEFAULTS still holds all three, because the panel comes
+               back whole the moment the engine that has them is chosen. -->
+          <div class="grid2" id="clone-expressive">
             <div><label>exaggeration <span class="hint">0–1, default 0.3</span></label>
               <div class="slider"><input type="range" id="x-exag" min="0" max="1" step="0.05" value="0.3"><output>0.30</output></div></div>
             <div><label>cfg_weight <span class="hint">0–1, default 0.3</span></label>
               <div class="slider"><input type="range" id="x-cfg" min="0" max="1" step="0.05" value="0.3"><output>0.30</output></div></div>
-            <div><label>temperature <span class="hint">0.1–1.5, default 0.6</span></label>
-              <div class="slider"><input type="range" id="x-temp" min="0.1" max="1.5" step="0.05" value="0.6"><output>0.60</output></div></div>
             <div><label>cross-language transfer</label>
               <!-- Resemble's own guidance for cross-language cloning. It names
                    the Language control, because "the one selected" makes the
@@ -1121,6 +1179,16 @@ details>summary:active{opacity:.72}
               <div class="hint">If the clip's language differs from the
                 Language control, set cfg_weight to 0.</div>
             </div>
+          </div>
+          <div class="note flat" id="clone-noexpress" hidden></div>
+          <!-- TEMPERATURE CAN LEAVE TOO, and it used to sit outside the group
+               that can, on the argument that it survives on both engines --
+               true of the two that existed. An engine that reads no
+               temperature at all would have been left showing this one slider
+               with its value refused by name at the server. -->
+          <div class="grid2" id="clone-temp">
+            <div><label>temperature <span class="hint">0.1–1.5, default 0.6</span></label>
+              <div class="slider"><input type="range" id="x-temp" min="0.1" max="1.5" step="0.05" value="0.6"><output>0.60</output></div></div>
           </div>
           <div class="row" style="margin-top:12px">
             <button class="small tight" id="resetclone" type="button">Reset to defaults</button>
@@ -1150,9 +1218,38 @@ details>summary:active{opacity:.72}
              that was often empty. -->
         <h2 class="tight">Jobs</h2>
         <span class="spacer"></span>
-        <label class="tight" id="onlyaudiowrap" hidden>
-          <input type="checkbox" id="onlyaudio"> Only with audio
-        </label>
+        <!-- ALWAYS ON SCREEN, AND THAT IS A DELIBERATE REVERSAL. The
+             checkbox these replace appeared only when it would actually hide
+             something, which was right while it defaulted to off: a control
+             that can change nothing is furniture. These default to something
+             OTHER than everything, so the same rule inverted would hide the
+             only explanation on the page for why a row somebody remembers is
+             missing. The counts in the option text are the second half of
+             that -- "Everything (412)" is legible on the closed select without
+             opening it, which is what stops a default filter reading as data
+             loss.
+
+             BOTH ARE SENT TO tts-long AS QUERY PARAMETERS, and the answer is
+             NOT filtered again here. The service returns every live job and
+             every failed job whatever the filter says, because a row that
+             disappears at the moment you are watching it reads as data loss; a
+             second pass on this side would throw away exactly the rows those
+             two rules exist to keep. -->
+        <select class="tight jobsel" id="jobkind"
+                aria-label="Which kind of run to list">
+          <option value="all">All kinds</option>
+          <option value="clone">Cloned voices</option>
+          <option value="speech">Speech</option>
+          <option value="transcribe">Transcriptions</option>
+        </select>
+        <select class="tight jobsel" id="jobfilter"
+                aria-label="Which runs to list">
+          <option value="playable">Playable</option>
+          <option value="all">Everything</option>
+          <option value="deleted">Audio deleted</option>
+          <option value="expired">Audio expired</option>
+          <option value="failed">Failures</option>
+        </select>
         <button class="small tight" id="refresh" type="button">Refresh</button>
       </div>
 
@@ -1170,6 +1267,13 @@ details>summary:active{opacity:.72}
       <div id="jobplay" hidden>
         <div class="hint" id="jobplaying" aria-live="polite"></div>
         <audio id="jobplayer" controls style="width:100%;margin-top:6px"></audio>
+        <!-- ONE LINE, AT THE PLAYER, ONCE PER BROWSER. An engine that
+             normalises lower than the one beside it produces audio that sounds
+             wrong rather than quiet, and the first thing anybody does about
+             that is go back and move a slider -- on an engine that has no
+             sliders. Said where the sound is, not in a paragraph on another
+             tab, and never again after it has been read once. -->
+        <div class="note flat" id="jobloud" hidden></div>
         <div class="row" style="margin-top:6px;align-items:center">
           <div class="tight">
             <label for="jobrate">Playback speed</label>
@@ -1529,27 +1633,134 @@ function backendHealth(name) {
 function ttsLongHealth() { return backendHealth("tts_long"); }
 function kokoroHealth() { return backendHealth("tts"); }
 
-/* WHICH MACHINE THE NEXT CLONE JOB RUNS ON, read from the same document that
-   states the rates. tts-long hands a job to the GPU runner when the runner
-   will take work and the service it offers is chatterbox, and runs it on this
-   server's CPU otherwise. */
-function cloneBackend() {
+/* ------------------------------------------------------------- engines --
+   WHAT THIS DEPLOYMENT OFFERS, FROM THE SERVICE THAT OWNS THE ANSWER, and
+   NOTHING ABOUT AN ENGINE IS WRITTEN DOWN ON THIS SIDE. The label, the
+   languages, the fields that reach generate(), the shortest usable reference
+   clip and both lanes' readiness all come out of /health.engines. This page
+   has four model tables already and every one of them has been wrong at least
+   once; a fifth, in the browser, would be the only one nobody could correct
+   without a redeploy.
+
+   {} IS THE ANSWER BEFORE /health LANDS AND ON A tts-long THAT PREDATES THE
+   BLOCK, and both of those mean the same thing here: one engine, no picker,
+   no `model` on the wire, today's behaviour byte for byte. */
+function engines() { return ttsLongHealth().engines || {}; }
+function engineSpec(id) { return (id && engines()[id]) || null; }
+function engineIds() { return Object.keys(engines()); }
+/* The engine an absent `model` resolves to, which the service names rather
+   than the page assuming it is the first key. */
+function defaultEngine() {
+  const all = engines();
+  return engineIds().find(id => all[id] && all[id].default) || engineIds()[0] || null;
+}
+
+/* THE ENGINE THE NEXT CLONE JOB WILL USE: the control while it is on screen
+   holding an offered id, and the deployment's default otherwise -- which is
+   also the answer before /health has arrived and on a deployment that offers
+   one engine and draws no control at all.
+
+   NULL IS A REAL ANSWER. It means this page does not know that a choice
+   exists, and the request then carries no `model` and lets tts-long resolve
+   its own default. Guessing a name here is how a page asks for an engine a
+   deployment has not enabled and gets a 400 nobody typed. */
+function engineInputs() {
+  return [...document.querySelectorAll('input[name="engine"]')];
+}
+function currentEngine() {
+  /* A PRESET VOICE CARRIES ITS ENGINE AND A CLIP DOES NOT, and that asymmetry
+     is the whole reason there is a radio at all. The same wav in TTS_VOICE_DIR
+     is read by either Chatterbox, so which one runs is a question nothing but
+     the reader can answer. A preset voice is a tensor baked into ONE
+     checkpoint's weights: asking which engine should read it is asking which
+     model should load a file only one model has, and a radio that could
+     disagree with the picker is a page that says one thing and sends another. */
+  const voice = currentVoice();
+  if (voice.kind === "preset" && voice.engine) return voice.engine;
+  /* THE PROPERTY, NOT `:checked`. Radios are re-rendered from this document
+     every time /health answers, so the attribute and the property part company
+     the moment somebody clicks one, and it is the property that says what the
+     reader chose. */
+  const picked = engineInputs().find(input => input.checked);
+  return picked && engineSpec(picked.value) ? picked.value : defaultEngine();
+}
+
+/* THE VOICES ONE ENGINE CARRIES IN ITS OWN WEIGHTS, or null when its voices
+   are an open set named somewhere else -- a directory of reference clips.
+   The two are not the same field with a different length: null means "ask the
+   clip store", and a LIST means "these twenty and no others, ever". */
+function presetVoices(id) {
+  const spec = engineSpec(id);
+  return spec && Array.isArray(spec.voices) ? spec.voices : null;
+}
+
+/* WHAT KIND OF VOICE AN ENGINE HAS, DERIVED AND NEVER STORED IN AN OPTION.
+   `reference_audio` is the fact -- whether any source file in that checkpoint
+   takes a reference clip -- and it is deliberately separate from
+   min_reference_seconds, which is already 0.0 for a Chatterbox that needs no
+   minimum. "No minimum" and "there is no speaker encoder" are different
+   answers and one field cannot carry both.
+
+   ABSENT MEANS CLONE, because every engine this stack has shipped until now
+   clones, and a tts-long that predates the field must keep behaving exactly as
+   it does today. */
+function engineKind(id) {
+  const spec = engineSpec(id);
+  if (!spec) return null;
+  return presetVoices(id) || spec.reference_audio === false ? "preset" : "clone";
+}
+
+/* WHICH LANE THIS ENGINE'S NEXT JOB RUNS ON.
+
+   THE SERVICE ID IS NOT COMPARED TO A NAME THIS FILE SPELLS, and it used to
+   be: `r.service === "chatterbox"` was the fourth model table, and it failed
+   in the worst direction -- any other id read as "local", so the page showed
+   the NAS rate for a job about to run on the card, confidently and with no
+   sign anything had been assumed. The engine block answers it per engine now,
+   because with two of them the runner may be able to serve one and not the
+   other. Without that block there is one engine and the runner's own
+   can_run is the whole answer. */
+/* AND NO LANE IS NOT "local". This returned "local" for anything the runner
+   could not take, which was true while every engine had a local lane and
+   became a lie the day one did not: local.ready is "is it in
+   TTS_LOCAL_ENGINES", a deployment fact rather than a warm one, and an engine
+   left out of that list has NO lane on this server at all. Reading "local" for
+   it keys the rate on a lane that will never run it, and the ETA beside the
+   button then quotes a figure measured on a different model. Null is the
+   answer cloneRate already knows how to hold. */
+function cloneBackend(engine) {
+  const spec = engineSpec(engine === undefined ? currentEngine() : engine);
+  if (spec) {
+    if (spec.runner && spec.runner.ready) return "runner";
+    if (spec.local && spec.local.ready) return "local";
+    /* Both rows absent is a tts-long that predates them, and its one engine
+       runs here: today's answer, byte for byte. */
+    return spec.local || spec.runner ? null : "local";
+  }
   const r = ttsLongHealth().runner;
-  return (r && r.can_run && r.service === "chatterbox") ? "runner" : "local";
+  return (r && r.can_run) ? "runner" : "local";
 }
 
 /* THE RATE OF THE MACHINE THAT WILL RUN IT, or null.
-   realtime_factor_by_backend is keyed "local" and "runner". The merged
-   ttsLongHealth().realtime_factor beside it averages a NAS CPU at 0.21 with a
-   GPU at 0.7 and describes no machine that exists, which is why it is not the
-   one read here.
+   realtime_factor_by_engine is keyed "lane/engine" -- "local/chatterbox",
+   "runner/chatterbox-turbo" -- because one lane running two engines 2.36x
+   apart has two rates and an average of them describes nothing. The older
+   realtime_factor_by_backend, keyed by lane alone, is still read for a
+   tts-long that publishes only that. The merged ttsLongHealth().realtime_factor
+   beside both averages a NAS CPU at 0.21 with a GPU at 0.7 and describes no
+   machine that exists, which is why it is not the one read here.
 
    NULL IS A REAL ANSWER AND NOT A ZERO. The live payload carries
    {"local": 0.21} and no "runner" key at all while the runner sits there able
-   to run, so the next job can go to a backend nothing has ever measured. */
-function cloneRate() {
-  const by = ttsLongHealth().realtime_factor_by_backend || {};
-  const f = by[cloneBackend()];
+   to run, so the next job can go to a backend nothing has ever measured -- and
+   a second engine starts life with a seed and zero observations behind it. */
+function cloneRate(engine) {
+  const id = engine === undefined ? currentEngine() : engine;
+  const lane = cloneBackend(id);
+  const health = ttsLongHealth();
+  const perEngine = health.realtime_factor_by_engine || {};
+  const f = id && perEngine[lane + "/" + id] > 0 ? perEngine[lane + "/" + id]
+          : (health.realtime_factor_by_backend || {})[lane];
   return f > 0 ? f : null;
 }
 
@@ -1573,8 +1784,8 @@ const rate = {
      will actually use. The fallback is reached before /health has answered
      and for a backend nothing has run on yet; 0.275 is what 449 characters
      measured on this server's own CPU. */
-  clone: () => {
-    const f = cloneRate();
+  clone: (engine) => {
+    const f = cloneRate(engine);
     return f > 0 ? f : 0.275;
   },
   /* tts-stack reports its own realtime factor now, so the constant is a
@@ -1675,6 +1886,14 @@ function safe(headroom, remaining, R) {
    can be a seed rather than a measurement -- which is exactly why the rate
    measured on the wire outranks this one from the second delta on. */
 function priorRate(engine) {
+  /* AN ENGINE ID IS ASKED OF THAT ENGINE. This read the merged clone rate for
+     the literal string "clone" and Kokoro's for everything else, so a third
+     engine handed in by name collected KOKORO's 2.79 -- and STREAM.minRate,
+     the one clause that stops this page streaming a backend that cannot keep
+     up, would have waved a 0.104x job straight through onto the audio path.
+     "kokoro" and "clone" survive as the two plan keys this file has always
+     used; an id the catalogue knows outranks both. */
+  if (engineSpec(engine)) return cloneRate(engine);
   return engine === "clone" ? cloneRate() : kokoroRate();
 }
 
@@ -1824,6 +2043,11 @@ async function poll() {
     HEALTH = await (await fetch("/ui/health")).json();
   } catch { HEALTH = null; }
   paintRunner();
+  /* THE ENGINE PICKER IS DRAWN FROM THIS DOCUMENT AND FROM NOTHING ELSE, so it
+     appears when the answer lands and corrects itself every thirty seconds
+     after that -- an engine whose runner has just gone away goes disabled with
+     the reason on it rather than staying selectable until the job fails. */
+  renderEngines();
 }
 
 /* THE RUNNER, AS A PERSON WOULD ASK ABOUT IT: is it there, will it take work,
@@ -3862,6 +4086,34 @@ const CHATTERBOX_LANGS = [["ar","Arabic"], ["da","Danish"], ["de","German"],
   ["no","Norwegian"], ["pl","Polish"], ["pt","Portuguese"], ["ru","Russian"],
   ["sv","Swedish"], ["sw","Swahili"], ["tr","Turkish"], ["zh","Chinese"]];
 
+/* HOW KOKORO SPELLS A LANGUAGE THE REST OF THIS PAGE NAMES BY ITS ISO STEM,
+   in ONE place, read in BOTH directions.
+
+   It was a literal inside toEngineLang, translating one way only, and the
+   missing direction cost a whole language. `zh` and `cmn` are the same
+   language, and NOTHING about "cmn" says so: its stem is "cmn", so the merge
+   below filed Kokoro's Mandarin under "cmn" and Chatterbox's under "zh" and
+   the Language control listed Mandarin TWICE -- the exact "two that look like
+   a mistake" the comment there says stems prevent. Each half was then broken
+   in its own direction: "Chinese" hid every Kokoro Mandarin voice, because the
+   voice filter compared "zh" against a PREFIX that answers "cmn"; "Mandarin"
+   was disabled for every clone, because no engine publishes "cmn". Typing
+   Chinese text hit the first one without anybody choosing anything, since the
+   detector speaks ISO and says "zh".
+
+   pt-br and fr-fr survive splitting on the hyphen and cmn does not, which is
+   why this cannot be a rule about hyphens. */
+const KOKORO_SPELLING = { pt:"pt-br", fr:"fr-fr", zh:"cmn" };
+const ISO_STEM = Object.fromEntries(
+  Object.entries(KOKORO_SPELLING).map(([iso, kokoro]) => [kokoro, iso]));
+/* THE LANGUAGE A CODE MEANS, whoever spelled it. en-us and en-gb are en; pt-br
+   is pt; cmn is zh. Every filter and every merge on this page asks this and
+   not `split("-")[0]`, so two spellings of one language cannot come out as two
+   languages in one control. */
+function isoStem(code) {
+  return ISO_STEM[code] || (code || "").split("-")[0];
+}
+
 /* Script first, because it is decisive and cheap. A single character in one of
    these blocks settles the question no stopword list can argue with. Latin
    script tells you nothing on its own, which is why it is absent here. */
@@ -3944,13 +4196,31 @@ function detectLanguage(text) {
    cannot be mapped from the text alone — en-us and en-gb are the same language
    — so the voice's own prefix breaks that tie, which is the one thing the
    prefix map is genuinely good for. */
+/* THE CODES THE CHOSEN ENGINE SPEAKS. /health.engines when it says -- and a
+   second engine may speak one language where the first speaks 23 -- and the
+   list above when it does not, which is the one-engine deployment, where the
+   two are the same list. NEVER A NAME THIS FILE PICKS: an engine's languages
+   are a property of the checkpoint, and the service publishes them. */
+function engineLangCodes() {
+  const spec = engineSpec(currentEngine());
+  return spec && Array.isArray(spec.languages) && spec.languages.length
+    ? spec.languages : CHATTERBOX_LANGS.map(([code]) => code);
+}
+
 function toEngineLang(iso, kind, voiceName) {
   if (!iso) return null;
-  if (kind === "clone")
-    return CHATTERBOX_LANGS.some(([c]) => c === iso) ? iso : null;
+  /* ANYTHING THAT GOES TO tts-long TAKES tts-long's SPELLING. This tested for
+     a clone alone, so a preset voice fell through to the Kokoro branch below
+     and had its language decided by the first letter of its name -- a map that
+     answers en-us for every letter it has never met. The bare ISO code is what
+     the engine block publishes and what every engine there accepts. */
+  if (kind === "clone" || kind === "preset")
+    return engineLangCodes().includes(iso) ? iso : null;
   if (iso === "en") return PREFIX[(voiceName || "a")[0]] === "en-gb" ? "en-gb" : "en-us";
-  const map = { pt:"pt-br", fr:"fr-fr", zh:"cmn" };
-  const code = map[iso] || iso;
+  /* THE SAME TABLE THE MERGE AND THE VOICE FILTER READ, and it is shared
+     rather than copied because the copy is what went stale: a translation that
+     only ran one way left "cmn" unstemmable everywhere else. */
+  const code = KOKORO_SPELLING[iso] || iso;
   return KOKORO_LANGS.some(([c]) => c === code) ? code : null;
 }
 
@@ -3988,11 +4258,15 @@ function populateLanguages() {
 
      Keyed on the stem also collapses Kokoro's "pt-br" and Chatterbox's "pt",
      which are the same intent spelled two ways, into one Portuguese entry
-     rather than two that look like a mistake. */
+     rather than two that look like a mistake.
+
+     THROUGH isoStem AND NOT `split("-")`, because that is the half that was
+     missing and Mandarin is where it showed: "cmn" and "zh" are one language
+     and the hyphen rule files them as two. */
   const seen = new Set();
   const merged = [];
   for (const [code, name] of [...KOKORO_LANGS, ...CHATTERBOX_LANGS]) {
-    const stem = code.split("-")[0];
+    const stem = isoStem(code);
     if (seen.has(stem)) continue;
     seen.add(stem);
     /* "English (US)" -> "English". The parenthetical is the region, and it is
@@ -4028,9 +4302,53 @@ function voicesForLanguage(kokoro, code) {
      voices and the accent stays a choice made below rather than above. The
      name prefix is where Kokoro encodes it (a→en-us, b→en-gb, p→pt-br), and
      PREFIX is the same map resolvedLanguage reads, so the filter and the code
-     actually sent cannot disagree. */
-  const stem = code.split("-")[0];
-  return all.filter(v => (PREFIX[v[0]] || "").split("-")[0] === stem);
+     actually sent cannot disagree.
+
+     BOTH SIDES GO THROUGH isoStem, and only one of them used to. The control
+     holds "zh" and PREFIX answers "cmn", so comparing raw stems matched
+     nothing and choosing Mandarin -- or simply typing Chinese, which the
+     detector reads as "zh" -- emptied every Kokoro voice out of the picker. */
+  const stem = isoStem(code);
+  return all.filter(v => isoStem(PREFIX[v[0]] || "") === stem);
+}
+
+/* AND THE SAME QUESTION ASKED OF AN ENGINE THAT ANSWERS IT ITSELF.
+
+   THREE RULES, NONE OF THEM A NAME AND NONE OF THEM A SPELLING CONVENTION:
+
+     voices === null        not filtered. The language is a parameter this
+                            engine takes, so every clip it reads can read every
+                            language it speaks -- hiding them would hide voices
+                            that can do the job. Chatterbox, today.
+     language_from_voice    filtered on the voice's OWN declared language,
+                            which came off the wire beside the name.
+     Kokoro                 PREFIX, above, until Kokoro gets a catalogue row.
+
+   The one this replaces is the second read as the third. `pt_male` resolves
+   correctly under PREFIX by coincidence -- p is Portuguese in Kokoro's names
+   too -- and `de_female` resolves to en-us, because `d` is not in that map and
+   the fallback is American English. One of twenty voices right by accident and
+   the German ones silently mislabelled is worse than no filter at all. */
+function presetVoicesForLanguage(id, code) {
+  const list = presetVoices(id) || [];
+  const spec = engineSpec(id) || {};
+  if (!code || code === "auto" || !spec.language_from_voice) return list;
+  /* THE SAME STEM RULE AS EVERY OTHER FILTER HERE. A voice row carries a bare
+     ISO code today, so this is a no-op on today's rows -- and a checkpoint
+     that ships a regional one is then read the way the control is, rather than
+     being the one place on the page with its own idea of what a stem is. */
+  const stem = isoStem(code);
+  return list.filter(v => isoStem(v.language || "") === stem);
+}
+
+/* WHAT ONE ENGINE COSTS, IN THE ONLY UNIT THE PICKER CAN USE: how much longer
+   than the audio. Empty when nothing has measured the lane this engine would
+   run on -- which is a real answer here and not a zero, and is why this reads
+   cloneRate and not rate.clone(), whose 0.275 fallback is a figure measured on
+   a completely different model on this server's CPU. */
+function costWords(id) {
+  const f = cloneRate(id);
+  return f > 0 ? `about ${(1 / f).toFixed(0)}× the audio length` : "";
 }
 
 /* The code actually sent, and the reason for it. Returns both so the hint and
@@ -4038,7 +4356,18 @@ function voicesForLanguage(kokoro, code) {
 function resolvedLanguage() {
   const voice = currentVoice();
   const chosen = $("lang").value;
-  const fallback = voice.kind === "clone"
+  /* THE VOICE IS THE ANSWER WHEN THE VOICE IS THE ANSWER, and it outranks both
+     the control and the detector rather than being a fallback behind them. An
+     engine whose speakers are per-language embeddings has no language
+     parameter to disagree with: pt_male is Portuguese because of which tensor
+     it is, and a request naming any other language is refused by name at the
+     server. Detecting German in the text and sending `de` with a Portuguese
+     embedding is exactly that refusal, arriving minutes later. */
+  if (languageCarried()) {
+    const carried = presetLanguage(voice);
+    if (carried) return { code: carried, why: "voice" };
+  }
+  const fallback = voice.kind === "clone" || voice.kind === "preset"
     ? "en" : (PREFIX[(voice.name || "a")[0]] || "en-us");
 
   if (chosen && chosen !== "auto") {
@@ -4182,15 +4511,78 @@ function renderVoices() {
      takes, so `default` and every clone can read any of the languages in
      CHATTERBOX_LANGS. Hiding them when a language is chosen would be hiding
      voices that can do the job. */
-  const factor = (1 / rate.clone()).toFixed(0);
   /* The optgroup carries the cost, because the cost is what the reader picks
      on. Each option under it used to repeat the header: "Chatterbox's own
      voice" beneath a Chatterbox label, and "your clone" beside every name the
-     reader typed themselves. */
-  html += `<optgroup label="Chatterbox, slow: about ${factor}× the audio length, queued as a job">` +
-    `<option value="c:default">default (no clip needed)</option>` +
-    clones.map(c => `<option value="c:${esc(c.name)}">${esc(c.name)}</option>`).join("") +
+     reader typed themselves.
+
+     AND IT DROPS THE COST THE MOMENT THERE IS MORE THAN ONE ENGINE, because a
+     figure on the group would then be the cost of ONE of the two models under
+     it, printed over voices either can read. The engine control below states
+     the difference, and the button's own ETA states the wait for the engine
+     actually chosen -- one speed claim, in one place, that moves when the
+     reader moves it. Rebuilding a 54-option select on every engine change to
+     keep a header honest is the alternative, and it fights whoever has the
+     list open. */
+  /* AND THE RULE FOR DROPPING IT IS THE GROUP'S OWN AMBIGUITY, NOT THE
+     DEPLOYMENT'S. It was dropped the moment `engineIds().length > 1`, which is
+     right for THIS group and wrong for the ones below it: the clips here are
+     read by EITHER Chatterbox, so a figure printed over them would be the cost
+     of one of two models, but a group whose voices are one engine's own
+     embeddings has exactly one answer and suppressing it hides the only number
+     the reader is choosing on. So the test is how many engines read the voices
+     in the group, and for a deployment that publishes no engine block at all
+     it is the figure this page has always shown. */
+  const clipEngines = engineIds().filter(id => !presetVoices(id));
+  const clipCost = !engineIds().length
+    ? `about ${(1 / rate.clone()).toFixed(0)}× the audio length`
+    : clipEngines.length === 1 ? costWords(clipEngines[0]) : "";
+  const factor = clipCost ? clipCost + ", " : "";
+  /* THE PREFIX IS THE ENGINE THE VOICE BELONGS TO, and for a clip that is not
+     a property of the voice at all -- so it carries the deployment's default
+     and the Engine control below decides. `c:` is what a deployment with no
+     engine block gets: the value this page has always written, the one stored
+     jobs and remembered selections are keyed on, and the one currentVoice
+     still reads. */
+  const clipPrefix = clipEngines[0] || defaultEngine() || "c";
+  html += `<optgroup label="Chatterbox, slow: ${factor}queued as a job">` +
+    `<option value="${esc(clipPrefix)}:default">default (no clip needed)</option>` +
+    clones.map(c => `<option value="${esc(clipPrefix)}:${esc(c.name)}">${esc(c.name)}</option>`).join("") +
     "</optgroup>";
+
+  /* ------------------------------------------------------------------------
+     AN ENGINE THAT CARRIES ITS OWN SPEAKERS GETS ITS OWN GROUP, AND THE PAGE
+     HOLDS NONE OF THE NAMES.
+
+     Twenty names in nine languages written here would be the fifth model table
+     on this stack and the only one nobody could correct without a redeploy --
+     and the wrong one to add, because the names are not a list, they are which
+     tensors are in a checkpoint. /health.engines[*].voices is the only honest
+     home for them: it is the same document the label, the languages, the
+     controls and both lanes' readiness already come from, it needs no route
+     the UI proxy does not already carry, and a deployment that has not enabled
+     the engine simply sends no rows and draws no group.
+
+     THE GROUP IS DISABLED WITH THE RUNNER'S OWN REASON RATHER THAN HIDDEN. An
+     engine that is configured, unreachable and undrawn is chatterbox-cpu,
+     which was invisible for its entire life because nothing ever painted it.
+     A reader who cannot see it cannot be told that one command on the other
+     machine brings it back. */
+  for (const id of engineIds()) {
+    const listed = presetVoicesForLanguage(id, chosenLang);
+    if (!presetVoices(id) || !listed.length) continue;
+    const spec = engineSpec(id) || {};
+    const off = engineOffline(id);
+    const langs = Array.isArray(spec.languages) ? spec.languages.length : 0;
+    const cost = costWords(id);
+    const label = [engineLabel(id), langs > 1 ? `${langs} languages` : ""]
+      .filter(Boolean).join(", ")
+      + ": " + (cost ? cost + ", " : "") + "queued as a job"
+      + (off ? " · " + off : "");
+    html += `<optgroup label="${esc(label)}"${off ? " disabled" : ""}>` +
+      listed.map(v => `<option value="${esc(id)}:${esc(v.name)}">${esc(v.name)}</option>`)
+        .join("") + "</optgroup>";
+  }
   html += `<option value="new">+ Clone a new voice (Chatterbox)…</option>`;
   const previous = select.value;
   select.innerHTML = html;
@@ -4200,45 +4592,431 @@ function renderVoices() {
      languages and back does not lose it. Otherwise take the first voice the
      language does offer rather than the deployment default, which may well be
      in the language the user has just switched away from. */
+  /* AND THE FALLBACK IS THE FIRST VOICE THAT CAN ACTUALLY BE USED. A group
+     whose engine has no lane is drawn disabled, and its options are still in
+     select.options -- so `options[0]` could land the page on a voice the
+     reader is not allowed to pick, with every control below it configured for
+     an engine that cannot run. */
+  const first = [...select.options].find(o =>
+    !o.disabled && !(o.parentElement && o.parentElement.disabled));
   select.value = previous && [...select.options].some(o => o.value === previous)
     ? previous
     : (all.includes("bm_george") && (!chosenLang || chosenLang === "auto")
-        ? "k:bm_george" : select.options[0].value);
+        ? "k:bm_george" : (first || select.options[0]).value);
   onVoiceChange();
 }
 
+/* WHICH VOICE, WHOSE VOICE, AND WHAT THAT MAKES IT.
+
+   THE PREFIX WAS ONE CHARACTER WIDE AND IT WAS THE FIFTH MODEL TABLE. It read
+   `value.slice(0,1) === "c" ? "clone" : "kokoro"`, so every voice on the stack
+   was one of two things by the first letter of its option value -- and a
+   preset voice from a third engine, added naively, came out "kokoro": it kept
+   "Generate & listen" (a promise of instant audio for a job measured in
+   minutes), skipped the ETA, was planned against Kokoro's 2.79x and routed to
+   /speak with a voice name Kokoro has never heard of. Four silent wrongs from
+   one character.
+
+   So the value is `engine:name` and the engine is the one the CATALOGUE names,
+   never a letter picked here. `kind` is DERIVED from that engine's published
+   facts on every read, so it cannot go stale in a <select> that outlives a
+   deployment change.
+
+   LEGACY `k:` AND `c:` STILL PARSE, and that is not politeness: this page
+   remembers a selection, jobs are keyed on it, and the node harnesses drive it.
+   Neither is an engine id -- engineSpec settles that before the map is
+   consulted -- and `c:` with no engine block at all is still a clone, because
+   that is the one deployment where this page must behave byte for byte as it
+   did. */
 function currentVoice() {
   const value = $("voice").value || "";
-  if (value === "new") return { kind:"new" };
-  return { kind: value.slice(0, 1) === "c" ? "clone" : "kokoro", name: value.slice(2) };
+  if (value === "new") return { kind:"new", engine:null, name:"" };
+  const cut = value.indexOf(":");
+  const head = cut < 0 ? "" : value.slice(0, cut);
+  const name = cut < 0 ? value : value.slice(cut + 1);
+  const engine = engineSpec(head) ? head
+               : head === "c" ? defaultEngine() : null;
+  const kind = engine ? engineKind(engine)
+             : head === "c" ? "clone" : "kokoro";
+  return { engine, name, kind };
+}
+
+/* A JOB IS A JOB.
+
+   What decides the button, the ETA, the missing stream and the missing Listen
+   is WHERE this runs and HOW LONG it takes, not where the voice came from.
+   Every one of those gates used to test `kind === "clone"`, which was the same
+   question only while tts-long had one shape of voice: a preset voice is not a
+   clone and it is not instant either, and each of those gates read the second
+   half of that wrongly.
+
+   Voice-shaped questions keep their own test and must not come here. Delete
+   this voice belongs to a file on disk; a preset embedding has no file to
+   delete and no engine to ask. */
+function isJob(voice) {
+  const kind = (voice || currentVoice()).kind;
+  return kind === "clone" || kind === "preset";
+}
+
+/* THE LANGUAGE A PRESET VOICE IS, from the row that voice came in on.
+
+   THE LANGUAGE IS ON THE VOICE, NOT BESIDE IT, and reading it off the name is
+   how PREFIX["d"] answers en-us for a German voice. `de_female` is German
+   because of which tensor it is; the two letters in front of it are a
+   convention one engine happens to follow and the next one will not. */
+function presetLanguage(voice) {
+  const list = voice && presetVoices(voice.engine);
+  const found = list && list.find(v => v && v.name === voice.name);
+  return (found && found.language) || null;
+}
+
+/* WHOSE QUESTION THE LANGUAGE CONTROL IS.
+
+   ASKED IN ONE PLACE BECAUSE TWO FUNCTIONS TAKE THE CONTROL AWAY, and whichever
+   ran last used to win: syncSpeakControls greys it on the /v1 route, and an
+   engine whose voices carry their own language has no use for it at all. Two
+   independent writes to one `disabled` is how a control comes back enabled for
+   an engine that will ignore it. */
+function languageCarried() {
+  const voice = currentVoice();
+  const spec = engineSpec(voice.engine);
+  return !!(voice.kind === "preset" && spec && spec.language_from_voice);
+}
+
+/* ------------------------------------------------- the engine control -- */
+
+function engineLabel(id) {
+  const spec = engineSpec(id);
+  return (spec && spec.label) || id || "";
+}
+
+/* HOW LONG THIS VOICE'S REFERENCE CLIP IS, or null when nothing here knows.
+   /ui/clips measures every clip it lists; the built-in `default` speaker has
+   no file in that store at all and answers null, which is the honest reading
+   and not a zero. NULL NEVER REFUSES ANYTHING: a length nobody read cannot
+   rule an engine out, and the engine's own assert is the backstop for the
+   rare clip this side could not measure. */
+function clipSeconds(name) {
+  const clip = ((VOICES && VOICES.clones) || []).find(c => c.name === name);
+  const seconds = clip && clip.seconds;
+  return typeof seconds === "number" && seconds > 0 ? seconds : null;
+}
+
+/* THE RUNNER'S OWN WORDS, TURNED INTO A SENTENCE ONLY WHERE THIS PAGE KNOWS
+   THE WORD. The set is the one the agent publishes -- and ANYTHING ELSE IS
+   PASSED THROUGH VERBATIM rather than swallowed, because a reason this file
+   has not met is still the truest thing anybody can say about why an engine is
+   not running. "machine_busy: somebody is at the keyboard" reads perfectly
+   well; a blank where it should have been does not. */
+const ENGINE_WHY = {
+  not_installed: "not installed",
+  not_enabled: "installed but switched off",
+  no_such_service: "not offered",
+  manifest_mismatch: "answering under a name that does not match",
+};
+function whySaid(why, where) { return why ? `${where}: ${ENGINE_WHY[why] || why}` : ""; }
+
+/* WHY THIS ENGINE CANNOT BE USED RIGHT NOW, or "". The two refusals a reader
+   can act on, in the order the service applies them: a deployment where
+   nothing can run it, and a voice whose clip is shorter than it needs.
+
+   IT NEVER HIDES EITHER. An engine the deployment does not have is shown
+   disabled with the reason and the fix beside it; chatterbox-cpu was
+   configured, unreachable and invisible for its entire life, and the reason it
+   stayed invisible is that nothing ever drew it. */
+/* THE HALF OF IT THAT IS NOTHING TO DO WITH THE VOICE, split out because the
+   voice picker asks this question BEFORE a voice is chosen. A preset group's
+   label carries it, and the clip-length half below would be answering about
+   whichever voice happened to be selected at the time -- a different voice
+   from the ones in the group being drawn. */
+function engineOffline(id) {
+  const spec = engineSpec(id);
+  if (!spec) return "";
+  const local = spec.local || {}, runner = spec.runner || {};
+  if (local.ready || runner.ready) return "";
+  const said = [whySaid(local.why, "this server"), whySaid(runner.why, "the runner")]
+    .filter(Boolean).join("; ");
+  return "nothing here can run it" + (said ? ` (${said})` : "");
+}
+
+function engineBlocked(id) {
+  const spec = engineSpec(id);
+  if (!spec) return "";
+  const offline = engineOffline(id);
+  if (offline) return offline;
+  const need = Number(spec.min_reference_seconds || 0);
+  const have = clipSeconds(currentVoice().name);
+  if (need > 0 && have !== null && have < need)
+    return `this voice's clip is ${have.toFixed(1)} s and it needs one over ${need} s`;
+  return "";
+}
+
+/* HOW MUCH QUICKER, ON THE LANES THIS DEPLOYMENT WILL ACTUALLY USE, and never
+   a figure written down here. Turbo measured 2.36x baseline on one 3070 with
+   both models on the same card; that is not the reader's answer when turbo is
+   on this server's CPU because the card is busy, and printing it there would
+   put the picker 2.36x out of step with the ETA in the button two controls
+   away. Both halves come from cloneRate, which is what that ETA divides by. */
+function speedWords(id) {
+  const base = defaultEngine();
+  if (!base || id === base) return "";
+  const mine = cloneRate(id), theirs = cloneRate(base);
+  if (!(mine > 0) || !(theirs > 0)) return "";
+  const ratio = mine / theirs;
+  if (ratio >= 1.05) return `about ${ratio.toFixed(1)}× quicker here`;
+  if (ratio <= 0.95) return `about ${(1 / ratio).toFixed(1)}× slower here`;
+  return "about the same speed here";
+}
+
+/* WHAT THE READER IS CHOOSING BETWEEN, in the three terms that differ: what it
+   can say, what can be set on it, and what it costs. Every one of them is read
+   out of /health.engines. */
+function engineSummary(id) {
+  const spec = engineSpec(id) || {};
+  const said = [];
+  const langs = Array.isArray(spec.languages) ? spec.languages : [];
+  if (langs.length === 1) said.push(`${LANG_NAMES[langs[0]] || langs[0]} only`);
+  else if (langs.length > 1) said.push(`${langs.length} languages`);
+  const controls = Array.isArray(spec.controls) ? spec.controls : null;
+  if (controls) said.push(controls.includes("exaggeration") || controls.includes("cfg_weight")
+    ? "expression controls" : "no expression controls");
+  const speed = speedWords(id);
+  if (speed) said.push(speed);
+  return said.join(", ");
+}
+
+/* WHAT THE PAGE DID ON THE READER'S BEHALF, HELD UNTIL THEY CHOOSE AGAIN, and
+   this is a variable rather than a line painted where it is decided for a
+   reason that cost an hour. Resetting the Language control raises a change on
+   it so the voices below re-filter exactly as they do for a chosen language --
+   and that redraw comes back through renderEngines, so a sentence written
+   straight onto the element is wiped by the render it just caused. The note
+   outlived the paint the moment it stopped being one.
+
+   Cleared only by a deliberate act: a new engine, or a new voice. A poll
+   thirty seconds later must not take away the sentence explaining why the
+   Language control is not where somebody left it. */
+let engineSaid = "";
+function noteEngine(said) { if (said) engineSaid = said; }
+
+function renderEngines() {
+  const row = $("enginerow");
+  if (!row) return;
+  /* THE ENGINES THAT CAN READ THE VOICE IN THE PICKER, WHICH IS NOT ALL OF
+     THEM. This listed every id the catalogue publishes, which was every engine
+     that reads a reference clip while that was all there was. An engine whose
+     voices are baked-in embeddings cannot read a clip at all -- no source file
+     in that checkpoint takes reference audio -- so offering it as a radio
+     beside an uploaded voice is an option whose only outcome is a 400 naming a
+     voice it has never heard of. */
+  const ids = engineIds().filter(id => !presetVoices(id));
+  /* ONE ENGINE IS NOT A CHOICE, AND A KOKORO VOICE IS NOT THIS QUESTION. The
+     picker belongs to the request that goes to tts-long; tts-stack has one
+     model and the fast path never carries a `model` of its own.
+
+     NEITHER IS A VOICE THAT ALREADY NAMES ITS ENGINE. A preset embedding lives
+     in exactly one checkpoint, so a radio beside it offers a choice the picker
+     above has already made -- and a reader who moved it would get either a
+     silent override or a 400 for a voice the other engine has never heard of.
+     Furniture at best; this page removed a whole expert gate for being that. */
+  const voice = currentVoice();
+  row.hidden = !isJob(voice) || voice.kind === "preset" || ids.length < 2;
+  /* STILL SYNCED WHEN THERE IS NO PICKER, and leaving that out was a bug in
+     the first draft of this function: a language the last engine could not
+     speak stays disabled on the control after the reader moves to a Kokoro
+     voice, and the sliders stay gone with it. Hiding a control must not leave
+     its consequences behind. */
+  if (row.hidden) { $("engineopts").innerHTML = ""; syncEngineControls(); return; }
+
+  const before = currentEngine();
+  let chosen = before;
+  /* A CHOICE THAT HAS BECOME IMPOSSIBLE IS MOVED OFF IT, OUT LOUD. Picking a
+     four-second clip while an engine that needs five is selected otherwise
+     leaves the radio sitting on the one option the request would be refused
+     for, and the refusal arrives from the server minutes later. */
+  if (engineBlocked(chosen)) {
+    const free = ids.find(id => !engineBlocked(id));
+    if (free && free !== chosen) {
+      noteEngine(`${engineLabel(chosen)} cannot take this voice, `
+        + `so ${engineLabel(free)} is selected.`);
+      chosen = free;
+    }
+  }
+  const drawn = ids.map(id => {
+    const why = engineBlocked(id);
+    const said = [engineSummary(id), why].filter(Boolean).join(" · ");
+    return `<label class="engine${why ? " off" : ""}">` +
+      `<input type="radio" name="engine" value="${esc(id)}"` +
+      `${id === chosen ? " checked" : ""}${why ? " disabled" : ""}>` +
+      `<span><strong>${esc(engineLabel(id))}</strong> ` +
+      (said ? `<span class="why">${esc(said)}</span>` : "") + `</span></label>`;
+  });
+  $("engineopts").innerHTML = drawn.join("");
+  engineInputs().forEach(input => input.addEventListener("change", onEngineChange));
+  syncEngineControls();
+  /* AND THE ETA FOLLOWS THE ENGINE IT IS NOW FOR. This runs on the thirty
+     second poll as well as on a voice change, so a runner that goes away while
+     somebody is typing can move the selection under them -- and a button
+     quoting the wait for the engine that just left is the page saying one
+     thing while it sends another. Only when it actually moved: estimate() can
+     reach back here through the voice list, and one round is all this settles
+     in. */
+  if (currentEngine() !== before) estimate();
+}
+
+/* THE CONTROLS THE CHOSEN ENGINE CAN ACTUALLY HONOUR, and a sentence for every
+   one that has just left. A field this stack would refuse is not left on the
+   screen for somebody to set: exaggeration and cfg_weight are refused BY NAME
+   on an engine that has no conditioning layer and no CFG path, so a slider
+   sitting there is an offer the request cannot keep. */
+function syncEngineControls() {
+  const id = currentEngine();
+  const spec = engineSpec(id);
+  const controls = spec && Array.isArray(spec.controls) ? spec.controls : null;
+  /* NO CONTROLS BLOCK MEANS NO SECOND ENGINE, which is today's deployment and
+     today's three sliders. An engine that publishes an empty list has none. */
+  const expressive = !controls || controls.includes("exaggeration")
+                              || controls.includes("cfg_weight");
+  /* TEMPERATURE IS NOT A GIVEN EITHER, and it used to be drawn outside the
+     group that can leave -- on the argument that it "survives on both
+     engines", which was true of the two that existed. A third takes neither
+     it nor exaggeration nor cfg_weight, so the panel showed one slider whose
+     value the server refuses BY NAME. A slider whose value is refused is worse
+     than an absent one: it is a promise the request cannot keep. */
+  const warm = !controls || controls.includes("temperature");
+  const gone = ["exaggeration", "cfg_weight", "temperature"]
+    .filter(field => controls && !controls.includes(field));
+  $("clone-expressive").hidden = !expressive;
+  $("clone-temp").hidden = !warm;
+  $("resetclone").hidden = !expressive && !warm;
+  $("clone-noexpress").hidden = !gone.length;
+  /* THE SENTENCE NAMES WHAT LEFT AND WHAT REPLACED IT, both read off the same
+     `controls` list the request body is built from, so the panel and the wire
+     cannot disagree about what is settable. It ended "Temperature is how
+     delivery is set on this engine", which was one engine's answer written
+     down as every engine's -- and on a checkpoint that reads no temperature at
+     all it pointed the reader at a slider whose value is refused by name. */
+  if (gone.length) $("clone-noexpress").textContent =
+    `${engineLabel(id)} does not take `
+    + gone.slice(0, -1).join(", ") + (gone.length > 1 ? " or " : "")
+    + gone[gone.length - 1]
+    + `: they are refused by name rather than accepted and dropped. `
+    + (controls.length
+        ? `Delivery on this engine is set with ${controls.join(" and ")}, `
+          + `which this deployment configures rather than this page.`
+        : `It takes no delivery controls at all.`);
+  syncLanguageForEngine();
+  $("enginenote").textContent = engineSaid;
+}
+
+/* THE LANGUAGES THE CHOSEN ENGINE SPEAKS, ON THE CONTROL THAT PICKS ONE.
+
+   THEY ARE DISABLED AND LEFT ON SCREEN rather than removed. The way out of
+   "this engine cannot say that" is to change engine, and the control below
+   this one is where that is done -- a list that silently shortens tells the
+   reader their language is gone from the stack, which is not what happened.
+
+   The reset is the other half and it is the one that matters: `en` is what a
+   code this engine cannot take falls back to, and a fallback nobody is told
+   about is exactly the failure this whole engine surface exists to prevent.
+   Only ever while a cloned voice is chosen: Kokoro's list is its own. */
+function syncLanguageForEngine() {
+  const select = $("lang");
+  if (!select) return;
+  const voice = currentVoice();
+  /* AN ENGINE WHOSE VOICES CARRY THE LANGUAGE IS ASKED NOTHING HERE, and the
+     control says so rather than sitting there taking an answer nobody will
+     read. There is no language field on that request: the server derives it
+     from which embedding was named and refuses by name any code that
+     contradicts it, so a control left live is a refusal arriving minutes
+     later. The way to change the language is the picker above -- which is
+     exactly what the sentence says, in the server's own words. */
+  if (languageCarried()) {
+    for (const option of select.options) option.disabled = option.value !== "auto";
+    const said = presetLanguage(voice);
+    $("langsaid").textContent =
+      `${engineLabel(currentEngine())}'s language is carried by the voice: `
+      + `${voice.name} is ${LANG_NAMES[(said || "").split("-")[0]] || said}. `
+      + `Pick another voice to change it.`;
+    return;
+  }
+  $("langsaid").textContent = "";
+  const job = isJob(voice);
+  const codes = engineLangCodes();
+  for (const option of select.options)
+    option.disabled = !!(job && option.value !== "auto"
+                         && !codes.includes(option.value));
+  const chosen = [...select.options].find(option => option.value === select.value);
+  if (!chosen || !chosen.disabled) return;
+  const fallback = codes.includes("en") ? "en" : codes[0];
+  noteEngine(`${engineLabel(currentEngine())} does not speak `
+    + `${LANG_NAMES[select.value] || select.value}, so Language is now `
+    + `${LANG_NAMES[fallback] || fallback}.`);
+  select.value = fallback;
+  /* THE SAME EVENT A PERSON WOULD HAVE RAISED, so the voice list below
+     re-filters exactly as it does for a chosen language. Assigning .value
+     raises nothing, and a picker left filtered by a language no longer in
+     force is the page disagreeing with itself. The second pass finds nothing
+     disabled and dispatches nothing, so this settles in one round. */
+  select.dispatchEvent(new Event("change"));
+}
+
+function onEngineChange() {
+  /* A NEW CHOICE CLEARS WHAT THE PAGE DID ABOUT THE LAST ONE. Everything
+     between here and the paint may add a new sentence. */
+  engineSaid = "";
+  syncEngineControls();
+  estimate();
 }
 
 function onVoiceChange() {
   const voice = currentVoice();
   $("clone").hidden = voice.kind !== "new";
+  /* BEFORE THE EARLY RETURN, so opening the clone sheet takes the engine
+     picker off the screen with everything else that belongs to a voice. */
+  renderEngines();
   if (voice.kind === "new") { $("clipname").focus(); return; }
 
-  const clone = voice.kind === "clone";
-  /* PICKING THE VOICE PICKS THE ENGINE. The user never chooses between Kokoro
-     and Chatterbox; each row carries its speed and the page routes to /speak
-     or /jobs accordingly. Cloning stops being an advanced feature the moment
-     it stops requiring a mode decision. */
-  $("speed").disabled = clone;
-  /* Chatterbox takes no speed, so the slider is pinned rather than left at
-     whatever the last Kokoro voice used. Playback speed under the player is
-     the working answer for "faster", and it applies to any audio. */
-  if (clone) { $("speed").value = 1; $("speedout").textContent = "1.00"; }
-  const builtin = clone && voice.name === "default";
-  $("tts-expert-fast").hidden = clone;
-  $("tts-expert-clone").hidden = !clone;
-  /* Without this a bad clip is stuck in the picker for ever, and the only way
-     out is shelling into a container to delete a file. Never offered for
-     "default": it is the model's own speaker, there is no file behind it, and
-     the delete would 404 on a voice the user cannot break. */
-  $("delvoice").hidden = !clone || builtin;
+  /* TWO QUESTIONS, AND EVERY LINE BELOW BELONGS TO EXACTLY ONE OF THEM.
+     `job` is where this runs and how long it takes; `clip` is whether the
+     voice is a file somebody uploaded. They were one variable while tts-long
+     had one shape of voice, and the day a preset-voice engine landed on it the
+     single test answered half of these wrongly -- silently, in the direction
+     that promises instant audio for three and a half minutes of GPU. */
+  const job = isJob(voice);
+  const clip = voice.kind === "clone";
+  /* PICKING THE VOICE PICKS THE ENGINE. The user never chooses between the
+     instant model and the ones that queue; each row carries its speed and the
+     page routes to /speak or /jobs accordingly. Cloning stops being an
+     advanced feature the moment it stops requiring a mode decision. */
+  $("speed").disabled = job;
+  /* NO ENGINE ON tts-long TAKES A SYNTHESIS RATE, so the slider is pinned
+     rather than left at whatever the last Kokoro voice used. Playback speed
+     under the player is the working answer for "faster", and it applies to any
+     audio. */
+  if (job) { $("speed").value = 1; $("speedout").textContent = "1.00"; }
+  const builtin = clip && voice.name === "default";
+  $("tts-expert-fast").hidden = job;
+  $("tts-expert-clone").hidden = !job;
+  /* THE ENGINE THE PANEL IS FOR, ON THE PANEL. It said "Expert: Chatterbox
+     voices" in the markup, so a preset voice from a third engine opened a
+     panel titled after a model that was not going to run -- the same failure
+     the optgroup labels were renamed to fix. */
+  const summary = $("tts-expert-clone").querySelector("summary");
+  if (summary && engineLabel(currentEngine()))
+    summary.textContent = `Expert: ${engineLabel(currentEngine())} voices`;
+  /* CLIP-SHAPED, NOT JOB-SHAPED. Without this a bad clip is stuck in the
+     picker for ever and the only way out is shelling into a container to
+     delete a file -- and a preset embedding has no file to delete, so offering
+     it there would be a DELETE against a voice nobody can break. Never offered
+     for "default" either: it is the model's own speaker. */
+  $("delvoice").hidden = !clip || builtin;
   /* The slider goes when the button arrives. See the comment on #speedslot:
-     Chatterbox answers 400 to `speed`, so a clone showing a speed control was
-     offering something that could not work even before it overlapped. */
+     tts-long answers 400 to `speed`, so a voice that queues showing a speed
+     control was offering something that could not work even before it
+     overlapped. Shown-and-disabled is what the built-in speaker already gets
+     and a preset voice gets the same: the slot's other occupant belongs to a
+     clip, and leaving it empty would be a gap where a control used to be. */
   $("speedwrap").hidden = !$("delvoice").hidden;
   syncSpeakControls();
   /* populateLanguages() is NOT called here any more. The list used to be built
@@ -4248,7 +5026,11 @@ function onVoiceChange() {
      it already had, is work that can only lose focus or a selection. */
   estimate();
 }
-$("voice").addEventListener("change", onVoiceChange);
+/* THE READER'S OWN CHANGE, not the twenty programmatic ones. onVoiceChange
+   runs whenever the picker is rebuilt, which is on every language change and
+   every poll; only a hand on the control clears what the page last said about
+   an engine it moved. */
+$("voice").addEventListener("change", () => { engineSaid = ""; onVoiceChange(); });
 
 /* THE ROUTE DECIDES WHICH CONTROLS ARE REAL, and it used to decide silently.
    speakNow() built the /v1 body from four of the seven things this tab can be
@@ -4284,7 +5066,13 @@ function syncSpeakControls() {
      nothing is decoded in the browser there. */
   $("x-tfmt").disabled = v1 && $("x-stream").value === "sse"
     && speechPlan("kokoro", $("text").value).mode === "audio";
-  $("lang").disabled = v1;
+  /* TWO REASONS THE LANGUAGE CONTROL CAN BE GREY, AND BOTH ASKED AT ONCE.
+     This wrote `= v1` unconditionally, so on a preset voice -- where the panel
+     above is hidden and v1 is therefore false -- it handed the control back
+     the instant syncLanguageForEngine had taken it away, and the order the two
+     run in decided which was true. A control's disabled state has one writer
+     or it has none. */
+  $("lang").disabled = v1 || languageCarried();
   $("addseg").disabled = v1;
   $("segments").querySelectorAll("input,select,button")
     .forEach(control => control.disabled = v1);
@@ -4324,9 +5112,13 @@ function streamDefaults() {
      zero, which reads as "streaming is fine" and greyed the format control
      before anybody had typed anything. Nothing is being planned yet. */
   const text = $("text").value;
+  /* A JOB NEVER STREAMS, whichever engine it queues on. This tested for a
+     clone, so a preset voice fell through and was planned against Kokoro's
+     2.79x -- which sets the route to /v1 and the stream to sse for a request
+     that is about to be posted to /jobs. */
   const can = !!text.trim()
     && !segments()
-    && currentVoice().kind !== "clone"
+    && !isJob()
     && speechPlan("kokoro", text).mode === "audio";
   route.value = can ? "v1" : "speak";
   stream.value = can ? "sse" : "audio";
@@ -4400,6 +5192,7 @@ function estimate() {
      anything had been read at all -- the single most direct version of "the
      buttons do nothing". Both states are visible from here, so both are on the
      button rather than behind it. */
+  const job = isJob(voice);
   const idle = speaking || voice.kind === "new"
              || !(text.trim() || segments());
   $("go-tts").disabled = idle;
@@ -4415,15 +5208,19 @@ function estimate() {
      -- it posts a job and collects the finished audio, which is also what lets
      the reader close the page while it runs. Two buttons that did the same
      thing under different names would be a promise this backend cannot keep. */
-  $("go-tts").hidden = voice.kind === "clone";
-  $("go-tts-quiet").classList.toggle("primary", voice.kind === "clone");
+  $("go-tts").hidden = job;
+  $("go-tts-quiet").classList.toggle("primary", job);
 
-  if (voice.kind !== "clone") {
+  if (!job) {
     $("go-tts").textContent = "Generate & listen";
     $("go-tts-quiet").textContent = "Generate";
     /* NOT WHILE A RUN IS IN FLIGHT, and not over what the last one said. */
     if (!speaking && !speakHeld) note($("speak-note"), "", "");
   } else {
+    /* rate.clone() WITH NO ARGUMENT IS THE ENGINE THIS VOICE WILL RUN ON --
+       cloneRate falls back to currentEngine(), which a preset voice carries --
+       so the figure in the button is the one measured for the checkpoint about
+       to run and not an average over the ones that are not. */
     const compute = speechSeconds(text, "clone") / rate.clone();
     /* THE ETA IS IN THE BUTTON. Nobody presses "Generate (about 36 minutes)"
        by accident, and nobody has to go looking for a warning. Kokoro's button
@@ -4467,7 +5264,12 @@ function estimate() {
 /* The nearest instant voice by language, so "use a quick voice instead" picks
    something that will pronounce the text rather than the first name in a list. */
 function nearestKokoro() {
-  const wanted = (resolvedLanguage().code || "en").split("-")[0];
+  /* isoStem, FOR THE REASON THE FILTER ABOVE USES IT. `code` here is whatever
+     spelling was actually resolved, so a Mandarin request arrived as "cmn",
+     stemmed to "cmn", and looked for a Kokoro voice whose name starts with
+     "c" -- there is none, so "use a quick voice instead" silently offered
+     nothing on the one language where it had an answer. */
+  const wanted = isoStem(resolvedLanguage().code || "en");
   /* THE PICKER'S OWN OPTIONS, not the full list from /voices. The picker is
      filtered by the Language control above, so a name taken from the
      unfiltered set could be missing from the select -- and assigning a value a
@@ -4477,7 +5279,16 @@ function nearestKokoro() {
     .filter(option => option.value.slice(0, 2) === "k:")
     .map(option => option.value.slice(2));
   const want = wanted === "pt" ? "p" : wanted === "en" ? "b" : wanted[0];
-  return all.find(v => v[0] === want) || all.find(v => v[0] === "b") || all[0] || null;
+  /* NULL RATHER THAN THE NEAREST WRONG ONE, and the two fallbacks that used to
+     sit here are the whole reason. `|| all.find(v => v[0] === "b") || all[0]`
+     meant that for any language Kokoro does not speak the offer was a BRITISH
+     voice: "Use bm_george instead" over German text, under a warning about how
+     long the German job would take. There were two engines and they spoke
+     nearly the same set, so it never showed; with nine languages on one engine
+     and Kokoro speaking six of them it shows immediately. A button that is not
+     there is a smaller failure than one that reads the text in the wrong
+     language, and estimate() already draws the warning without it. */
+  return all.find(v => v[0] === want) || null;
 }
 
 /* This user code-switches between English and Brazilian Portuguese inside one
@@ -4625,7 +5436,7 @@ async function runSpeak(listen) {
 
        So a clone posts a job and collects the finished audio, which is also
        what lets the reader close the page while it runs. */
-    if (voice.kind === "clone") await queueJob(voice.name, text);
+    if (isJob(voice)) await queueJob(voice.name, text);
     else await speakNow(voice.name, text, listen);
   } catch (err) {
     note($("speak-note"), "bad", err.message || String(err));
@@ -5580,10 +6391,36 @@ async function queueJob(voice, text) {
      minutes that is the right trade. SSE is expert-only precisely because a
      36-minute stream dies when a lid closes, and closing the stream CANCELS
      the job. */
-  const body = { voice, language: resolvedLanguage().code,
-                 exaggeration: Number($("x-exag").value),
-                 cfg_weight: Number($("x-cfg").value),
-                 temperature: Number($("x-temp").value) };
+  /* THE ENGINE GOES ON THE WIRE BY NAME, and the fields that go with it are
+     the ones that engine can honour -- built from spec.controls, never from a
+     branch on an engine id. tts-long refuses exaggeration and cfg_weight BY
+     NAME on an engine that has no conditioning layer, which is the correct
+     answer to a caller who asked for them; it is the wrong thing for this page
+     to make a reader collect, because the sliders that would have sent them
+     are not on the screen. A value equal to the deployment's own default is
+     still a value somebody asked for, so the rule is the field's presence and
+     never its number.
+
+     NO `model` AT ALL when /health names no engines: that is a deployment with
+     one, and an absent model resolves to it. A page that spells an engine name
+     it was not told about asks a deployment for something it may not have
+     enabled, and collects a 400 nobody typed. */
+  const engine = currentEngine();
+  const spec = engineSpec(engine);
+  const controls = spec && Array.isArray(spec.controls) ? spec.controls
+                 : ["exaggeration", "cfg_weight", "temperature"];
+  /* AND NO `language` AT ALL WHERE THE VOICE CARRIES IT. tts-long derives the
+     language from which embedding was named on such an engine, and refuses by
+     name any code that contradicts it -- so a second derivation in this
+     browser can only ever agree with the first or turn a valid request into a
+     400. Agreeing is not a reason to send it: it would be the fifth model
+     table again, in the one place nobody could correct without a redeploy. */
+  const body = { voice };
+  if (!languageCarried()) body.language = resolvedLanguage().code;
+  if (engine) body.model = engine;
+  if (controls.includes("exaggeration")) body.exaggeration = Number($("x-exag").value);
+  if (controls.includes("cfg_weight")) body.cfg_weight = Number($("x-cfg").value);
+  if (controls.includes("temperature")) body.temperature = Number($("x-temp").value);
   const parts = segments();
   if (parts) body.segments = parts.map(s => ({ text: s.text, pause_after: s.pause_after || 0 }));
   else body.text = text;
@@ -5611,7 +6448,11 @@ async function queueJob(voice, text) {
         you send it again.`);
     }
     if (err.status === 503) {
-      throw new Error("Chatterbox is restarting. Try again in half a minute.");
+      /* NAMES THE SERVICE, NOT A GUESS AT WHICH PART OF IT. A 503 here is
+         tts-long refusing the request; Chatterbox restarting is one cause of
+         that and not the only one, and a message that asserts the cause sends
+         the reader to look at the wrong thing. */
+      throw new Error("The cloning service is not answering. Try again in half a minute.");
     }
     throw err;
   }
@@ -5635,30 +6476,119 @@ async function queueJob(voice, text) {
    A cancelled job counts: "stop and keep what's done" keeps the partial audio,
    and /jobs/{id}/audio serves it. */
 function hasAudio(job) {
-  /* SAID, NOT INFERRED, WHEN IT CAN BE. The age test below is a guess at what
-     the sweeper has done; `audio_deleted` is the server stating that somebody
-     asked for the file to go and the record to stay. A guess cannot tell those
-     apart, and a row offering a player for a file that is gone is the defect
-     this closes. */
-  if (job.audio_deleted) return false;
-  if (job.status !== "done" && job.status !== "cancelled") return false;
-  return !(job.finished_at && Date.now() / 1000 - job.finished_at > TTL);
+  /* SAID, NOT INFERRED. This used to end with an age test -- this page's own
+     arithmetic against its own copy of the sweep interval -- and that guess is
+     now wrong in both directions at once, because tts-long sweeps the AUDIO
+     and the RECORD on two different clocks. It drew a player over a file swept
+     an hour ago, and it greyed one out on a record kept deliberately for a
+     month. The service derives audio.state from what is on the disk; this
+     reads it and derives nothing.
+
+     `never` is why the enum matters here rather than a second boolean: an
+     instant run's audio was not lost, it was never kept, and telling a reader
+     "deleted" about a file that never existed is the lie the enum prevents. */
+  if (job.audio) return job.audio.state === "present";
+  /* NO audio BLOCK MEANS THE SERVER HAS NOT SAID YET, which is the 202 body
+     this page holds before the first listing catches up. Answering "gone" to
+     "not stated" would take Play and Download off every row on the tab. The
+     age guess is NOT restored here: a Play button that should not be there
+     costs a 404 with a sentence on it, and playJob already writes that
+     sentence. */
+  return !job.audio_deleted
+      && (job.status === "done" || job.status === "cancelled");
 }
 
-/* WHERE IT RAN, for the row. Only worth a word when there is more than one
-   answer: a stack with no runner would otherwise label every job "local",
-   which is noise about a choice nobody made. */
+/* WHERE IT RAN, ON EVERY ROW, and that is the reversal.
+
+   It used to answer "" for anything that was not a runner job or a fall-back,
+   on the argument that a stack with one machine would otherwise label every
+   job "local" -- noise about a choice nobody made. That argument has died
+   twice over. The record carries `host` now, so this names WHICH machine
+   rather than restating that there was one; and this tab lists three kinds of
+   run made by three different engines, which need not be on the same box and
+   whose rates are four orders apart. A row that says nothing about where it
+   ran is the row that cannot be compared, and comparing them is the whole
+   reason the log exists.
+
+   THE ENGINE, NOT THE BACKEND. "orko - parakeet" answers a question; "local"
+   only repeats the question back. */
+/* WHY THAT ENGINE AND NOT THE OTHER ONE, in the service's own four answers.
+   It is the row's version of the refusal messages: with two engines offered,
+   "chatterbox" on a row means nothing until you know whether somebody typed it
+   or the deployment chose it. An answer this table has not met is printed as
+   the service spelled it rather than dropped. */
+const ENGINE_REASON = {
+  pinned: "asked for by name",
+  default: "the deployment's default",
+  "alias:tts-long": "via the tts-long alias",
+  "alias:openai": "via an OpenAI model name",
+};
+
 function ranOn(job) {
-  if (!job.backend) return "";
-  if (job.backend === "runner")
-    return job.runner_host ? "GPU " + job.runner_host : "GPU runner";
-  return job.fell_back ? "this server, after the runner gave up" : "";
+  const host = job.host || "";
+  const engine = job.engine || "";
+  const why = job.engine_reason
+    ? ` (${ENGINE_REASON[job.engine_reason] || job.engine_reason})` : "";
+  if (job.backend === "runner") {
+    const where = job.runner_host || "the runner";
+    const what = job.runner_service || engine;
+    return what ? `GPU ${where} · ${what}${why}` : `GPU ${where}`;
+  }
+  /* A JOB THAT NEVER RAN MUST NOT NAME A MACHINE. An engine with no lane on
+     this server fails without ever being dispatched, and the record still
+     carries `host` -- the box whose process WROTE the record -- so the last
+     line below printed "this server - voxtral" for work that happened nowhere.
+     `backend` is the lane that took it and it is absent for a job no lane ever
+     took; the engine on its own is then the whole truth. */
+  if (job.status === "failed" && !job.backend) return engine ? engine + why : host;
+  /* THE FALL-BACK IS THE ONE CASE WORTH A SENTENCE RATHER THAN A PAIR. This
+     job ran here because the other machine would not take it, so its rate is
+     not a fair sample of either -- and a reader comparing the two has to be
+     told that before they read the number under it.
+
+     NEVER FOR A JOB THAT DID NOT FALL BACK: `fell_back` is the record's own
+     word and it is false for an engine that has nowhere to fall back TO, so
+     "after the runner gave up" must not be printed about a machine that never
+     took the job. The line above reaches those first. */
+  if (job.fell_back) {
+    return `${host || "this server"}, after ${job.runner_host || "the runner"} gave up`;
+  }
+  if (host && engine) return `${host} · ${engine}${why}`;
+  return host || (engine ? engine + why : "");
+}
+
+/* AN RTF ABOVE 1 MUST NOT READ LIKE ONE BELOW IT. Every row said
+   "${rtf}x realtime", so Parakeet at 17.14 and Chatterbox at 0.23 -- one
+   seventeen times faster than the clock, the other four times slower -- printed
+   the same sentence with opposite meanings, on a tab whose whole purpose is
+   comparing exactly those two.
+
+   Two decimals below 1, one above: the gap between 0.23 and 0.25 is nine
+   minutes on a forty-minute job, and the gap between 17.1 and 17.2 is nothing
+   anybody acts on. */
+function rateWords(rtf) {
+  return rtf >= 1 ? `${rtf.toFixed(1)}× faster than realtime`
+                  : `${rtf.toFixed(2)}× realtime`;
 }
 
 function statusClass(status) {
   return status === "done" ? "done"
        : status === "failed" ? "failed"
        : status === "running" ? "running" : "";
+}
+
+/* A MEASUREMENT UNDER TEN SECONDS KEEPS ITS FIGURES, AND THAT IS THE OTHER TWO
+   KINDS ARRIVING. Every number on a row was toFixed(0), which is right for the
+   only run this tab used to hold: a clone is forty minutes of compute for five
+   of audio and the decimal is noise nobody acts on. Parakeet reads a five
+   second clip in about 0.29 s and Kokoro answers a sentence in about the same,
+   so the row printed "0 s of compute" -- and printed a realtime factor beside
+   it that could only have come from dividing by the number just rounded away.
+
+   TWO SIGNIFICANT FIGURES BELOW TEN SECONDS, so nothing that happened prints
+   as though it did not; whole seconds above, where a tenth is noise. */
+function secondsSaid(seconds) {
+  return `${seconds < 10 ? Number(seconds.toPrecision(2)) : Math.round(seconds)} s`;
 }
 
 const JOBTEXT = new Map();
@@ -5670,25 +6600,155 @@ const JOBTEXT = new Map();
    the job is no longer live, which is the only thing that ends the state. */
 const STOPPING = new Set();
 
+/* THE FIVE FILTERS, AND THE QUERY EACH ONE SENDS. "Audio deleted" and "Audio
+   expired" are the halves that did not exist: the only filter this tab ever
+   had was "only jobs whose audio still exists", and there was no way at all to
+   ask the opposite question -- which of the things I made has the server thrown
+   away.
+
+   `playable` sends only the audio states. It does not have to name failed or
+   live: tts-long returns every live job and every failed job under EVERY
+   filter, on purpose, and repeating those rules in the query would make this
+   page the second place they can drift. */
+const JOB_FILTERS = {
+  playable: { label: "Playable",      empty: "No playable runs",
+              query: { audio: "present,pending" } },
+  all:      { label: "Everything",    empty: "No runs",
+              query: {} },
+  deleted:  { label: "Audio deleted", empty: "No runs whose audio was deleted",
+              query: { audio: "deleted" } },
+  expired:  { label: "Audio expired", empty: "No runs whose audio was swept",
+              query: { audio: "expired" } },
+  failed:   { label: "Failures",      empty: "No failed runs",
+              query: { status: "failed,cancelled" } },
+};
+/* "INSTANT SPEECH" STOPPED BEING TRUE. `kind` says what a run PRODUCED, and
+   tts-long now writes "speech" for an engine whose voices are presets -- a run
+   that is minutes of GPU on another machine, filed under a word that promised
+   a fraction of a second. The kind is still the right axis to filter on; the
+   label was the half that was describing the engine. */
+const JOB_KINDS = { all: "All kinds", clone: "Cloned voices",
+                    speech: "Speech", transcribe: "Transcriptions" };
+
+/* REMEMBERED, because a filter that resets on every reload has to be set again
+   every time somebody comes back to look for the thing they were filtering
+   for. Validated on the way out: a stored value from an older build, or one
+   somebody typed into localStorage, must fall back to a real filter rather
+   than send a query nothing answers. */
+function jobFilter() {
+  const value = store.get("jobfilter", "playable");
+  return JOB_FILTERS[value] ? value : "playable";
+}
+function jobKind() {
+  const value = store.get("jobkind", "all");
+  return JOB_KINDS[value] ? value : "all";
+}
+
+/* THE COUNTS FROM THE LAST LISTING, taken over EVERY record and before any
+   filter, so an option can say how much it is hiding without a second request.
+   Null until the first answer arrives. */
+let jobCounts = null;
+let jobTruncated = false;
+
+/* ONE COUNT, LOOKED UP TWO WAYS, AND null WHEN IT IS NOT THERE. tts-long may
+   publish `counts` flat or grouped by the thing the filter names, and both are
+   read. What is never done is arithmetic: a number invented on this side, on
+   the control that decides what the reader can see, is worse than no number,
+   because a missing count reads as "not said" and a wrong one reads as fact. */
+function jobCount(group, name) {
+  if (!jobCounts) return null;
+  if (typeof jobCounts[name] === "number") return jobCounts[name];
+  const nested = group ? jobCounts[group] : null;
+  if (nested && typeof nested[name] === "number") return nested[name];
+  return null;
+}
+/* WHICH COUNT MEANS THE SAME SET AS WHICH OPTION, IN THE SERVER'S SPELLING --
+   and null where no count means it.
+
+   The key is "all". This table asked for "total" and the option that says how
+   much everything is shipped with no number on it: jobCount answers a name
+   nothing emits with null, null prints nothing, nothing logs and no request
+   fails. Two halves built against one written contract, each green against its
+   own idea of the name. tests/test_gap_counts_contract.py reads the names out
+   of this file and out of tts-long's main.py and fails when they part again.
+
+   PLAYABLE ASKS FOR NOTHING, AND THAT IS A DECISION RATHER THAN THE SAME BUG
+   LEFT IN. Its query is audio=present,pending -- two states, and the service
+   publishes a count per state, so there is no one number over it. Adding the
+   two here would be arithmetic on the control that decides what the reader can
+   see, and it would be WRONG as well as invented: every filter is answered
+   with the live and the failed rows too, and a failed clone is counted under
+   `expired`, so the sum would be smaller than the list underneath it. No
+   number reads as "not said"; a number the list contradicts reads as loss.
+
+   AND FAILURES ASKS FOR NOTHING FOR THE SAME REASON, WHICH IS THE SECOND HALF
+   OF THE SAME BUG. The rule above was applied to `playable` and not to the
+   option one line under it: "Failures" sends status=failed,cancelled -- two
+   states -- and this table asked for `failed` alone, so the option printed
+   "Failures (1)" over three rows. Measured against the real route. A count
+   that means a SMALLER set than the filter it labels is worse than no count,
+   because the two missing rows are exactly the ones somebody came to this tab
+   to find, and the number is the page telling them they are not there.
+
+   `cancelled` is emitted separately and there is no combined name, so the
+   honest answer is the same one playable gives: say nothing. Summing them
+   here would be arithmetic on the control that decides what the reader can
+   see -- and wrong twice over, since every filter is answered with the live
+   rows too. tests/test_gap_counts_contract.py now reads each option's QUERY
+   beside its count, so a count that means a different set from the filter it
+   sits on fails there rather than shipping a third time. */
+const FILTER_COUNT = { playable: null, all: ["", "all"],
+                       deleted: ["audio", "deleted"], expired: ["audio", "expired"],
+                       failed: null };
+
+/* The count goes in the option TEXT, so the closed select answers "how much am
+   I not seeing" without being opened. Rewritten after every listing; the
+   markup carries the plain labels so both controls are correct and usable
+   before the first answer has arrived. */
+function syncJobFilters() {
+  const filter = $("jobfilter"), kind = $("jobkind");
+  if (!filter || !kind) return;
+  filter.value = jobFilter();
+  kind.value = jobKind();
+  for (const option of filter.options) {
+    /* `in`, NEVER `||`. An option deliberately entered as null would fall
+       through the fallback to ["", option.value] and ask for its own value --
+       which is the one name the server does not emit, and the silence this
+       table exists to make deliberate instead of accidental. The fallback
+       itself stays: an option added to the markup and not to this table asks
+       for its own value, which is a name the contract test can see and fail
+       on, rather than a lookup that quietly returns null for ever. */
+    const spec = option.value in FILTER_COUNT ? FILTER_COUNT[option.value]
+                                              : ["", option.value];
+    const n = spec ? jobCount(spec[0], spec[1]) : null;
+    option.textContent = JOB_FILTERS[option.value].label
+      + (n === null ? "" : ` (${n})`);
+  }
+  for (const option of kind.options) {
+    const n = option.value === "all" ? jobCount("", "all")
+                                     : jobCount("kind", option.value);
+    option.textContent = JOB_KINDS[option.value] + (n === null ? "" : ` (${n})`);
+  }
+}
+
 function renderJobs() {
   const all = [...jobs.values()].sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
-  /* THE FILTER, and the control that offers it. A finished job whose audio has
-     gone is still worth keeping -- it says what was said and where it ran --
-     but once there are a few of them the list is mostly things you cannot
-     play. Live jobs are never hidden: they have no audio YET, which is not the
-     same as having none, and hiding the thing you are waiting for would be the
-     worst possible reading of this checkbox.
+  /* THE LIST IS WHAT THE SERVER SENT, AND IT IS NOT FILTERED AGAIN HERE.
 
-     The control only appears when it would actually hide something, so it is
-     absent on a page where every job is playable. */
-  const gone = all.filter(j => !hasAudio(j)
-                            && j.status !== "queued" && j.status !== "running").length;
-  const wrap = $("onlyaudiowrap");
-  if (wrap) wrap.hidden = gone === 0;
-  const onlyAudio = gone > 0 && $("onlyaudio") && $("onlyaudio").checked;
-  const list = onlyAudio
-    ? all.filter(j => hasAudio(j) || j.status === "queued" || j.status === "running")
-    : all;
+     The filter is a query parameter now, for a reason arithmetic rather than
+     taste: tts-long caps a listing at fifty rows, so a filter applied on this
+     side asks for the fifty most recent runs of ANY kind and then shows
+     whichever of them happen to match -- and one afternoon of instant speech
+     pushes this morning's clone off the end before the filter has run at all.
+
+     The second half is that the service deliberately answers every filter with
+     every live job and every failed job in it. A pass over the answer here
+     would throw away precisely those rows, which is the reading of a filter
+     that looks like data loss: the thing you are waiting for, and the thing
+     that has just gone wrong, are the two rows nobody ever means to hide. */
+  const list = all;
+  const filter = jobFilter(), kindFilter = jobKind();
+  syncJobFilters();
   /* A BARE NUMBER, because it is now an accent chip in the tab rather than a
      parenthesis in a sentence -- "(2)" inside a pill is a bracket drawn twice.
      Two characters shorter, and readable from the other two tabs without
@@ -5698,9 +6758,22 @@ function renderJobs() {
   $("jobsafe").hidden = !running;
 
   if (!list.length) {
-    $("joblist").innerHTML = `<div class="hint">${onlyAudio
-      ? "No jobs with audio. Clear the filter to see the rest."
-      : "No jobs. Cloned voices queue here."}</div>`;
+    /* THE EMPTY STATE NAMES THE FILTER AND SAYS WHAT IT IS HOLDING BACK. An
+       empty card under a default that hides things is indistinguishable from
+       an empty card under a stack that has lost everything, and the second
+       reading is the one people act on. */
+    const total = jobCount("", "all");
+    const plain = filter === "all" && kindFilter === "all";
+    /* A PHRASE PER FILTER, because the label is a control and the sentence is
+       prose: "No Failures runs" and "No Audio deleted runs" are what happens
+       when the two are made to be the same string. */
+    const what = JOB_FILTERS[filter].empty
+      + (kindFilter === "all" ? "" : ` among ${JOB_KINDS[kindFilter].toLowerCase()}`);
+    $("joblist").innerHTML = `<div class="hint">${plain
+      ? "No runs yet. Cloned voices, instant speech and transcriptions all land here."
+      : `${what}.${total
+          ? ` ${total} ${total === 1 ? "record is" : "records are"} hidden by this filter.`
+          : " Choose Everything to see the rest."}`}</div>`;
     document.title = "ai-voice";
     return;
   }
@@ -5710,7 +6783,31 @@ function renderJobs() {
   const now = Date.now() / 1000;
   let soonest = null;
   $("joblist").innerHTML = list.map(job => {
-    const expired = job.finished_at && now - job.finished_at > TTL;
+    /* ABSENT MEANS CLONE. Every sidecar tts-long wrote before this release has
+       no `kind`, and defaulting it here is what makes all of them valid rows
+       rather than a migration. */
+    const kind = job.kind || "clone";
+    /* WHICH SERVICE MADE IT, WHICH IS NOT THE SAME QUESTION AS WHAT IT MADE.
+       `kind` decided the two buttons below, and it stopped being able to the
+       day tts-long grew an engine whose voices are presets: that run is kind
+       "speech" and it is a JOB -- minutes of GPU, a file on the server, a
+       Retry that resubmits and means something -- while a Kokoro run is kind
+       "speech" and keeps no file at all, so "get it back" there means saying
+       it again. Offering either button on the wrong service asks the wrong
+       machine for the wrong thing: Retry would POST /jobs for a run tts-long
+       never made, and Speak again would POST /speak with a voice Kokoro has
+       never heard of.
+
+       A RECORD WITH NO `service` IS A CLONE, for the same reason an absent
+       `kind` is: every sidecar written before that field existed came from
+       tts-long, and defaulting it here is what keeps all of them valid rows
+       rather than a migration. */
+    const queued = job.service ? job.service === "tts-long" : kind === "clone";
+    /* THE SERVER SAYS IT NOW. This was `now - job.finished_at > TTL`, this
+       page guessing at a sweep it cannot see, and the guess is wrong every
+       time the audio TTL and the record TTL disagree -- which is always, since
+       they became two settings. */
+    const expired = job.audio ? job.audio.state === "expired" : false;
     const elapsed = job.started_at ? now - job.started_at
                   : job.created_at ? now - job.created_at : 0;
     const budget = job.estimated_seconds || 0;
@@ -5747,10 +6844,37 @@ function renderJobs() {
        list" -- and it is a DELETE that removes the file from the server for
        good, from every device. Half of that label was true, and that half is
        kept: a row with no audio left to lose (failed, expired, already swept)
-       really is only forgotten. A JS comment rather than an HTML one because
+       really is only forgotten.
+
+       EXCEPT ON A TRANSCRIPTION, WHERE THE RECORD IS THE ARTEFACT. There is no
+       audio on that row and there never was -- the clip belonged to whoever
+       supplied it -- so "the record" is not an index pointing at the thing
+       that ran, it IS the thing that ran, and it is the only copy of it
+       anywhere in this stack. The button beside it says "Copy the transcript";
+       this one says which text the press takes away. forgetJob asks before it
+       goes for the same reason.
+
+       A JS comment rather than an HTML one because
        this string is innerHTML, and a comment inside it ships into the DOM
        once per row. */
     const audio = hasAudio(job);
+    /* THE PIECES A RUN WAS MADE OF, IN THE WORD THE ENGINE THAT MADE THEM
+       USES, AND PLURALISED. This was `job.chunks + " chunks"`, written when
+       every row was a clone: the TEXT is cut into segments to be spoken, there
+       are a dozen of them, and the bar three lines below counts this very
+       field as "n of 14 segments". Parakeet windows the AUDIO instead, and
+       every clip under about thirty seconds is one window, so the commonest
+       row on the tab read "1 chunks" -- a plural over one thing, in a word
+       that on the same row means pieces of text. */
+    const pieces = typeof job.chunks === "number" ? job.chunks : 0;
+    const piece = kind === "transcribe" ? "window" : "segment";
+    /* JOINED, NOT CONCATENATED. The separator was glued to the front of the
+       queue position, so a row with a place in the queue and no piece count
+       yet -- which is exactly what the OpenAI route's 202 hands back --
+       opened with a bare "· 2 ahead". */
+    const pieceHint = [pieces ? `${pieces} ${piece}${pieces === 1 ? "" : "s"}` : "",
+                   job.queued_ahead ? `${job.queued_ahead} ahead` : ""]
+                  .filter(Boolean).join(" · ");
     const madeCount = Array.isArray(job.offsets) ? job.offsets.length : 0;
     const counting = live && madeCount > 0 && job.chunks > 0;
     /* SECONDS OF AUDIO ALREADY MADE, from the last boundary published. */
@@ -5763,6 +6887,33 @@ function renderJobs() {
        its own best evidence once it has produced anything. */
     const leftBySegments = counting
       ? elapsed * (job.chunks - madeCount) / madeCount : null;
+    /* GUARDED ON ALL THREE FIELDS, NOT ON THE FACTOR ALONE. The line was
+       `job.realtime_factor ? ... job.audio_seconds.toFixed(0) ...`, so one
+       record carrying a rate without the two numbers under it threw inside
+       list.map and took the WHOLE tab into "The job list could not be drawn".
+       One undefined field on one row, and no rows at all -- which is the same
+       class of failure as the panel that rendered nothing while thirteen
+       checks agreed it was fine. */
+    const measured = [];
+    if (typeof job.audio_seconds === "number")
+      measured.push(`${secondsSaid(job.audio_seconds)} of audio`);
+    /* THE CLIP AND THE SPEECH IN IT ARE TWO NUMBERS, AND ONLY ONE KIND HAS
+       BOTH. `audio_seconds` means the same thing on all three -- how much
+       audio the run is about -- so stt reports what the VAD kept separately
+       rather than quietly redefining the shared field. This row read the first
+       and dropped the second, which left the only place in the stack that
+       could show why a twelve second clip was six seconds of work showing
+       nothing. Guarded like its neighbours: a record carrying one of these
+       without the others must not throw inside list.map and take the tab with
+       it. */
+    if (typeof job.speech_seconds === "number")
+      measured.push(`${secondsSaid(job.speech_seconds)} of speech`);
+    if (typeof job.compute_seconds === "number")
+      measured.push(`${secondsSaid(job.compute_seconds)} of compute`);
+    if (typeof job.realtime_factor === "number")
+      measured.push(rateWords(job.realtime_factor));
+    if (typeof job.chars === "number" && kind === "transcribe")
+      measured.push(`${job.chars} character${job.chars === 1 ? "" : "s"}`);
     const percent = counting ? Math.min(95, madeCount / job.chunks * 100)
                   : budget ? Math.min(95, elapsed / budget * 100) : 0;
     const over = budget && elapsed > budget;
@@ -5773,11 +6924,12 @@ function renderJobs() {
     return `<div class="job ${expired ? "expired" : ""}">
       <div class="top">
         <span class="status ${statusClass(job.status)}">${stopping ? "stopping…" : job.status}</span>
-        <strong>${esc(job.voice || (job.recovered ? "voice unknown" : "default"))}</strong>
+        <strong>${esc(kind === "transcribe"
+          ? (job.language ? "transcript · " + job.language : "transcript")
+          : (job.voice || (job.recovered ? "voice unknown" : "default")))}</strong>
         <span class="id">${esc(job.id)}</span>
         <span class="spacer"></span>
-        <span class="hint">${job.chunks ? job.chunks + " chunks" : ""}${
-          job.queued_ahead ? " · " + job.queued_ahead + " ahead" : ""}</span>
+        <span class="hint">${pieceHint}</span>
       </div>
       ${live ? `<div class="bar-track"><div class="bar-fill" style="transform:scaleX(${(percent / 100).toFixed(4)})"></div></div>
         <div class="hint">${counting
@@ -5787,29 +6939,34 @@ function renderJobs() {
           : `${clock(elapsed)} in, ${roughly(budget - elapsed)} left · estimate`}</div>` : ""}
       ${job.status === "queued" && madeCount ? `<div class="hint">Waiting for the GPU.</div>` : ""}
       ${wire ? `<div class="hint">${madeSeconds.toFixed(0)} s of audio so far ·
-        ${wire.toFixed(3)}× realtime</div>` : ""}
+        ${rateWords(wire)}</div>` : ""}
       ${preview ? `<details class="jobtext"${openRows.has(job.id) ? " open" : ""}><summary>${esc(preview)}</summary>
         <div class="body" data-text="${esc(job.id)}">Loading…</div></details>`
         : job.recovered ? `<div class="hint">The server recovered this job after a
             restart. It did not keep the text or the voice.</div>` : ""}
       ${job.status === "failed" ? `<div class="note bad">${esc(job.error || "no reason given")}</div>` : ""}
-      ${expired ? `<div class="hint">expired: the audio was deleted after ${TTL / 3600} hours</div>` : ""}
+      ${expired ? `<div class="hint">The audio was swept. This record was kept.</div>` : ""}
       ${ranOn(job) ? `<div class="hint">${esc(ranOn(job))}</div>` : ""}
-      ${job.audio_deleted ? `<div class="hint">The audio was deleted. This record was kept.</div>` : ""}
-      ${job.realtime_factor ? `<div class="hint">${job.audio_seconds.toFixed(0)} s of audio in
-        ${job.compute_seconds.toFixed(0)} s · ${job.realtime_factor.toFixed(3)}× realtime</div>` : ""}
+      ${(job.audio ? job.audio.state === "deleted" : job.audio_deleted)
+        ? `<div class="hint">The audio was deleted. This record was kept.</div>` : ""}
+      ${measured.length ? `<div class="hint">${esc(measured.join(" · "))}</div>` : ""}
       <div class="acts">
         ${audio
           ? `<button class="small" data-play="${esc(job.id)}" type="button">Play</button>
              <button class="small" data-get="${esc(job.id)}" type="button">Download the audio</button>` : ""}
         ${live && !stopping ? `<button class="small" data-stop="${esc(job.id)}" type="button">Stop and keep what's done</button>` : ""}
-        ${job.status === "failed" ? `<button class="small" data-retry="${esc(job.id)}" type="button">Retry</button>` : ""}
+        ${kind === "transcribe" ? `<button class="small" data-copy="${esc(job.id)}" type="button">Copy the transcript</button>` : ""}
+        ${kind === "speech" && !queued ? `<button class="small" data-again="${esc(job.id)}" type="button">Speak again</button>` : ""}
+        ${queued && job.status === "failed" ? `<button class="small" data-retry="${esc(job.id)}" type="button">Retry</button>` : ""}
         ${audio ? `<button class="small" data-delaudio="${esc(job.id)}" type="button">Delete the audio</button>` : ""}
         <button class="small" data-forget="${esc(job.id)}" type="button">${
-          audio ? "Delete the record too" : "Delete the record"}</button>
+          audio ? "Delete the record too"
+          : kind === "transcribe" ? "Delete the transcript"
+          : "Delete the record"}</button>
       </div>
     </div>`;
-  }).join("");
+  }).join("") + (jobTruncated ? `<div class="hint">The service sent the most
+    recent runs only. Narrow the filters to reach the older ones.</div>` : "");
 
   /* The answer on a background tab, without needing the tab. */
   document.title = soonest !== null && soonest > 0
@@ -5825,6 +6982,10 @@ function renderJobs() {
     b.addEventListener("click", () => stopJob(b.dataset.stop, b)));
   $("joblist").querySelectorAll("[data-retry]").forEach(b =>
     b.addEventListener("click", () => retryJob(b.dataset.retry, b)));
+  $("joblist").querySelectorAll("[data-copy]").forEach(b =>
+    b.addEventListener("click", () => copyTranscript(b.dataset.copy, b)));
+  $("joblist").querySelectorAll("[data-again]").forEach(b =>
+    b.addEventListener("click", () => speakAgain(b.dataset.again, b)));
   $("joblist").querySelectorAll("[data-delaudio]").forEach(b =>
     b.addEventListener("click", () => deleteAudio(b.dataset.delaudio)));
   $("joblist").querySelectorAll("[data-forget]").forEach(b =>
@@ -5872,8 +7033,55 @@ let jobUrl = null;
    GATEWAY_API_KEYS set -- which is the deployment this is for. The blob is the
    whole file; there is no range support to give up, because the route serves
    the file from disk in one piece anyway. */
+/* ONE PLAYER, TWO SOURCES. A stored job's audio is fetched from the server; a
+   re-spoken instant run arrives as the body of the POST that made it, because
+   nothing on the instant path keeps a file. Both end here so that the revoke
+   of the previous object URL happens exactly once and in one place -- two
+   copies of this leak a blob per press, and on this tab a blob is megabytes. */
+function playBlob(blob, label) {
+  $("jobplay").hidden = false;
+  if (jobUrl) URL.revokeObjectURL(jobUrl);
+  jobUrl = URL.createObjectURL(blob);
+  $("jobplayer").src = jobUrl;
+  $("jobplaying").textContent = label;
+  $("jobplayer").play().catch(() => {});
+}
+
+/* HOW MUCH QUIETER THIS ENGINE IS THAN THE DEFAULT ONE, or "".
+
+   BOTH NUMBERS COME FROM /health.engines AND NEITHER IS WRITTEN HERE. Turbo
+   normalises to -27 LUFS against the current model's -22, measured, and the
+   difference is audible enough to read as a fault; but a figure hard-coded in
+   the browser is a claim about a checkpoint the deployment can change under
+   it, and the third engine would need a third literal. Nothing published,
+   nothing said. */
+function loudnessLine(engine) {
+  const mine = engineSpec(engine), base = engineSpec(defaultEngine());
+  if (!mine || !base || engine === defaultEngine()) return "";
+  const a = mine.loudness_lufs, b = base.loudness_lufs;
+  if (typeof a !== "number" || typeof b !== "number" || a >= b) return "";
+  return `${engineLabel(engine)} normalises to ${a} LUFS, about `
+    + `${Math.round(b - a)} dB quieter than ${engineLabel(defaultEngine())}. `
+    + `That is the engine and not the run. Turn it up rather than changing the text.`;
+}
+
+/* SAID ONCE PER BROWSER AND PER ENGINE. A note that returns on every play is
+   furniture; one that never returns after a cleared store is a fact nobody was
+   ever told. Keyed by engine so a third one gets its own first hearing. */
+function sayLoudness(engine) {
+  const box = $("jobloud");
+  if (!box) return;
+  const line = engine ? loudnessLine(engine) : "";
+  const key = "said.loudness." + engine;
+  if (!line || store.get(key, false)) { box.hidden = true; return; }
+  store.set(key, true);
+  box.textContent = line;
+  box.hidden = false;
+}
+
 async function playJob(id) {
   $("jobplay").hidden = false;
+  sayLoudness((jobs.get(id) || {}).engine);
   $("jobplaying").textContent = "Loading " + id.slice(0, 8) + "…";
   let response;
   try { response = await api(`/jobs/${encodeURIComponent(id)}/audio`); }
@@ -5883,11 +7091,7 @@ async function playJob(id) {
     $("jobplaying").textContent = `That audio is not available (${response.status}).`;
     return;
   }
-  if (jobUrl) URL.revokeObjectURL(jobUrl);
-  jobUrl = URL.createObjectURL(await response.blob());
-  $("jobplayer").src = jobUrl;
-  $("jobplaying").textContent = "Playing " + id.slice(0, 8);
-  $("jobplayer").play().catch(() => {});
+  playBlob(await response.blob(), "Playing " + id.slice(0, 8));
 }
 
 $("jobclose").addEventListener("click", () => {
@@ -5961,9 +7165,30 @@ async function forgetJob(id) {
      costs a dialog, not the recording. A row with nothing left to lose is not
      worth a dialog and does not get one. */
   const job = jobs.get(id);
-  if (job && hasAudio(job) && !confirm(
-      `Delete the audio for job ${id.slice(0, 8)}?\n\nThis cannot be undone. `
-      + `It is deleted on the server, so it goes from every device.`)) return;
+  if (job && hasAudio(job)) {
+    if (!confirm(
+        `Delete the audio for job ${id.slice(0, 8)}?\n\nThis cannot be undone. `
+        + `It is deleted on the server, so it goes from every device.`)) return;
+  } else if (job && (job.kind || "clone") === "transcribe") {
+    /* THE RULE ABOVE MEETS THE ONE KIND THAT HAS EVERYTHING TO LOSE. "A row
+       with nothing left to lose is not worth a dialog" was written when a
+       record was a few hundred bytes of index and the wav it pointed at was
+       the thing worth keeping. A transcription has no audio and never had, so
+       by that test it is the cheapest row on the tab -- and its record holds
+       the transcript, which is the whole of what the run produced and the only
+       copy of it. One press removed it from the server, and therefore from
+       every device, in silence and with nothing anywhere that could make it
+       again: the clip was never kept and Parakeet cannot be asked twice.
+
+       An instant run is deliberately NOT asked about. Its text was typed on
+       this side, its audio was already played or downloaded, and its record is
+       a log line about something the reader still has. */
+    if (!confirm(
+        `Delete the transcript for job ${id.slice(0, 8)}?\n\nThe text is all `
+        + `this run produced -- the recording was never kept, and it cannot be `
+        + `transcribed again from here. It is deleted on the server, so it `
+        + `goes from every device.`)) return;
+  }
   try {
     await json(`/jobs/${encodeURIComponent(id)}`, { method: "DELETE" });
   } catch (err) {
@@ -5998,22 +7223,162 @@ async function stopJob(id, button) {
   refreshJobs();
 }
 
+/* THE RECORD IS WHERE THE PARAMETERS COME FROM, NOT THIS BROWSER.
+
+   Retry read localStorage, so it existed only on the machine that made the
+   job: the phone drew the button and then answered "the parameters for that
+   job were not kept", which is a control offered where it cannot work. The
+   record has held all of it on the server the whole time. adopt() survives as
+   the seed for a job the server has not listed yet, and for nothing else.
+
+   FETCHED AT THE PRESS RATHER THAN CARRIED IN THE LISTING. `text` is capped at
+   4096 characters and the listing holds fifty rows, so sending it with every
+   poll would be a couple of hundred kilobytes every few seconds for something
+   nobody is reading. */
+async function recordFor(id) {
+  try { return await json(`/jobs/${encodeURIComponent(id)}`); }
+  catch (err) {
+    /* The record is gone -- swept, or forgotten from another device. What this
+       browser remembers is then the only copy, and it is better than a dead
+       button. */
+    const seen = remembered().find(j => j.id === id);
+    if (seen && seen.params) return { ...seen.params, id };
+    throw err;
+  }
+}
+
 async function retryJob(id, button) {
-  const seen = remembered().find(j => j.id === id);
-  if (!seen || !seen.params) { alert("The parameters for that job were not kept."); return; }
   /* A POST against a NAS that may be running Parakeet, and the press showed
      nothing until the new row appeared: measured at NEVER. */
   const release = busy(button, "Retrying…");
-  /* The identical parameters, resubmitted. No paraphrasing of the backend's
-     error into something friendlier and less true, and no quiet edits. */
   try {
+    const record = await recordFor(id);
+    /* The identical parameters, resubmitted. No paraphrasing of the backend's
+       error into something friendlier and less true, and no quiet edits.
+
+       THE ENGINE IS ONE OF THOSE PARAMETERS, AND THIS IS THE PATH THAT LOSES
+       IT. Retry rebuilds a body from a stored record rather than from the
+       controls, so an engine left out here is a turbo job silently retried as
+       baseline -- different languages, different loudness, no error anywhere,
+       and a reader who pressed a button labelled Retry. `model` is what the
+       caller asked for and `engine` is what actually ran; either pins it, and
+       a record from before any of this has neither and resolves to the
+       deployment's default, which is what it ran on.
+
+       A FIELD THE RECORD DOES NOT CARRY IS NOT SENT AS null. An engine with no
+       exaggeration control never recorded one, and putting the key back with
+       an empty value is the shape this stack refuses by name. */
+    const params = { voice: record.voice };
+    const model = record.model || record.engine;
+    if (model) params.model = model;
+    /* THE FIELDS THIS ENGINE DECLARES, NOT THREE WRITTEN DOWN HERE. This was
+       `["exaggeration", "cfg_weight", "temperature"]`, the same three the
+       submit path stopped hard-coding a release ago -- so Retry was already
+       the half of the pair that could not carry a control the other half sent.
+       An engine tuned by two fields this list does not name is retried without
+       them and produces different audio under a button labelled Retry, which
+       is the exact failure the comment above was written about, one field
+       along. spec.controls comes from /health, so a fourth engine is a row in
+       the catalogue and no change here.
+
+       THE THREE SURVIVE AS THE FALLBACK, and only where /health names no
+       engine at all: that is a deployment with one engine, and they are what
+       it has always sent. */
+    const spec = engineSpec(model);
+    const fields = spec && Array.isArray(spec.controls) ? spec.controls
+                 : ["exaggeration", "cfg_weight", "temperature"];
+    for (const field of fields)
+      if (typeof record[field] === "number") params[field] = record[field];
+    /* NOT A LANGUAGE THE ENGINE CARRIES ON ITS VOICE. The record holds the
+       language the SERVER derived from the embedding, and sending it back is
+       putting a field on the wire that this engine takes no field for. */
+    if (record.language && !(spec && spec.language_from_voice))
+      params.language = record.language;
+    if (Array.isArray(record.segments) && record.segments.length) {
+      params.segments = record.segments.map(x =>
+        ({ text: x.text, pause_after: x.pause_after || 0 }));
+    } else if (record.text) {
+      params.text = record.text;
+    } else {
+      alert("The text for that job was not kept, so it cannot be run again.");
+      return;
+    }
     const payload = await json("/jobs", { method:"POST",
-      headers:{ "content-type":"application/json" }, body: JSON.stringify(seen.params) });
-    adopt(payload.id, seen.params);
+      headers:{ "content-type":"application/json" }, body: JSON.stringify(params) });
+    adopt(payload.id, params);
     jobs.set(payload.id, payload);
     renderJobs(); schedule(0);
-  } catch (err) { alert("Retry failed: " + err.message); }
+  } catch (err) { alert("Retry failed: " + (err.message || err)); }
   finally { release(); }
+}
+
+/* SAY IT AGAIN, WHICH IS THE ONLY WAY AN INSTANT RUN COMES BACK. Kokoro keeps
+   no file: the audio was streamed or downloaded and the record is all that is
+   left of it, so "get the thing back" here means making it a second time. The
+   parameters come off the record for the same reason Retry's do -- this is
+   most useful on the device that did NOT make the run.
+
+   /speak is extra="forbid": an unknown field is a 422, so only the fields it
+   declares are sent. The answer goes into the card's own player, which is the
+   one element on this tab that survives the two-second re-render. */
+async function speakAgain(id, button) {
+  const release = busy(button, "Speaking…");
+  try {
+    const record = await recordFor(id);
+    if (!record.text) {
+      alert("The text for that run was not kept, so it cannot be said again.");
+      return;
+    }
+    const body = { voice: record.voice, text: record.text,
+                   format: record.format || "wav" };
+    if (record.language) body.language = record.language;
+    if (typeof record.speed === "number") body.speed = record.speed;
+    const response = await api("/speak", { method: "POST",
+      headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    if (!response.ok) {
+      let payload = null; try { payload = await response.json(); } catch {}
+      throw new Error(reason(payload, response.status + " " + response.statusText));
+    }
+    playBlob(await response.blob(), "Speaking " + id.slice(0, 8) + " again");
+    /* The new run writes its own record, so the list has grown. */
+    refreshJobs().catch(() => {});
+  } catch (err) { alert("Could not say it again: " + (err.message || err)); }
+  finally { release(); }
+}
+
+/* THE TRANSCRIPT IS THE ARTEFACT A TRANSCRIPTION HAS TO HAND BACK. There is no
+   audio on this row and there never was -- the clip belonged to whoever
+   supplied it -- so a tab whose stated job is "get the thing back" is inert
+   for this kind of run unless the text can leave it.
+
+   Same cache the open row fills, so opening the row and then pressing this
+   costs one request between them rather than two. */
+async function copyTranscript(id, button) {
+  const release = busy(button, "Copying…");
+  let copied = false;
+  try {
+    let said = JOBTEXT.get(id);
+    if (said === undefined) {
+      const record = await recordFor(id);
+      said = record.text || "";
+      JOBTEXT.set(id, said);
+    }
+    if (!said) { alert("The transcript was not kept for that run."); return; }
+    await navigator.clipboard.writeText(said);
+    copied = true;
+  } catch (err) {
+    /* The clipboard is permissioned and it can refuse, so this says which of
+       the two steps failed rather than nothing. The text is still reachable by
+       opening the row above the button. */
+    alert("Could not copy it: " + (err.message || err));
+  } finally { release(); }
+  if (copied && button) {
+    /* AFTER release(), because busy() puts the old label back when it hands
+       the undo in. */
+    button.textContent = "Copied";
+    setTimeout(() => { if (button.isConnected) button.textContent = "Copy the transcript"; },
+               1200);
+  }
 }
 
 async function refreshJobs() {
@@ -6033,13 +7398,34 @@ async function refreshJobs() {
 }
 
 async function refreshJobsInner() {
-  let listed = [];
-  try { listed = (await json("/jobs")).jobs || []; }
+  /* THE FILTER IS THE QUESTION, NOT A PASS OVER THE ANSWER. tts-long caps a
+     listing at fifty rows, so filtering after the fetch means asking for the
+     fifty most recent runs of any kind and showing whichever of them match --
+     and one afternoon of instant speech pushes this morning's clone off the
+     end before anything on this side has run. Both proxies append the query
+     string on the way past, so this costs nothing but the parameters. */
+  const params = new URLSearchParams();
+  const kind = jobKind();
+  if (kind !== "all") params.set("kind", kind);
+  for (const [key, value] of Object.entries(JOB_FILTERS[jobFilter()].query)) {
+    params.set(key, value);
+  }
+  const query = params.toString();
+  /* WHETHER THE SERVER WAS ASKED ABOUT EVERYTHING, which is the precondition
+     for every conclusion drawn below from an id being absent. */
+  const unfiltered = query === "";
+  let payload;
+  try { payload = await json("/jobs" + (query ? "?" + query : "")); }
   catch (err) {
     /* A 503 while tts-long restarts must not empty the list — the jobs are
        still queued on the other side of it. */
     renderJobs(); return;
   }
+  const listed = payload.jobs || [];
+  /* Absent is a first-class answer: jobCount() then prints no number rather
+     than one this page worked out for itself. */
+  jobCounts = payload.counts || null;
+  jobTruncated = Boolean(payload.truncated);
   const before = new Map(jobs);
   jobs.clear();
   for (const job of listed) jobs.set(job.id, job);
@@ -6052,7 +7438,12 @@ async function refreshJobsInner() {
   const keep = [];
   for (const seen of remembered()) {
     if (jobs.has(seen.id)) { keep.push(seen); continue; }
-    if (now - seen.at > TTL) continue;
+    /* SWEPT, OR SIMPLY NOT ASKED ABOUT. Dropping an id this browser remembers
+       is only safe when the listing was of EVERYTHING. Under a filter the
+       server was never asked about this job, so its absence says nothing at
+       all, and forgetting it here would throw away the 202 that has not been
+       listed yet the moment somebody touches a select. */
+    if (unfiltered && now - seen.at > TTL) continue;
     keep.push(seen);
     if (!before.has(seen.id)) continue;
     /* THE SERVER ANSWERED AND DOES NOT KNOW THIS JOB. The catch above already
@@ -6067,10 +7458,21 @@ async function refreshJobsInner() {
        exactly what a restart looked like from here. */
     const was = before.get(seen.id);
     const unfinished = was.status === "queued" || was.status === "running";
-    jobs.set(seen.id, unfinished
-      ? { ...was, status: "failed",
-          error: "lost when the service restarted" }
-      : was);
+    /* A LIVE JOB COMES BACK FROM EVERY FILTER, by the service's own rule, so a
+       live one that is missing is missing for the reason this branch has
+       always meant: the process holding it went away.
+
+       A FINISHED one is a different question now. The filter is the ordinary
+       explanation for its absence, so restoring it is only right when the
+       listing was of everything -- otherwise Failures would quietly grow every
+       done job this browser has ever seen, and the filter would look broken
+       while doing exactly what it was told. */
+    if (unfinished) {
+      jobs.set(seen.id, { ...was, status: "failed",
+                          error: "lost when the service restarted" });
+    } else if (unfiltered) {
+      jobs.set(seen.id, was);
+    }
   }
   store.set("jobs", keep);
   /* GREW SINCE THE LAST POLL, measured here because this is the only place
@@ -6153,9 +7555,28 @@ $("refresh").addEventListener("click", async () => {
      reason is already on screen and there is nothing to report here. */
   try { await refreshJobs(); } catch {} finally { done(); }
 });
-/* Redraw from what is already here. Filtering is a question about the rows on
-   this page, not a question for the server. */
-$("onlyaudio").addEventListener("change", renderJobs);
+/* PERSISTED, AND RE-ASKED RATHER THAN REDRAWN. This line used to read
+   "filtering is a question about the rows on this page, not a question for the
+   server", and that was true of a checkbox over an unfiltered fifty. It is
+   false of a filter whose whole purpose is reaching rows the fifty do not
+   contain, so changing either control is a new request.
+
+   THE OLD ROWS DO NOT SIT UNDER THE NEW LABEL WHILE THAT HAPPENS. A select is
+   a press like any other on this page, and the rule here is that the press is
+   the acknowledgement -- leaving the previous answer on screen under a
+   contradicting label is worse than a blank moment, because it reads as a
+   filter that did nothing. */
+for (const control of ["jobfilter", "jobkind"]) {
+  $(control).addEventListener("change", () => {
+    store.set(control, $(control).value);
+    syncJobFilters();
+    $("joblist").innerHTML = `<div class="hint">Loading…</div>`;
+    schedule(0);
+  });
+}
+/* The stored choice reaches the controls before the first listing, so the page
+   does not open on "Playable" and then jump to whatever was remembered. */
+syncJobFilters();
 
 /* ================================================= the clone sheet ===== */
 /*

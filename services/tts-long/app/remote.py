@@ -17,8 +17,17 @@ THE SHAPE, AND THE ONE RULE IT KEEPS
 `RemoteSynth` implements exactly the signature `Synth.speak_segments` has, and
 nothing else, so `_run()` never learns which one it got:
 
-    speak_segments(segments, language, exaggeration, cfg_weight, temperature,
-                   reference, on_chunk=..., cancelled=...) -> Spoken
+    speak_segments(segments, language, controls, reference,
+                   on_chunk=..., cancelled=...) -> Spoken
+
+`controls` is one mapping of {field: value} rather than one parameter per
+field, and the change is what makes a fourth engine no signature edit at all:
+which keys exist is read off the engine's own catalogue row, and an engine with
+no such control contributes no key. Three floats spelled out here, in
+Synth.speak_segments, in `_run`'s positional call and in `_vendor_fields` were
+four places to widen for a fourth field -- and `_run` calls this positionally
+on whichever backend it was handed, so two signatures that drift apart are a
+defect nothing catches until a job runs on the lane nobody tested.
 
 Everything after that call stays here on this host and is untouched: the
 encoding, the chunk boundaries, the file write into OUT_DIR named by the local
@@ -62,6 +71,7 @@ CPU would have finished. It says "speak this here instead", not "this failed".
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import http.client
 import json
@@ -70,13 +80,15 @@ import os
 import ssl
 import threading
 import time
-from dataclasses import dataclass, replace
+from contextlib import suppress
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
 import numpy as np
 
 from voice_common.audio import check_rate, splice
+from voice_common.engines import WIRE_CONTROLS
 
 from .synth import SAMPLE_RATE, Spoken
 
@@ -85,6 +97,28 @@ log = logging.getLogger("tts-long.remote")
 
 class RemoteUnavailable(RuntimeError):
     """The runner could not be reached, or refused. Fall back to local CPU."""
+
+
+# EVERY WAY THE MACHINE CAN GO, AS ONE TUPLE, so there is one place to add the
+# next one rather than four `except` clauses to keep in step.
+#
+# http.client.HTTPException IS NOT AN OSError. That is the whole reason this
+# tuple exists: the transport half of the standard library raises from two
+# unrelated hierarchies, and catching only the socket half left IncompleteRead
+# -- a desktop suspending in the middle of resp.read() -- escaping as itself
+# and failing the job instead of the lane. Verified rather than assumed:
+# issubclass(http.client.HTTPException, OSError) is False.
+_GONE = (OSError, http.client.HTTPException)
+
+
+def _named(exc: BaseException) -> str:
+    """An exception as a sentence, with its class when it has nothing else.
+
+    `str(IncompleteRead(...))` is readable; `str()` of several of these is the
+    empty string, and "GET /v1/status: " on a job row tells nobody anything.
+    """
+    text = str(exc).strip()
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
 class RemoteYield(RuntimeError):
@@ -137,10 +171,24 @@ class RunnerConfig:
     # and get exactly the two-backend behaviour that shipped before it existed.
     cpu_service: str = "chatterbox-cpu"
     timeout: float = 30.0
+    # THE OFFER GETS ITS OWN, MUCH SHORTER CLOCK. `timeout` is for a job -- an
+    # upload, a submit, a poll -- and thirty seconds is right for those. Asking
+    # a runner whether it is free is a question that is either answered at once
+    # or not worth waiting for, and the probe thread that asks it decides
+    # whether a lane is open: a thirty second answer is a lane shut for thirty
+    # seconds either way, so the only thing the long timeout buys is a stale
+    # snapshot arriving late.
+    offer_timeout: float = 3.0
     # How long a job may sit queued on the runner while its owner is gaming
-    # before this host gives up and speaks it locally. Longer than one game, and
-    # shorter than an evening.
-    max_wait: float = 900.0
+    # before this host gives up and speaks it locally.
+    #
+    # LOWERED FROM 900 TO 300, and the reason changed under it. Fifteen minutes
+    # was chosen when a yield stopped the WHOLE SERVICE -- one worker, one job,
+    # so giving up meant re-speaking on a CPU with everything else queued
+    # behind it. With lanes a yield costs one lane and the local one carries on,
+    # so the trade is now fifteen minutes of a frozen progress bar against five.
+    # Fifteen reads as a hang followed by an unexplained restart.
+    max_wait: float = 300.0
     # SHORTER FOR THE PROCESSOR RUNG, and the asymmetry is the point. A job
     # waiting on the card falls back to a machine that is roughly as fast
     # (0.230x here against 0.70x there, measured), so waiting out a game is
@@ -163,6 +211,24 @@ class RunnerConfig:
         if not self.cpu_service or self.cpu_service == self.service:
             return None
         return replace(self, service=self.cpu_service, max_wait=self.cpu_max_wait)
+
+    def for_engine(self, service: str) -> "RunnerConfig":
+        """The same machine, its other speech service.
+
+        ONE host, ONE port, ONE pin, ONE key, ONE certificate: a second engine
+        on that desktop differs from the first by a service id and by nothing
+        else. `replace` rather than a second constructor, for exactly the reason
+        `for_cpu` gives -- a second constructor call is a second place to forget
+        the fingerprint, and forgetting the fingerprint is not an error anybody
+        would see.
+
+        NOT A SECOND LANE. The runner starts at most one controller per device
+        group, so believing there are two slots on that card is believing in a
+        concurrency the machine will never give.
+        """
+        if service == self.service:
+            return self
+        return replace(self, service=service)
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "RunnerConfig | None":
@@ -198,7 +264,8 @@ class RunnerConfig:
             cpu_service=(e["TTS_RUNNER_CPU_SERVICE"].strip()
                          if "TTS_RUNNER_CPU_SERVICE" in e else "chatterbox-cpu"),
             timeout=float(e.get("TTS_RUNNER_TIMEOUT") or 30.0),
-            max_wait=float(e.get("TTS_RUNNER_MAX_WAIT") or 900.0),
+            offer_timeout=float(e.get("TTS_RUNNER_OFFER_TIMEOUT") or 3.0),
+            max_wait=float(e.get("TTS_RUNNER_MAX_WAIT") or 300.0),
             cpu_max_wait=float(e.get("TTS_RUNNER_CPU_MAX_WAIT") or 300.0),
             poll=float(e.get("TTS_RUNNER_POLL") or 2.0),
         )
@@ -268,6 +335,25 @@ class RunnerOffer:
     # The named posture in force, for a person reading the panel.
     machine_state: str = ""
     machine_state_reason: str = ""
+    # {service id: (ready, why)} FOR EVERY SERVICE THE RUNNER LISTS, not only
+    # the one this client is pinned to. `ready` and `why` above are unchanged
+    # and still describe `cfg.service`, so every existing caller is untouched;
+    # this is the field a second engine needs, because one machine now carries
+    # two speech services and "is the runner free" has two answers.
+    #
+    # DEFAULTED, NOT REQUIRED. The test suite builds RunnerOffer by hand in
+    # several places and a required field would have made every one of them a
+    # merge conflict for no behaviour.
+    by_service: dict[str, tuple[bool, str]] = field(default_factory=dict)
+
+    def state_for(self, service: str) -> tuple[bool, str]:
+        """What this runner said about ONE service, however old the answer.
+
+        A service the runner did not list at all is `no_such_service`, which is
+        the same sentence `offer()` gives for its own missing service and is
+        the one that will never clear on its own.
+        """
+        return self.by_service.get(service, (False, "no_such_service"))
 
 
 def _project(src: dict, names: dict[str, str]) -> dict:
@@ -297,7 +383,17 @@ def _services_of(status_doc: dict, services_doc: dict) -> list[dict]:
                      "queued": x.get("queued"),
                      "device": r.get("device"),
                      "available": r.get("available"),
-                     "unavailable_reason": r.get("unavailable_reason") or None})
+                     "unavailable_reason": r.get("unavailable_reason") or None,
+                     # WHAT THAT SERVICE WAS INSTALLED WITH, straight off its
+                     # own manifest. These are load-time settings -- a
+                     # quantisation group size, a frame ceiling, a fade length,
+                     # a low-pass cutoff -- which are not caller fields and
+                     # never will be, and which nonetheless decide how the
+                     # audio sounds. There is one other way to read them and it
+                     # is an SSH session that lands in Session 0 and cannot see
+                     # the desktop. Absent on a runner that publishes none, and
+                     # absent is not the same as empty.
+                     "settings": r.get("settings") or None})
     return rows
 
 
@@ -314,9 +410,39 @@ class RunnerClient:
         self._snap: dict | None = None
         self._snap_at = 0.0
 
-    def _connect(self) -> http.client.HTTPSConnection:
+    def for_service(self, service: str) -> "RunnerClient":
+        """This client, pointed at the same machine's other speech service.
+
+        ONE TLS CONTEXT, ONE PIN, ONE KEY. `_pinned_context` is rebuilt by the
+        constructor, and building a second one for the same certificate is both
+        wasted work and a second place for the fingerprint to be got wrong --
+        `for_cpu`'s comment says it and it applies here word for word.
+
+        ITS OWN ASSET SET AND ITS OWN SNAPSHOT, because those are facts about a
+        SERVICE rather than about a machine: the runner caches reference clips
+        per service directory, so "we have already uploaded this" is not
+        transferable, and a snapshot taken about one service would be answered
+        as though it were about the other.
+
+        A copy rather than a constructor call, so a client whose transport has
+        been replaced -- which is how every test in this repository reaches
+        this code without opening a socket -- keeps its transport.
+        """
+        if service == self.cfg.service:
+            return self
+        twin = copy.copy(self)
+        twin.cfg = self.cfg.for_engine(service)
+        twin._lock = threading.Lock()
+        twin._assets = set()
+        twin._snap = None
+        twin._snap_at = 0.0
+        return twin
+
+    def _connect(self, timeout: float | None = None) -> http.client.HTTPSConnection:
         conn = http.client.HTTPSConnection(
-            self.cfg.host, self.cfg.port, timeout=self.cfg.timeout, context=self._ctx)
+            self.cfg.host, self.cfg.port,
+            timeout=self.cfg.timeout if timeout is None else timeout,
+            context=self._ctx)
         conn.connect()
         if self.cfg.fingerprint:
             der = conn.sock.getpeercert(binary_form=True)
@@ -332,7 +458,8 @@ class RunnerClient:
 
     def _request(self, method: str, path: str, body: bytes | None = None,
                  content_type: str = "application/json",
-                 extra: dict[str, str] | None = None) -> tuple[int, dict, bytes]:
+                 extra: dict[str, str] | None = None,
+                 timeout: float | None = None) -> tuple[int, dict, bytes]:
         headers = {"Accept": "application/json", "Connection": "close"}
         if self.cfg.api_key:
             headers["Authorization"] = f"Bearer {self.cfg.api_key}"
@@ -341,14 +468,74 @@ class RunnerClient:
             headers["Content-Length"] = str(len(body))
         if extra:
             headers.update(extra)
-        conn = self._connect()
+        # LOSING THE MACHINE IS ONE CLASS, AND THIS IS WHERE IT BECOMES ONE.
+        # A refused connection is ConnectionRefusedError, an unplugged cable is
+        # OSError 113, a dropped route is socket.timeout and a broken TLS
+        # session is ssl.SSLError -- all of them OSError, none of them
+        # RemoteUnavailable, and every one of them meaning exactly the same
+        # thing: this job cannot run over there. They used to escape as
+        # themselves, so `_run` wrote "[Errno 111] Connection refused" onto the
+        # job as a synthesis failure and the local CPU -- which was going to
+        # speak it perfectly well -- was never asked.
+        #
+        # OSError IS NOT THE WHOLE CLASS AND THIS COMMENT USED TO SAY IT WAS.
+        # "There is only one name to catch now" was false and measured false:
+        # http.client.HTTPException does NOT inherit from OSError, so
+        # IncompleteRead, BadStatusLine and LineTooLong escaped as themselves,
+        # walked past _execute_on_lane's two handlers and landed in the blanket
+        # one that marks a job FAILED -- with the lane never cooled, so the
+        # next job went straight back to the same broken runner and failed too.
+        # IncompleteRead is exactly what a desktop going to sleep DURING
+        # resp.read() produces, which is the commonest way this machine leaves.
+        try:
+            conn = self._connect(timeout)
+        except _GONE as gone:
+            raise RemoteUnavailable(f"{method} {path}: {_named(gone)}") from gone
         try:
             conn.request(method, path, body=body, headers=headers)
             resp = conn.getresponse()
             data = resp.read()
             return resp.status, dict(resp.getheaders()), data
+        except _GONE as gone:
+            raise RemoteUnavailable(f"{method} {path}: {_named(gone)}") from gone
         finally:
-            conn.close()
+            # THE CLOSE ITSELF CAN RAISE, out of a `finally`, which replaces
+            # whatever was being raised with something nobody handles. A socket
+            # whose peer vanished mid-response is the case that produces both.
+            with suppress(*_GONE):
+                conn.close()
+
+    def _document(self, method: str, path: str, data: bytes) -> dict:
+        """A JSON object from a 200 body, or RemoteUnavailable naming the runner.
+
+        THE THIRD WAY A LYING RUNNER USED TO FAIL A JOB INSTEAD OF A LANE. A
+        200 whose body is an HTML error page -- a captive portal, a proxy, a
+        different program on the port -- makes json.loads raise
+        JSONDecodeError, which is a ValueError and is neither of the two
+        exceptions _execute_on_lane knows about. Measured end to end: the job
+        row read `failed`, the error was "Expecting value: line 1 column 1
+        (char 0)", and `cooling` was 0.0 -- THE LANE WAS NEVER COOLED, so the
+        next job was dispatched at the same lying runner and failed the same
+        way.
+
+        The type is checked as well as the parse, because a body that is valid
+        JSON and not an object -- a bare list, which is what the second
+        measured failure returned -- makes `.get` raise AttributeError one line
+        later, in the caller, where it is even further from anything that knows
+        what a lane is.
+        """
+        try:
+            doc = json.loads(data)
+        except ValueError as bad:
+            raise RemoteUnavailable(
+                f"{method} {path}: the runner answered 200 with a body that is "
+                f"not JSON ({bad}); it is not speaking this protocol") from bad
+        if not isinstance(doc, dict):
+            raise RemoteUnavailable(
+                f"{method} {path}: the runner answered 200 with a JSON "
+                f"{type(doc).__name__} where an object was agreed; it is not "
+                f"speaking this protocol")
+        return doc
 
     # -- capability ---------------------------------------------------------
 
@@ -395,10 +582,18 @@ class RunnerClient:
         costs a job the difference between the runner it was promised and the
         runner it got.
         """
-        status, _, data = self._request("GET", "/v1/services")
+        # ON THE OFFER'S OWN CLOCK. A runner that accepts a connection and
+        # then says nothing used to hold this call for the full job timeout --
+        # thirty seconds -- and while this was asked on the worker's thread
+        # that was thirty seconds added to a job that was always going to run
+        # here. It is asked on a probe thread now and it is still not worth
+        # thirty seconds: a late answer about whether a machine was free is not
+        # an answer.
+        status, _, data = self._request("GET", "/v1/services",
+                                        timeout=self.cfg.offer_timeout)
         if status != 200:
             raise RemoteUnavailable(f"GET /v1/services returned {status}")
-        doc = json.loads(data)
+        doc = self._document("GET", "/v1/services", data)
         limits = doc.get("limits") or {}
         pct = limits.get("cpu_pct")
         common = {
@@ -406,29 +601,81 @@ class RunnerClient:
             "machine_state": doc.get("machine_state") or "",
             "machine_state_reason": doc.get("machine_state_reason") or "",
         }
+        # EVERY SERVICE, NOT ONLY OURS, AND IT IS THE SAME REQUEST. There are
+        # two engines on this wire now and one machine carries both, so "is the
+        # runner free" is no longer a question with one answer. Reading only
+        # `cfg.service` and `continue`-ing past the rest is how `chatterbox-cpu`
+        # died: it was configured server-side, never registered on the runner,
+        # and because nothing ever asked about it `no_such_service` never fired.
+        # THE DETECTOR EXISTED. NOTHING RAN IT.
+        #
+        # GET /v1/services already lists every KNOWN service rather than every
+        # registered one, precisely so "no speech service" and "speech service
+        # not installed" stay distinguishable, so this costs no extra round
+        # trip, no extra thread and no extra second on the probe's clock.
+        by_service: dict[str, tuple[bool, str]] = {}
+        mine = (False, "no_such_service")
+        device = ""
         for svc in doc.get("services", []):
-            if svc.get("id") != self.cfg.service:
+            svc_id = svc.get("id")
+            if not isinstance(svc_id, str):
                 continue
-            device = svc.get("device") or ""
-            if not svc.get("installed"):
-                return RunnerOffer(False, "not_installed", device, **common)
-            if not svc.get("enabled"):
-                return RunnerOffer(False, "not_enabled", device, **common)
-            available = svc.get("available")
-            if available is None:
-                # An older runner, or one answering without an agent behind it.
-                if not doc.get("gpu_available"):
-                    return RunnerOffer(False, "gpu_busy", device, **common)
-                return RunnerOffer(True, "", device, **common)
-            if not available:
-                # The runner's own words when it has them. "somebody is gaming"
-                # and "there is not enough memory free to start a 6.5 GiB model"
-                # are both temporary and both worth telling a person apart.
-                why = svc.get("unavailable_reason") or doc.get("machine_state_reason")
-                return RunnerOffer(False, f"machine_busy: {why}" if why else "machine_busy",
-                                   device, **common)
-            return RunnerOffer(True, "", device, **common)
-        return RunnerOffer(False, "no_such_service", "", **common)
+            state = self._service_state(svc, doc)
+            by_service[svc_id] = state
+            if svc_id == self.cfg.service:
+                mine = state
+                device = svc.get("device") or ""
+        return RunnerOffer(mine[0], mine[1], device, by_service=by_service,
+                           **common)
+
+    def _service_state(self, svc: dict, doc: dict) -> tuple[bool, str]:
+        """(will it run this service, why not) -- one service, in its own words.
+
+        THE THREE STATES, KEPT APART, and the order is the answer. A service
+        that is not installed is the owner's to fix and will not change on its
+        own; a machine that is busy clears in a minute and is nobody's problem.
+        Reporting the first as the second has somebody waiting for a state that
+        never arrives.
+
+        THE MANIFEST ASSERTION IS HERE because this is the only place that sees
+        both ids. `Install.Json` writes the outer `id` from the INI section and
+        splices the controller's own manifest underneath it verbatim, and
+        nothing reconciles the two -- so a turbo controller copied from the
+        baseline one with `"id": "chatterbox"` left in publishes
+        `{"id": "chatterbox-turbo", "manifest": {"id": "chatterbox"}}` and
+        produces BASELINE AUDIO FROM A TURBO REQUEST, silently. It is the single
+        most likely copy-paste in the whole exercise and the only one whose
+        output is wrong rather than absent.
+        """
+        manifest = svc.get("manifest")
+        if isinstance(manifest, dict) and manifest.get("id"):
+            # ABSENT IS SKIPPED, NEVER FAILED. An older agent publishes no
+            # manifest here at all, and refusing a runner for not carrying a
+            # field it predates would be this side inventing an outage.
+            if manifest["id"] != svc.get("id"):
+                return False, "manifest_mismatch"
+        if not svc.get("installed"):
+            return False, "not_installed"
+        if not svc.get("enabled"):
+            return False, "not_enabled"
+        available = svc.get("available")
+        if available is None:
+            # An older runner, or one answering without an agent behind it.
+            if not doc.get("gpu_available"):
+                return False, "gpu_busy"
+            return True, ""
+        if not available:
+            # The runner's own words when it has them. "somebody is gaming"
+            # and "there is not enough memory free to start a 6.5 GiB model"
+            # are both temporary and both worth telling a person apart.
+            #
+            # NEVER FLATTENED. "another service holds the card" and "somebody
+            # is at the keyboard" must reach a job row as different sentences,
+            # or turbo starving baseline off the card is indistinguishable from
+            # a week of gaming.
+            why = svc.get("unavailable_reason") or doc.get("machine_state_reason")
+            return False, f"machine_busy: {why}" if why else "machine_busy"
+        return True, ""
 
     def snapshot(self, max_age: float = 5.0) -> dict:
         """What the runner is doing, for a person to look at.
@@ -443,25 +690,37 @@ class RunnerClient:
         NEVER RAISES. This feeds a status panel, and a runner that is switched
         off, asleep or being rebooted is the normal case rather than an error.
         The unreachable answer is itself the status.
+
+        ON THE OFFER'S THREE-SECOND CLOCK, NOT THE JOB'S THIRTY. `timeout` is
+        for uploading a reference clip and collecting audio; asking a desktop
+        how it is doing is a question that is either answered at once or not
+        worth waiting for. With the job clock, a machine that DROPS packets
+        rather than refusing them -- which is what a sleeping desktop does --
+        cost two thirty-second requests per cache miss, and the cache is five
+        seconds against a healthcheck interval of sixty, so every single
+        healthcheck was a miss: the container was declared unhealthy, and
+        restarted, while it was speaking perfectly well on this host.
         """
         now = time.monotonic()
         if self._snap is not None and (now - self._snap_at) < max_age:
             return self._snap
         try:
-            status, _, data = self._request("GET", "/v1/status")
+            status, _, data = self._request("GET", "/v1/status",
+                                            timeout=self.cfg.offer_timeout)
             if status != 200:
                 snap = {"reachable": False, "error": f"HTTP {status}"}
             else:
-                doc = json.loads(data)
+                doc = self._document("GET", "/v1/status", data)
                 # BEST EFFORT, AND ON ITS OWN. A runner that answers /v1/status
                 # and not /v1/services is still a reachable runner with a live
                 # load figure worth drawing, so a failure here loses the
                 # per-service half of the panel rather than the whole card.
                 offered: dict = {}
                 try:
-                    st2, _, d2 = self._request("GET", "/v1/services")
+                    st2, _, d2 = self._request("GET", "/v1/services",
+                                               timeout=self.cfg.offer_timeout)
                     if st2 == 200:
-                        offered = json.loads(d2)
+                        offered = self._document("GET", "/v1/services", d2)
                 except Exception as exc:  # noqa: BLE001 - see above
                     log.debug("runner /v1/services did not answer: %s", exc)
                 gpu = doc.get("gpu") or {}
@@ -579,7 +838,8 @@ class RunnerClient:
             extra={"Idempotency-Key": idempotency_key})
         if status not in (200, 202):
             raise RemoteUnavailable(f"submit returned {status}: {data[:200]!r}")
-        job_id = json.loads(data).get("job_id")
+        job_id = self._document(
+            "POST", f"/v1/services/{self.cfg.service}/jobs", data).get("job_id")
         if not job_id:
             raise RemoteUnavailable("the runner accepted the job without returning an id")
         return job_id
@@ -589,7 +849,8 @@ class RunnerClient:
             "GET", f"/v1/services/{self.cfg.service}/jobs/{job_id}")
         if status != 200:
             raise RemoteUnavailable(f"job status returned {status}")
-        return json.loads(data)
+        return self._document(
+            "GET", f"/v1/services/{self.cfg.service}/jobs/{job_id}", data)
 
     def artefact(self, job_id: str, name: str) -> bytes:
         status, _, data = self._request(
@@ -601,9 +862,15 @@ class RunnerClient:
     def cancel(self, job_id: str) -> None:
         try:
             self._request("DELETE", f"/v1/services/{self.cfg.service}/jobs/{job_id}")
-        except OSError as exc:
+        except (*_GONE, RemoteUnavailable) as exc:
             # Best effort. A cancel that does not arrive costs one wasted job on
             # somebody's idle GPU, which is what the GPU was idle for.
+            #
+            # RemoteUnavailable AS WELL, because the commonest reason to
+            # withdraw a lease is that the machine holding it has gone: every
+            # transport failure is that class now, and letting it out of here
+            # would turn giving up on a runner into a second exception thrown
+            # from the handler that was giving up.
             log.debug("cancel of %s did not arrive: %s", job_id, exc)
 
 
@@ -618,7 +885,8 @@ class RemoteSynth:
     """
 
     def __init__(self, client: RunnerClient, job_id: str,
-                 on_wait: Callable[[bool], None] | None = None) -> None:
+                 on_wait: Callable[[bool], None] | None = None,
+                 spec=None) -> None:
         """The job id is bound HERE, not passed to speak_segments.
 
         THE DEFECT THIS PREVENTS, and it is the one that silently disarms the
@@ -636,6 +904,41 @@ class RemoteSynth:
         """
         self._client = client
         self._job_id = job_id
+        # WHICH ENGINE THIS IS, so the job body carries the fields that engine
+        # reads and NOT the ones it would accept and throw away. None means the
+        # engine before there were two, which is the multilingual model with
+        # every field -- the shape this wire has always had.
+        self._spec = spec
+        # WHAT RATE THIS ENGINE'S CODEC PRODUCES, told to the runner in the job
+        # body and asserted against every segment that comes back. Off the
+        # catalogue, so it is a fact about the checkpoint rather than this
+        # module's constant compared with itself. None spec means the engine
+        # before there were two, whose rate is that constant.
+        self._rate = (spec.facts.native_sample_rate if spec is not None
+                      else SAMPLE_RATE)
+        # HOW LONG THE RUNNER SPENT NOT WORKING ON THIS JOB. It was accumulated
+        # in speak_segments and thrown away at the end, so `compute_seconds`
+        # charged the rate average for every second the runner spent handing
+        # its GPU back to its owner -- and a machine that yields twice reads as
+        # a machine that is permanently slow, in the number that decides
+        # whether the next request can be answered synchronously.
+        self.waited = 0.0
+        # HOW MANY SEGMENTS HAVE ALREADY LEFT THIS OBJECT, published as they
+        # go. RemoteYield carries the same count because it decides whether
+        # speaking the job again is safe -- but losing the machine raises
+        # RemoteUnavailable from wherever the socket died, and an exception
+        # raised in six places cannot carry a count that only the poll loop
+        # knows. The caller reads it off the synth instead, which is true
+        # whichever of the two ways this job ended.
+        self.delivered = 0
+        # WHAT THE RUNNER REPORTED ABOUT THE GENERATION ITSELF, filled in when
+        # the job finishes and None until then. None means "this lane did not
+        # say", which every runner built before these keys existed will
+        # continue to mean -- so the columns are absent from those rows rather
+        # than wrong on them.
+        self.frames = None
+        self.frame_rate = None
+        self.runner_settings = None
         # Called with True when the runner hands the GPU back and this client
         # starts waiting, and False when it resumes. It is how a local job can
         # read `queued` again while somebody plays a game, rather than sitting
@@ -652,8 +955,7 @@ class RemoteSynth:
         pass
 
     def speak_segments(self, segments: list[tuple[str, float]], language: str,
-                       exaggeration: float, cfg_weight: float,
-                       temperature: float,
+                       controls: dict,
                        reference: str | None = None,
                        on_chunk: Callable[[np.ndarray], None] | None = None,
                        cancelled: Callable[[], bool] | None = None) -> Spoken:
@@ -679,12 +981,23 @@ class RemoteSynth:
             # also means the runner's job body is the same shape whatever this
             # client's chunking policy happens to be.
             "segments": [text for text, _pause in segments],
-            "language": language,
-            "exaggeration": exaggeration,
-            "cfg_weight": cfg_weight,
-            "temperature": temperature,
-            "sample_rate": SAMPLE_RATE,
+            # THE RATE THIS ENGINE'S CODEC ACTUALLY PRODUCES, off the
+            # catalogue, rather than this module's constant. They are the same
+            # 24000 for everything shipped, and the difference is what makes
+            # the controller's own comparison mean something: the runner is
+            # TOLD the rate, so if it ever answers at another one the contract
+            # was broken on its side and `_decode` is the only thing that would
+            # catch it. Raw PCM carries no header to read it back from.
+            "sample_rate": self._rate,
         }
+        # ABSENT, NEVER NULL, and this is the wire half of the house rule.
+        # `{"exaggeration": null}` is not "I said nothing about expression" to
+        # a controller that reads the key and passes it on -- it is a value,
+        # and turbo's generate() would accept it, log a warning nobody sees and
+        # discard it. The only way not to send a field is not to build the key,
+        # and which keys exist is read off the engine rather than branched on
+        # its name.
+        params.update(self._vendor_fields(language, controls))
         if reference:
             # BYTES BY DIGEST, never the path. `reference` is an absolute path
             # inside a volume on this host; the runner has no such directory. It
@@ -715,7 +1028,20 @@ class RemoteSynth:
         # six-second yield is right; waiting out an evening of gaming is not,
         # and this is the difference between those two.
         waited = 0.0
+        self.waited = 0.0
         ticked = time.monotonic()
+        # WHEN THIS JOB LAST MOVED, and it is a SEPARATE clock from `waited`
+        # because it answers a different question. `waited` asks whether the
+        # owner has the machine; this asks whether the machine is doing
+        # anything at all. A runner that answers {"status": "running"} for ever
+        # and never produces an artefact charges `waited` exactly nothing, so
+        # before this line NO BOUND APPLIED to it: the poll loop ran until the
+        # process died, with the row stuck at "running", a progress bar that
+        # never moved, and a lane and a queue slot held for as long as it took
+        # somebody to notice. A dead worker thread, a wedged model load and a
+        # controller answering out of a stale document all look exactly like
+        # that from here, and nobody administers a gaming PC mid-game.
+        progressed = time.monotonic()
 
         while True:
             if cancelled is not None and cancelled():
@@ -741,14 +1067,42 @@ class RemoteSynth:
                 audio = self._decode(self._client.artefact(remote_id, name))
                 pause = pauses[index] if index < len(pauses) else 0.0
                 piece = splice([(audio, pause)])
+                # SOMETHING ARRIVED, so the runner is working whatever its
+                # status field says. See the no-progress bound below: this is
+                # the only evidence of progress there is, and it is evidence
+                # even when the piece is empty, because an artefact was still
+                # produced, named and collected.
+                progressed = time.monotonic()
                 if piece.size:
                     parts.append(piece)
+                    self.delivered = len(parts)
                     if on_chunk is not None:
                         on_chunk(piece)
 
             if status == "done":
                 record = doc.get("record") or {}
                 total_tokens = int(record.get("input_tokens") or 0)
+                # WHAT THE MACHINE ON THE OTHER END SAYS IT ACTUALLY DID, read
+                # off the same record the token count comes from and published
+                # on this object rather than returned. `speak_segments` must
+                # keep byte for byte the signature the local Synth has -- `_run`
+                # calls it positionally on whichever backend it was handed --
+                # so anything a remote lane knows and a local one does not is
+                # read off the synth afterwards, exactly as `waited` and
+                # `delivered` already are.
+                #
+                # `frames` AND `frame_rate` ARE EVIDENCE, NOT DECORATION. The
+                # frame grid is a property of the checkpoint, so
+                # frames / frame_rate against the audio's real length is the
+                # cheapest assertion this service has that the audio it just
+                # collected is the audio the generator thinks it made.
+                self.frames = record.get("frames")
+                self.frame_rate = record.get("frame_rate")
+                # AND WHAT IT WAS CONFIGURED WITH. The load-time settings are
+                # not caller fields and never will be, but "what produced this
+                # audio" cannot be answered without them, and answering it over
+                # SSH lands in Session 0 and cannot see the desktop.
+                self.runner_settings = record.get("settings")
                 break
             if status == "failed":
                 record = doc.get("record") or {}
@@ -804,6 +1158,11 @@ class RemoteSynth:
             now = time.monotonic()
             if status != "running":
                 waited += now - ticked
+                # PUBLISHED AS IT ACCUMULATES, not at the end: a job that ends
+                # in a yield never reaches the end, and the caller still needs
+                # to know how much of the elapsed time was somebody else's
+                # machine being busy.
+                self.waited = waited
             ticked = now
 
             if waited > cfg.max_wait:
@@ -818,10 +1177,70 @@ class RemoteSynth:
                     f"segments on {cfg.service} and then had the machine taken "
                     f"back for {waited:.0f}s of the {cfg.max_wait:.0f}s "
                     "allowed; its owner is using it", delivered=len(parts))
+
+            if not fresh and now - progressed > cfg.max_wait:
+                # THE OTHER BOUND: reachable, answering, and producing nothing.
+                # `not fresh` IS PART OF THE CONDITION, not a tidy-up. Without
+                # it a runner delivering a segment every round is still judged
+                # on the microseconds since the last one landed, which at
+                # max_wait=0 -- the setting the tests for the yield bound use
+                # to mean "no patience at all" -- abandons a runner that is
+                # working perfectly. Nothing arrived this round is the
+                # question; how long ago the last thing arrived is the clock.
+                # UNAVAILABLE RATHER THAN A YIELD, and the difference is what
+                # is true rather than what happens next. A yield says a person
+                # is at that keyboard and the lease is still good; this says
+                # the runner is not going to finish this job -- so the lease
+                # goes with it, and the lane is retired rather than merely
+                # cooled for a minute.
+                #
+                # The same `max_wait`, because it is the same trade measured
+                # from the other side: five minutes of a frozen progress bar
+                # against the local CPU, which is slow and is always there.
+                self._client.cancel(remote_id)
+                raise RemoteUnavailable(
+                    f"the runner said it was working on {cfg.service} for "
+                    f"{now - progressed:.0f}s without producing a segment "
+                    f"({len(parts)} of {len(segments)} done); it is reachable "
+                    "and it is not doing this job")
             time.sleep(cfg.poll)
 
         audio = splice([(p, 0.0) for p in parts]) if parts else np.zeros(0, dtype=np.float32)
         return Spoken(audio=audio, input_tokens=total_tokens)
+
+    def _vendor_fields(self, language, controls: dict) -> dict:
+        """The generation fields THIS engine reads, and no others.
+
+        With no spec this is Chatterbox's three, always present, which is what
+        the one engine that existed before turbo has always been sent -- so an
+        older caller, an older test and the deployed baseline path are byte for
+        byte unchanged, nulls included.
+
+        `language` is filtered on `language_from_voice` rather than on the
+        engine's language COUNT, because conditioning on a language is not a
+        dial and a nine-language checkpoint need not take a parameter for it.
+        Voxtral's language is the voice embedding; sending `language` to its
+        controller would be a field it must refuse by name, for a value that
+        could only agree with the voice or contradict it. Turbo is the other
+        end of the same rule: its generate() has no language_id at all and
+        raises TypeError if given one, so sending it fails the job on the
+        runner rather than changing the audio.
+        """
+        spec = self._spec
+        if spec is None:
+            return {"language": language,
+                    "exaggeration": controls.get("exaggeration"),
+                    "cfg_weight": controls.get("cfg_weight"),
+                    "temperature": controls.get("temperature")}
+        out: dict = {}
+        if (not spec.facts.language_from_voice and len(spec.languages) > 1
+                and language is not None):
+            out["language"] = language
+        for name in WIRE_CONTROLS:
+            value = controls.get(name)
+            if name in spec.controls and value is not None:
+                out[name] = value
+        return out
 
     @staticmethod
     def _segment_index(name: str, fallback: int) -> int:
@@ -840,8 +1259,7 @@ class RemoteSynth:
         except ValueError:
             return fallback
 
-    @staticmethod
-    def _decode(raw: bytes) -> np.ndarray:
+    def _decode(self, raw: bytes) -> np.ndarray:
         """Raw float32 at 24 kHz, and it is checked rather than trusted.
 
         THE DEFECT THIS PREVENTS is silent and expensive. Samples arriving at
@@ -858,7 +1276,13 @@ class RemoteSynth:
         different one, the contract was broken on its side and this assertion is
         the only thing that would catch it.
         """
-        check_rate(SAMPLE_RATE)
+        # THE ENGINE'S NATIVE RATE AGAINST THE ONE THIS PIPELINE SPLICES AT,
+        # which is fixed estate-wide by voice_common.audio. It was
+        # check_rate(SAMPLE_RATE) -- a constant compared with itself, which can
+        # only ever pass. An engine whose codec is not 24 kHz cannot cross this
+        # wire without a resample, and the failure if one ever did would be
+        # every file at the wrong pitch with nothing reporting an error.
+        check_rate(self._rate)
         if len(raw) % 4:
             raise RemoteUnavailable(
                 f"a segment was {len(raw)} bytes, which is not a whole number of "

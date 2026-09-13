@@ -7,11 +7,13 @@
     POST /speak                    ──────────────────────►  tts-stack:8001
     GET  /voices                   ──────────────────────►  tts-stack:8001
 
-    POST /v1/audio/speech   model=chatterbox|tts-long    ►  tts-long:8002
+    POST /v1/audio/speech   model in GATEWAY_LONG_MODELS ►  tts-long:8002
     POST /jobs  GET /jobs  GET /jobs/{id}[/audio]        ►  tts-long:8002
-    DELETE /jobs/{id}                                    ►  tts-long:8002
+    DELETE /jobs/{id}  DELETE /jobs/{id}/audio           ►  tts-long:8002
 
-    GET  /v1/models    answered here, from a static table, with no backend call
+    POST /v1/audio/speech   a long-form name not enabled ►  404 model_not_found
+
+    GET  /v1/models    answered here, from its own table, with no backend call
     GET  /health       all three, fanned out, unauthenticated
     everything else    404 in the OpenAI envelope
 
@@ -40,10 +42,25 @@ either: Open WebUI and every other OpenAI-shaped client has a `model` field in
 its settings and no custom-header field, and a routing key nobody can set is
 not a routing key.
 
-AN UNKNOWN MODEL GOES FAST. The two wrong answers are asymmetric — sending a
-long-form request to Kokoro costs some quality, sending an ordinary one to
-Chatterbox turns 17 seconds into a job the caller did not ask for. Default to
-the recoverable mistake.
+AN UNKNOWN MODEL GOES FAST, A KNOWN-BUT-DISABLED ONE DOES NOT. The two wrong
+answers used to be asymmetric in one direction only — sending a long-form
+request to Kokoro costs some quality, sending an ordinary one to Chatterbox
+turns 17 seconds into a job the caller did not ask for — so an unrecognised
+name defaulted to the recoverable mistake, and still does.
+
+That rule breaks the moment there is more than one long-form engine. A caller
+who types a name this gateway KNOWS is a tts-long engine has said which engine
+they want; if this deployment has not enabled it, falling through hands them
+Kokoro — a different engine, a different voice, no error anywhere. "Some
+quality" was an honest description when the fallback was one long-form model
+being downgraded to the fast one. It is not a description of getting audio from
+a model you named against and cannot hear the difference from until you listen.
+So: enabled here goes long, an unrecognised string goes fast, and a name the
+shared catalogue says TTS-LONG OWNS that this deployment has not enabled is a
+404 that says which variable enables it. The owner is read off the catalogue
+row rather than assumed, so a row for a checkpoint the FAST backend owns keeps
+going fast instead of being refused by a service that never held it. See
+LONG_MODELS and LONG_KNOWN below.
 
 NATIVE ROUTES MOUNT FLAT AND NOTHING IS REWRITTEN. The proxy below forwards
 `request.url.path` verbatim, which is why /jobs works: tts-long's own 202
@@ -79,11 +96,12 @@ from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import ClientDisconnect
 
+from voice_common.engines import CATALOGUE
 from voice_common.errors import (error_response, http_error_response,
                                  install_errors, v1_path)
 
 from . import auth
-from .openai_api import MODEL_LIST
+from .openai_api import model_list
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("voice-gateway")
@@ -112,6 +130,29 @@ class Backend(NamedTuple):
 CONNECT_TIMEOUT = float(os.getenv("GATEWAY_CONNECT_TIMEOUT", "2"))
 HEALTH_TIMEOUT = float(os.getenv("GATEWAY_HEALTH_TIMEOUT", "5"))
 
+# The whole routing criterion. An unrecognised name — and no `model` field at
+# all — goes fast. Compared lowercased and stripped: a client that sends
+# "Chatterbox" means chatterbox, and the alternative is a nine-minute
+# difference decided by a capital letter.
+#
+# CONFIGURED RATHER THAN LITERAL, because the engine is now the model string.
+# Which long-form names exist is a property of the deployment: a box that has
+# not installed a second engine must not advertise it, and a box that has must
+# not need a code change to say so. The default is the two names this service
+# has always routed, so an unset variable is today's behaviour byte for byte.
+LONG_MODELS = frozenset(
+    m.strip().lower()
+    for m in os.getenv("GATEWAY_LONG_MODELS", "chatterbox,tts-long").split(",")
+    if m.strip())
+
+# The way out quoted in the fast backend's 504, built rather than written. An
+# empty GATEWAY_LONG_MODELS is a legal deployment — a box with no card and no
+# local engine — and on that box "send one of ()" is worse than saying nothing,
+# so the clause is dropped instead of rendered blank.
+_LONG_WAY_OUT = (
+    " Or send one of the long-form models (" + ", ".join(sorted(LONG_MODELS))
+    + ") and collect the audio from /jobs/{id}/audio." if LONG_MODELS else "")
+
 STT = Backend(
     name="stt-stack",
     url=os.getenv("GATEWAY_STT_URL", "http://stt-stack:8000").rstrip("/"),
@@ -131,10 +172,13 @@ TTS = Backend(
     # fast path stays on the fast path and is bounded by this timeout rather
     # than by an invented length cap the backend does not have.
     read_timeout=float(os.getenv("GATEWAY_TTS_TIMEOUT", "300")),
+    # The way out names LONG_MODELS rather than the string "chatterbox". There
+    # is more than one long-form name now and a deployment chooses which of
+    # them exist, so a hard-coded one is advice that can be wrong on the box
+    # reading it — pointing a caller at a model that 404s here.
     timeout_help="It runs at 1.2-1.5x realtime on this host, so ~900 words is "
                  "the practical ceiling for a synchronous request. Split the "
-                 "input, or send model=\"chatterbox\" and collect the audio "
-                 "from /jobs/{id}/audio.",
+                 "input." + _LONG_WAY_OUT,
 )
 LONG = Backend(
     name="tts-long",
@@ -150,11 +194,47 @@ LONG = Backend(
                  "accept is still queued: see GET /jobs.",
 )
 
-# The whole routing criterion. Everything else — including an unrecognised
-# name, and including no `model` field at all — goes fast. Compared lowercased
-# and stripped: a client that sends "Chatterbox" means chatterbox, and the
-# alternative is a nine-minute difference decided by a capital letter.
-LONG_MODELS = frozenset({"chatterbox", "tts-long"})
+# EVERY NAME tts-long COULD OWN, enabled here or not. LONG_MODELS' documented
+# rule — "everything else goes fast, including an unrecognised name" — is right
+# today and becomes a trap the day a second engine ships: someone types
+# chatterbox-turbo at a deployment that has not enabled it, falls through, and
+# gets KOKORO. A different engine, a different voice, no error.
+#
+# The catalogue is the fact table, not this deployment's choices, which is
+# exactly what makes it the right source: knowing the name exists is what lets
+# this service tell "you meant an engine I have not been given" apart from "you
+# sent a string nobody has ever heard of". `tts-long` is added because it is
+# the service alias rather than a checkpoint, so it is not in the catalogue and
+# never will be.
+#
+# READ OFF `owned_by` AND NOT OFF THE WHOLE CATALOGUE, BECAUSE THE OTHER
+# SPELLING SCHEDULES AN OUTAGE ON THE STACK'S DEFAULT VOICE. `CATALOGUE_IDS |
+# {"tts-long"}` says "every checkpoint anybody ever writes a row for is a
+# tts-long engine". That is true of every row written so far and false of the
+# next one: the fast path's own `kokoro` is a catalogue row waiting to be
+# written, and on the day it lands this branch refuses `model="kokoro"` — the
+# one string an unconfigured OpenAI client sends — with a 404 telling the
+# caller to add Kokoro to GATEWAY_LONG_MODELS, which would then route it to a
+# backend that has never held it. EngineFacts.owned_by is documented in the
+# catalogue as "the gateway's routing key: which service in this stack owns the
+# name", so reading it is not a new convention, it is using the one already
+# there. A row this gateway's LONG backend does not own falls through to the
+# fast path, which is where it belongs and where it was going before anybody
+# wrote it a row.
+#
+# This is why it sits BELOW `LONG` rather than beside LONG_MODELS: the owner is
+# compared against the backend's own name, so there is no second literal
+# "tts-long" to keep in step with the first. The alias below is a literal
+# because it is a MODEL STRING that means "whatever this deployment defaults
+# to", not a backend name that happens to match.
+LONG_KNOWN = frozenset(
+    engine for engine, facts in CATALOGUE.items()
+    if facts.owned_by == LONG.name) | {"tts-long"}
+
+# `GET /v1/models`, built once from the set that actually routes rather than
+# written out beside it. One read of GATEWAY_LONG_MODELS feeds both the branch
+# in `speech` and the advertised list, which is what stops the two drifting.
+MODEL_LIST = model_list(LONG_MODELS)
 
 # Hop-by-hop headers, per RFC 9110 §7.6.1. They describe a single connection
 # and must not be copied onto the next one; forwarding `transfer-encoding`
@@ -538,7 +618,29 @@ async def speech(request: Request) -> Response:
     # the backend's own validation says something more useful than this could.
     model = body.get("model") if isinstance(body, dict) else None
     key = model.strip().lower() if isinstance(model, str) else ""
-    backend = LONG if key in LONG_MODELS else TTS
+
+    if key in LONG_MODELS:
+        backend = LONG
+    elif key in LONG_KNOWN:
+        # A LONG-FORM NAME THIS DEPLOYMENT HAS NOT ENABLED IS A 404, NEVER
+        # KOKORO. Falling through here would answer 200 with audio from the
+        # fast backend: a different engine, a different voice, in whatever
+        # language Kokoro guessed, and nothing in the response saying so. The
+        # caller typed an engine name — the one thing they cannot have meant is
+        # "surprise me". This is the only place the gateway rejects a model
+        # string, and it rejects only names it can prove are ours.
+        _log(request=request, backend="-", model=model, status="404-model",
+             started=started)
+        return error_response(
+            404,
+            f"model '{model}' is a long-form model this gateway knows but "
+            f"this deployment has not enabled. Add it to GATEWAY_LONG_MODELS "
+            f"(and to TTS_ENGINES on tts-long). Enabled: "
+            f"{', '.join(sorted(LONG_MODELS))}.",
+            code="model_not_found", param="model")
+    else:
+        backend = TTS
+
     return await _proxy(request, backend, content=raw,
                         model=model if isinstance(model, str) else None)
 
@@ -739,6 +841,25 @@ async def cancel_job(request: Request, job_id: str) -> Response:
 
 @app.get("/jobs/{job_id}/audio")
 async def get_job_audio(request: Request, job_id: str) -> Response:
+    return await _proxy(request, LONG, content=None)
+
+
+@app.delete("/jobs/{job_id}/audio")
+async def delete_job_audio(request: Request, job_id: str) -> Response:
+    """Throw away the audio and keep the record of the job that made it.
+
+    THE DEFECT ABOVE, REPEATED ONE METHOD LATER. tts-long has answered
+    `DELETE /jobs/{job_id}/audio` all along and neither route table carried it,
+    so the Jobs tab's "delete the audio" button met Starlette's 405 and
+    `method_not_supported` -- reproduced against the deployed stack. The GET on
+    the line above is what makes it easy to miss: the path is plainly here, and
+    the allowlist is matched on the PAIR.
+
+    NOT THE SAME BUTTON AS DELETE /jobs/{id}. That one discards the whole job.
+    This one is the only way to reclaim the disk a finished clone is holding
+    while keeping the row that says it ran, which is the entire reason a
+    record outlives its audio.
+    """
     return await _proxy(request, LONG, content=None)
 
 

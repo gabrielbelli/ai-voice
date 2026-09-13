@@ -7,14 +7,26 @@ exists to prevent a specific failure, the failure is in the docstring.
 
 from __future__ import annotations
 
+import ast
 import json
+import re
+from pathlib import Path
 
 import httpx
 import pytest
 from conftest import MockBackend, Slow, Unreachable, gateway, reload_gateway
 from voice_common.conformance import assert_four_field_envelope
+from voice_common.engines import CATALOGUE
 
 SPEECH = "/v1/audio/speech"
+
+# The catalogue rows this backend owns, read at collection time so a new engine
+# becomes a NAMED case in the pytest report rather than another iteration of a
+# loop that already said `1 passed`. Filtered on `owned_by` for the same reason
+# main.py filters LONG_KNOWN on it: the catalogue is the estate's fact table
+# and not this backend's inventory, so a row for a checkpoint the fast path
+# owns must not be dragged into a test about long-form routing.
+OURS = tuple(sorted(e for e, f in CATALOGUE.items() if f.owned_by == "tts-long"))
 
 
 def body(**kwargs) -> bytes:
@@ -159,18 +171,30 @@ async def test_a_json_glossary_body_keeps_its_content_type(monkeypatch, backends
     assert stt.seen[-1]["headers"]["content-type"] == "application/json"
 
 
-async def test_advertised_models_route_where_the_list_says_they_do(monkeypatch, backends):
+@pytest.mark.parametrize("long_models",
+                         [None, "chatterbox,tts-long,chatterbox-turbo",
+                          "chatterbox,tts-long,chatterbox-turbo,voxtral"])
+async def test_advertised_models_route_where_the_list_says_they_do(
+        monkeypatch, backends, long_models):
     """GET /v1/models is the routing table, so it must not drift from it.
 
     The list names an `owned_by` per model. This sends every advertised TTS
     name through the router and checks it lands on the backend the list
     claims — the one failure that would make the discoverable contract a lie.
+
+    Read off the RELOADED module rather than imported from app.openai_api,
+    because the long-form rows are no longer a literal there: they are
+    generated from the same frozenset the router branches on, under this
+    deployment's GATEWAY_LONG_MODELS. Importing the static table would have
+    tested a table nothing routes. Both shapes are run — the default set, and a
+    set with a second engine in it — so enabling one cannot make the advertised
+    list and the router disagree.
     """
     stt, tts, long = backends
-    from app.openai_api import MODELS
 
-    async with gateway(monkeypatch, stt=stt, tts=tts, long=long) as (client, _):
-        for entry in MODELS:
+    async with gateway(monkeypatch, stt=stt, tts=tts, long=long,
+                       long_models=long_models) as (client, main):
+        for entry in main.MODEL_LIST["data"]:
             if entry["owned_by"] == "stt-stack":
                 continue  # no decision to make: one STT backend
             await client.post(SPEECH, content=body(model=entry["id"]))
@@ -190,6 +214,262 @@ async def test_models_is_answered_without_touching_a_backend(monkeypatch, backen
     ids = [m["id"] for m in response.json()["data"]]
     assert {"kokoro", "chatterbox", "whisper-1"} <= set(ids)
     assert not stt.seen and not tts.seen and not long.seen
+
+
+# ------------------------------------------------- a second long-form engine --
+#
+# The engine is the model string. That makes GATEWAY_LONG_MODELS a routing
+# table with a second entry in it, and it opens one failure the single-engine
+# design could not have: a caller names an engine this gateway RECOGNISES,
+# this deployment has not enabled it, and the old "everything else goes fast"
+# rule hands back Kokoro. 200, audio, wrong engine, no error.
+
+
+async def test_a_second_engine_reaches_the_long_backend_when_enabled(
+        monkeypatch, backends):
+    """The whole point of the package: a named engine is reachable over the API.
+
+    It is still a job — this route may answer 202 with a job id and that is
+    tts-long's call, not this service's. All the gateway owes is that the name
+    lands on tts-long and nothing about it is rewritten on the way.
+    """
+    stt, tts, long = backends
+    async with gateway(monkeypatch, stt=stt, tts=tts, long=long,
+                       long_models="chatterbox,tts-long,chatterbox-turbo",
+                       ) as (client, _):
+        response = await client.post(SPEECH, content=body(model="chatterbox-turbo"))
+
+    assert response.status_code == 200
+    assert len(long.seen) == 1 and not tts.seen
+    assert json.loads(long.seen[0]["body"])["model"] == "chatterbox-turbo"
+
+
+@pytest.mark.parametrize("model", ["chatterbox-turbo", "Chatterbox-Turbo",
+                                   " chatterbox-turbo "])
+async def test_a_known_but_disabled_long_model_is_404_not_kokoro(
+        monkeypatch, backends, model):
+    """THE DEFECT THIS PREVENTS: a typo, or a client configured against another
+    box, names an engine this deployment has not enabled — and gets audio.
+
+    Under the rule this service shipped with, an unrecognised name goes fast.
+    That was the recoverable mistake while there was one long-form model to be
+    downgraded from. It stops being recoverable when the name IS an engine:
+    Kokoro answers 200 with audio in a different voice from a different model,
+    and nothing in the response says the request was not honoured. The caller
+    typed an engine name; the one thing they cannot have meant is "surprise
+    me".
+
+    Case and whitespace are folded here for the same reason they are on the
+    routing branch: whether you get a 404 or silent Kokoro must not be decided
+    by a capital letter.
+    """
+    stt, tts, long = backends
+    async with gateway(monkeypatch, stt=stt, tts=tts, long=long) as (client, _):
+        response = await client.post(SPEECH, content=body(model=model))
+
+    assert response.status_code == 404
+    assert not tts.seen and not long.seen
+    error = assert_four_field_envelope(response)
+    assert error["code"] == "model_not_found"
+    assert error["param"] == "model"
+    # The way out, named. An error that says "not enabled" and not which
+    # variable enables it costs a grep of five services.
+    assert "GATEWAY_LONG_MODELS" in error["message"]
+    assert "chatterbox" in error["message"]
+
+
+async def test_a_disabled_long_model_still_writes_its_log_line(monkeypatch, backends,
+                                                               caplog):
+    """One line per request is this service's entire observability budget.
+
+    The two other ways out of `speech` that never reach a backend — a client
+    disconnect and unparseable JSON — both log, and both had to be fixed to.
+    A refusal that answers 404 in silence is a class of failure that is
+    invisible to grep, which is the only tool pointed at this.
+    """
+    stt, tts, long = backends
+    with caplog.at_level("INFO", logger="voice-gateway"):
+        async with gateway(monkeypatch, stt=stt, tts=tts, long=long) as (client, _):
+            await client.post(SPEECH, content=body(model="chatterbox-turbo"))
+
+    lines = [r.getMessage() for r in caplog.records if "route=" in r.getMessage()]
+    assert len(lines) == 1, lines
+    assert "model=chatterbox-turbo" in lines[0]
+    assert "status=404-model" in lines[0]
+
+
+async def test_the_advertised_long_models_are_exactly_GATEWAY_LONG_MODELS(
+        monkeypatch, backends):
+    """Advertised and routed come off one frozenset, so they cannot disagree.
+
+    Asserted as an EQUALITY rather than a subset. The subset check next door
+    answers "is chatterbox still there"; this one answers the question that
+    actually bites, which is whether a name nobody enabled is being published
+    to every client's model picker — or whether one that is enabled is missing
+    from it, so the only way to learn the name is to read the compose file.
+    """
+    stt, tts, long = backends
+    async with gateway(monkeypatch, stt=stt, tts=tts, long=long,
+                       long_models="chatterbox,tts-long,chatterbox-turbo,"
+                                   "voxtral",
+                       ) as (client, main):
+        listed = (await client.get("/v1/models")).json()["data"]
+
+    advertised = {m["id"] for m in listed if m["owned_by"] == "tts-long"}
+    assert advertised == set(main.LONG_MODELS)
+    # FOUR NAMES, SPELLED OUT. The equality above already holds whatever the
+    # variable says, which is exactly why it cannot catch a set that shrank:
+    # both sides are read from one env var, so dropping a name from compose
+    # keeps this green. The literal is the second witness, and it is the one
+    # that has to be edited by hand when an engine is added or removed.
+    assert advertised == {"chatterbox", "tts-long", "chatterbox-turbo",
+                          "voxtral"}
+
+
+async def test_a_deployment_that_enables_nothing_long_advertises_nothing_long(
+        monkeypatch, backends):
+    """An empty GATEWAY_LONG_MODELS is a legal deployment: a box with no card
+    and no local engine, running the fast path alone.
+
+    It must not leave `chatterbox` advertised. A model picker that offers a
+    name the router will not take is worse than a short list, because the
+    failure arrives as a 404 from a name the service itself published.
+    """
+    stt, tts, long = backends
+    async with gateway(monkeypatch, stt=stt, tts=tts, long=long,
+                       long_models=" , ") as (client, main):
+        listed = (await client.get("/v1/models")).json()["data"]
+        response = await client.post(SPEECH, content=body(model="chatterbox"))
+
+    assert not main.LONG_MODELS
+    assert not [m for m in listed if m["owned_by"] == "tts-long"]
+    # `chatterbox` is still a name this gateway KNOWS, so it is refused rather
+    # than sent to Kokoro — the same rule, one engine further down.
+    assert response.status_code == 404
+    assert not long.seen and not tts.seen
+
+
+async def test_every_catalogue_id_is_either_routed_or_404_never_fast(
+        monkeypatch, backends):
+    """THE FENCE FOR THE MODEL TABLE, coming at it from the catalogue's side.
+
+    The three allowlist fences below ask the same question about PATHS from
+    three directions, because a route present in two tables out of three is how
+    both of this week's live bugs shipped. This is that question about MODEL
+    STRINGS, and it comes from the direction nothing else does: not "does every
+    advertised name route", but "is every name the shared catalogue defines
+    accounted for here".
+
+    An engine added to voice_common.engines and never wired into this service
+    is the exact shape of `chatterbox-cpu` — configured somewhere, reachable
+    nowhere, and detectable only by whoever noticed. Here it cannot fall
+    through to the fast path in silence: it either routes long or it is refused
+    by name.
+
+    SCOPED TO THE ROWS TTS-LONG OWNS, and the scope is the whole point rather
+    than a caveat. The catalogue is the estate's fact table, not this
+    backend's: `EngineFacts.owned_by` names the service, and the fast path's
+    own `kokoro` is a row waiting to be written. Asserting "every catalogue id
+    routes long or 404s" would be asserting that a Kokoro row must 404 — this
+    fence demanding the outage the code was changed to prevent. The companion
+    below states the other half for the rows this backend does not own.
+    """
+    assert CATALOGUE, "read no engine ids at all out of voice_common.engines"
+    assert OURS, "no catalogue row says tts-long owns it; this fence sees nothing"
+
+    stt, tts, long = backends
+    async with gateway(monkeypatch, stt=stt, tts=tts, long=long,
+                       long_models="chatterbox,tts-long") as (client, main):
+        for engine in OURS:
+            response = await client.post(SPEECH, content=body(model=engine))
+            if engine in main.LONG_MODELS:
+                assert response.status_code == 200 and long.seen, engine
+            else:
+                assert response.status_code == 404, engine
+                assert response.json()["error"]["code"] == "model_not_found", engine
+            assert not tts.seen, (
+                f"{engine} is an engine tts-long owns and it reached the fast "
+                "backend: the caller named an engine and got Kokoro")
+            tts.seen.clear()
+            long.seen.clear()
+
+
+@pytest.mark.parametrize("engine", OURS)
+async def test_a_catalogue_name_not_in_GATEWAY_LONG_MODELS_is_404_not_kokoro(
+        monkeypatch, backends, engine):
+    """The same guarantee as the loop above, held per row rather than in bulk.
+
+    PARAMETRISED OFF THE CATALOGUE SO A NEW ENGINE ARRIVES WITH ITS OWN CASE,
+    named after itself in the pytest output. The loop above is one test that
+    passes or fails as a unit; a third engine landing in the catalogue widened
+    it silently and the report still read `1 passed`. Here `voxtral` shows up
+    as a line with `voxtral` in it, which is the difference between a suite
+    that covers a name and a suite that can be read to say so.
+
+    Every OTHER catalogue name is enabled while this one is not, because the
+    failure being fenced is a name falling off the end of a NON-EMPTY set — the
+    shape a real deployment has when the operator adds an engine to
+    TTS_ENGINES and forgets GATEWAY_LONG_MODELS. An empty set is a different
+    test and it is next door.
+    """
+    others = sorted((set(CATALOGUE) - {engine}) | {"tts-long"})
+    stt, tts, long = backends
+    async with gateway(monkeypatch, stt=stt, tts=tts, long=long,
+                       long_models=",".join(others)) as (client, _):
+        response = await client.post(SPEECH, content=body(model=engine))
+
+    assert response.status_code == 404, (
+        f"{engine} is not in GATEWAY_LONG_MODELS and this deployment answered "
+        f"{response.status_code}: the caller named an engine and got Kokoro")
+    assert not tts.seen and not long.seen
+    error = assert_four_field_envelope(response)
+    assert error["code"] == "model_not_found"
+    assert "GATEWAY_LONG_MODELS" in error["message"]
+
+
+async def test_a_catalogue_row_the_fast_backend_owns_is_never_refused_here(
+        monkeypatch, backends):
+    """THE DEFECT THIS PREVENTS: the day Kokoro gets a catalogue row, every
+    unconfigured OpenAI client on the stack starts getting 404 model_not_found.
+
+    `LONG_KNOWN` decides which names are refused instead of sent fast. It read
+    the WHOLE catalogue, which encodes "every checkpoint anybody writes a row
+    for belongs to tts-long" — true of every row written so far, and false of
+    the next one. Kokoro is `owned_by: "tts-stack"`, its row is named in
+    docs/adr as work already scheduled, and on the morning it lands `kokoro`,
+    the one string every default client sends, would be answered 404 with a
+    message telling the caller to add it to GATEWAY_LONG_MODELS — which would
+    then route it to a backend that has never held those weights.
+
+    The row is planted with `dataclasses.replace` rather than built field by
+    field ON PURPOSE: EngineFacts is growing columns this quarter and a
+    constructor call here would fail for the wrong reason, which is how a fence
+    gets deleted instead of read.
+    """
+    import dataclasses
+
+    from voice_common import engines
+
+    stt, tts, long = backends
+    planted = dataclasses.replace(engines.CATALOGUE["chatterbox"],
+                                  id="kokoro", owned_by="tts-stack")
+    monkeypatch.setitem(engines.CATALOGUE, "kokoro", planted)
+
+    # Reloaded AFTER the row is planted: LONG_KNOWN is computed at import, as
+    # every other piece of this service's configuration is.
+    async with gateway(monkeypatch, stt=stt, tts=tts, long=long,
+                       long_models="chatterbox,tts-long") as (client, main):
+        assert "kokoro" not in main.LONG_KNOWN, (
+            "a row the fast backend owns was counted as a tts-long name")
+        response = await client.post(SPEECH, content=body(model="kokoro"))
+
+    assert response.status_code == 200, (
+        "a catalogue row owned by tts-stack was refused by the gateway: "
+        "writing down a fact about the fast path took the fast path away")
+    assert len(tts.seen) == 1 and not long.seen
+    # And it is still refused when tts-long DOES own it, so the fence above is
+    # narrowing on the owner rather than on the catalogue having any row at all.
+    assert "chatterbox-turbo" in main.LONG_KNOWN
 
 
 # ------------------------------------------------------------- pass-through --
@@ -350,6 +630,31 @@ async def test_a_timeout_names_the_rate_and_the_way_out(monkeypatch, backends):
     assert "1.2-1.5x realtime" in error["message"]
     assert "chatterbox" in error["message"]
     assert "/jobs/{id}/audio" in error["message"]
+
+
+async def test_the_way_out_of_a_timeout_names_a_model_this_box_will_take(
+        monkeypatch, backends):
+    """A 504 that points at a model the same process answers 404 for is worse
+    than one that points nowhere: the caller retries against advice.
+
+    The old string was the literal `chatterbox`, which was correct while it was
+    the only long-form name. It is now whatever this deployment enabled, and
+    the two shapes that matter are a renamed set and an empty one.
+    """
+    stt, _, long = backends
+    async with gateway(monkeypatch, stt=stt, tts=Slow(), long=long,
+                       long_models="chatterbox-turbo") as (client, _):
+        renamed = (await client.post(SPEECH, content=body())).json()["error"]
+    assert "chatterbox-turbo" in renamed["message"]
+
+    # A box with no long-form engine at all. There is no way out to offer, so
+    # none is offered — rather than "send one of ()".
+    stt, _, long = backends
+    async with gateway(monkeypatch, stt=stt, tts=Slow(), long=long,
+                       long_models=" , ") as (client, _):
+        bare = (await client.post(SPEECH, content=body())).json()["error"]
+    assert "1.2-1.5x realtime" in bare["message"]
+    assert "long-form" not in bare["message"] and "()" not in bare["message"]
 
 
 async def test_a_long_path_timeout_points_at_the_queue(monkeypatch, backends):
@@ -669,6 +974,70 @@ async def test_health_reports_all_three_without_proxying_auth(monkeypatch, backe
     assert [b.last["path"] for b in (stt, tts, long)] == ["/health"] * 3
 
 
+async def test_the_engine_detail_tts_long_publishes_reaches_the_caller_verbatim(
+        monkeypatch, backends):
+    """THE VOICE PICKER'S ONLY SUPPLY LINE, AND IT RUNS THROUGH A ROUTE THAT
+    LOOKS LIKE AN OPERATOR'S STATUS PAGE.
+
+    An engine whose speakers are baked into its weights has a voice list, and
+    there is no route to fetch it: tts-long's own `GET /voices` is deliberately
+    unrouted (NOT_ROUTED below says why — the /voices this gateway answers is
+    tts-stack's, and one path cannot serve two backends without a prefix and
+    the rewriting rule that follows it). So the names ride the health body,
+    which `_probe` inlines whole rather than summarising.
+
+    THE DEFECT THIS PREVENTS is silent in every way a defect can be. Nobody
+    would summarise the body on purpose; it happens the day someone adds a
+    field list to make /health cheaper, or trims it because tts-long's answer
+    grew. Then no route 404s, no allowlist changes, no log line differs, this
+    service's own status page still reads correctly — and an engine's group in
+    the browser renders empty, offering a shorter voice list than the stack
+    has. The tests around this one all assert FLAT keys, so every one of them
+    would stay green through it.
+
+    Asserted as EQUALITY against the whole document, not as a spot check on the
+    keys this quarter's engine happens to need. A field list here would be the
+    very thing being fenced against, one level up.
+    """
+    stt, tts, long = backends
+    # Shaped like tts-long's own /health.engines: nested objects, a list of
+    # objects, a null, a false and a zero — the four values a careless
+    # `if value:` filter eats without raising anywhere.
+    detail = {
+        "status": "ok",
+        "model_loaded": False,
+        "queued": 0,
+        "engines": {
+            "chatterbox": {"label": "Chatterbox", "default": True,
+                           "voices": None, "reference_audio": True,
+                           "native_sample_rate": 24000,
+                           "min_reference_seconds": 0.0,
+                           "runner": {"ready": False, "why": "spring is away",
+                                      "settings": {}}},
+            "preset-engine": {"label": "Preset Engine", "default": False,
+                              "reference_audio": False,
+                              "native_sample_rate": 24000,
+                              "languages": ["de", "pt"],
+                              "controls": ["cfg_alpha", "flow_steps"],
+                              "voices": [{"name": "de_female", "language": "de"},
+                                         {"name": "pt_male", "language": "pt"}],
+                              "runner": {"ready": True, "why": None,
+                                         "settings": {"flow_steps": 32,
+                                                      "low_pass_hz": 0}}},
+        },
+    }
+    long.reply = lambda r: (200, {"content-type": "application/json"},
+                            json.dumps(detail).encode())
+
+    async with gateway(monkeypatch, stt=stt, tts=tts, long=long) as (client, _):
+        payload = (await client.get("/health")).json()
+
+    assert payload["backends"]["tts_long"]["health"] == detail, (
+        "the gateway edited tts-long's health document on the way past; the "
+        "page reads its voice list out of that body and there is no other "
+        "route that carries it")
+
+
 async def test_health_answers_200_while_a_sibling_is_down(monkeypatch, backends):
     """A container must not be restarted because a sibling is restarting.
 
@@ -855,58 +1224,536 @@ async def test_a_repeated_request_header_reaches_the_backend_intact(monkeypatch,
     assert cookies == ["a=1", "b=2"]
 
 
-def test_every_method_the_page_proxies_can_get_through_this_service():
-    """THE DEFECT THIS PREVENTS, found only against the deployed stack: saving
-    a vocabulary profile died with 405 method_not_supported.
 
-    The page reaches the proxied routes under /ui/api, which voice-ui strips
-    before forwarding. Three allowlists therefore have to agree, and PUT had
-    been added to two of them. voice-ui's PROXIED table allowed it and the stt
-    service answered it, but the /ui/api PASSTHROUGH here did not, so the
-    request never reached either.
+# ------------------------------------------------------------- the allowlists --
+#
+# THREE TABLES HAVE TO AGREE BEFORE ONE REQUEST ARRIVES, and no one of them can
+# see the other two:
+#
+#   voice-ui's PROXIED           what the page may ask its own container for
+#   this service's UI_PATHS      what may reach voice-ui through the one door
+#   this service's own routes    what may reach a backend
+#
+# Every failure this section exists for has the same shape: a path already
+# present under one method, a second method added to two tables out of three,
+# and a 405 that shows up only against the deployed stack. It has now happened
+# twice -- PUT /glossaries/{name}, then DELETE /jobs/{job_id}/audio -- and the
+# test that was meant to catch the second could not, because it compared sets
+# of METHOD STRINGS: DELETE was already in both tables for another path, so the
+# missing pair added no method and the assertion stayed green through the whole
+# failure.
+#
+# The three tests below compare PAIRS, and they come at the tables from all
+# three sides: what the page asks for, what the backends answer, and what the
+# tables claim exists.
+#
+# THEY ASSERT AND NEVER SKIP. The test they replace called pytest.skip when a
+# sibling service was absent from the checkout, which reads as a pass and
+# asserts nothing. The services are separately deployable; this repository
+# still holds all five, so a missing one is a broken checkout and must say so.
 
-    That seam belongs to neither side, which is exactly why it was missed. This
-    reads voice-ui's own table and asserts every method in it is allowed
-    through, so adding a method there without adding it here fails HERE, in the
-    service that would have refused it.
+# parents[0] tests, [1] gateway, [2] services. Getting this wrong used to make
+# the old test SKIP; here it fails, loudly, on the first assertion it reaches.
+SERVICES = Path(__file__).resolve().parents[2]
+UI_PAGE = SERVICES / "ui" / "app" / "static" / "ui.html"
+
+HTTP_METHODS = frozenset({"GET", "POST", "PUT", "DELETE", "PATCH"})
+
+# Routes a backend answers that deliberately never reach a browser, keyed by
+# the service that answers them because two backends answer /voices. Each entry
+# carries the reason it is exempt: an exemption with no reason is how a route
+# that SHOULD be routed gets quietly parked here.
+#
+# /health is absent from this table and so are /docs and /openapi.json, because
+# none of the three is a route anyone declares -- health comes from
+# voice_common.health with the path as a variable, and the other two are
+# FastAPI's own and already off in every service. The reader below sees
+# decorated paths and literal ones, so naming them here would be three entries
+# that exempt nothing.
+#
+# An entry may name a route that has not landed yet. That is deliberate: this
+# table is written where the routing decision is made, not where the route is,
+# and a new backend route arriving with its exemption already recorded is the
+# outcome this whole section is for.
+NOT_ROUTED: dict[tuple[str, str, str], str] = {
+    ("stt", "POST", "/v1/audio/translations"):
+        "Parakeet refuses translation, so the route exists only to say so in "
+        "the OpenAI envelope. Routing it would publish a 400.",
+    ("tts-long", "GET", "/voices"):
+        "the voice list a caller wants is tts-stack's, and that is the one "
+        "routed. Two backends answering the same path is why this table is "
+        "keyed by service.",
+    ("tts-long", "POST", "/runs"):
+        "service-to-service. tts and stt post a finished run record to "
+        "tts-long on the internal network; the browser must never be able to "
+        "write a row into the history it is reading.",
+}
+
+# What this service answers itself, with no backend behind it. Without these
+# the reverse test reads a correct allowlist entry as pointing at nothing.
+ANSWERED_HERE = frozenset({("GET", "/v1/models"), ("GET", "/health")})
+
+
+def _pattern(path: str) -> str:
+    """`/jobs/{job_id}` and `/jobs/{id}` are the same route.
+
+    A path parameter's NAME is a local variable, not part of the wire
+    contract. Comparing the raw strings would fail this fence for a rename in
+    tts-long that no client could observe.
     """
-    import ast
-    from pathlib import Path
+    return re.sub(r"\{[^{}]*\}", "{p}", path)
 
-    # parents[0] tests, [1] gateway, [2] services. Getting this wrong makes the
-    # test SKIP, which reads as a pass and asserts nothing.
-    ui_main = Path(__file__).resolve().parents[2] / "ui" / "app" / "main.py"
-    if not ui_main.exists():          # the services are separately deployable
-        pytest.skip("services/ui is not present in this checkout")
 
-    tree = ast.parse(ui_main.read_text())
-    proxied: set[str] = set()
+def _declared_routes(service: str) -> set[tuple[str, str]]:
+    """Every (METHOD, path) a service declares, read from source, never imported.
+
+    AST RATHER THAN IMPORT, and it is not fastidiousness: importing tts-long's
+    app loads Chatterbox, which is 6.5 GB of model and a CUDA probe inside a
+    unit test. It also lets this read a service that is not installed in this
+    environment, which is the normal case -- each service has its own venv.
+
+    Routers are followed, so stt's /v1 prefix and voice-ui's ingest routes are
+    both visible. A route mounted through include_router is exactly the shape
+    that hides from anyone grepping for `@app.`.
+    """
+    app_dir = SERVICES / service / "app"
+    assert app_dir.is_dir(), (
+        f"services/{service}/app is missing from this checkout, so this fence "
+        "cannot see what that service answers.")
+
+    routes: set[tuple[str, str]] = set()
+    for module in sorted(app_dir.glob("*.py")):
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        # One router per module in this estate, so its prefix is the module's.
+        prefix = ""
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "APIRouter":
+                for keyword in node.keywords:
+                    if keyword.arg == "prefix" and isinstance(keyword.value, ast.Constant):
+                        prefix = keyword.value.value
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for decorator in node.decorator_list:
+                if not isinstance(decorator, ast.Call):
+                    continue
+                attribute = decorator.func
+                if not isinstance(attribute, ast.Attribute):
+                    continue
+                method = attribute.attr.upper()
+                owner = getattr(attribute.value, "id", "")
+                if method not in HTTP_METHODS or owner not in ("app", "router"):
+                    continue
+                if not decorator.args or not isinstance(decorator.args[0], ast.Constant):
+                    continue
+                path = decorator.args[0].value
+                routes.add((method, prefix + path if owner == "router" else path))
+    assert routes, f"read no routes at all out of services/{service}/app"
+    return routes
+
+
+def _proxied_table() -> tuple[tuple[str, str], ...]:
+    """voice-ui's PROXIED, read from its source rather than imported.
+
+    Same reason as _declared_routes, plus one of its own: voice-ui's config
+    module reads the environment at import, so importing it here would make
+    this fence depend on how the shell that ran pytest was set up.
+    """
+    ui_main = SERVICES / "ui" / "app" / "main.py"
+    assert ui_main.exists(), (
+        f"{ui_main} is missing from this checkout, so the table this service "
+        "has to agree with cannot be read.")
+    tree = ast.parse(ui_main.read_text(encoding="utf-8"))
+
+    pairs: list[tuple[str, str]] = []
     for node in ast.walk(tree):
         # AnnAssign as well as Assign: it is declared `PROXIED: tuple[...] = (`,
-        # and matching only Assign found nothing, which the empty-set assertion
-        # below is here to catch rather than let pass as "no methods missing".
+        # and matching only Assign found nothing -- which the emptiness
+        # assertion below catches rather than let pass as "nothing missing".
         if isinstance(node, ast.AnnAssign):
             targets = [node.target]
         elif isinstance(node, ast.Assign):
             targets = list(node.targets)
         else:
             continue
-        if not any(getattr(t, "id", "") == "PROXIED" for t in targets):
-            continue
         if node.value is None:
             continue
+        if not any(getattr(target, "id", "") == "PROXIED" for target in targets):
+            continue
         for item in ast.walk(node.value):
-            if isinstance(item, ast.Tuple) and len(item.elts) == 2:
-                method = item.elts[0]
-                if isinstance(method, ast.Constant) and isinstance(method.value, str):
-                    proxied.add(method.value)
-    assert proxied, "could not read voice-ui's PROXIED table"
+            if (isinstance(item, ast.Tuple) and len(item.elts) == 2
+                    and all(isinstance(element, ast.Constant)
+                            and isinstance(element.value, str)
+                            for element in item.elts)):
+                pairs.append((item.elts[0].value, item.elts[1].value))
+    assert pairs, "could not read voice-ui's PROXIED table"
+    return tuple(pairs)
 
+
+def _gateway_routes(module) -> set[tuple[str, str]]:
+    """What this service routes to a backend, read off the live app.
+
+    app.routes rather than the source, because it is the table Starlette
+    matches against and a 405 is what happens when a request misses it. HEAD
+    is dropped: Starlette adds one free beside every GET, and nothing in this
+    estate is asked for with it.
+
+    The /ui/* family is subtracted -- those go to voice-ui, and
+    test_no_allowlist_entry_points_at_nothing checks them against voice-ui's
+    own routes instead.
+    """
+    to_ui = set(module.UI_PATHS)
+    routes: set[tuple[str, str]] = set()
+    for route in module.app.routes:
+        for method in getattr(route, "methods", None) or ():
+            if method in HTTP_METHODS and (method, route.path) not in to_ui:
+                routes.add((method, route.path))
+    # The same emptiness guard the two source readers above already carry, and
+    # it is the one that was missing. This reader is the only one of the three
+    # whose result feeds a comprehension that produces NOTHING when it goes
+    # blank -- test_no_allowlist_entry_points_at_nothing would report no
+    # dangling entries and pass, which is how a fence stops fencing without
+    # anybody being told.
+    assert routes, "read no routes at all off the gateway app"
+    return routes
+
+
+# ---------------------------------- reading the page's own requests -----------
+#
+# The page is one HTML file with its JavaScript inline: no module graph to walk
+# and no bundler output to read. What follows is a scanner rather than a
+# parser -- enough JavaScript to find a call, its first argument and its
+# `method`, and nothing beyond that.
+
+
+def _skip_string(text: str, i: int) -> int:
+    """The index just past the string literal starting at `i`.
+
+    `${...}` inside a template literal is brace-counted rather than walked
+    over, because a hole may hold a call whose arguments hold anything.
+    """
+    quote = text[i]
+    i += 1
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == quote:
+            return i + 1
+        if quote == "`" and text[i] == "$" and text[i + 1:i + 2] == "{":
+            depth = 0
+            while i < len(text):
+                if text[i] == "{":
+                    depth += 1
+                elif text[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                i += 1
+        i += 1
+    raise AssertionError("unterminated string literal in ui.html")
+
+
+def _closing(text: str, opening: int) -> int:
+    """The index of the bracket that closes the one at `opening`."""
+    depth = 0
+    i = opening
+    while i < len(text):
+        character = text[i]
+        if character in "([{":
+            depth += 1
+        elif character in ")]}":
+            depth -= 1
+            if depth == 0:
+                return i
+        elif character in "\"'`":
+            i = _skip_string(text, i)
+            continue
+        i += 1
+    raise AssertionError("unbalanced brackets in ui.html")
+
+
+def _first_argument(arguments: str) -> tuple[str, str]:
+    """Split an argument list at its first top-level comma."""
+    depth = 0
+    i = 0
+    while i < len(arguments):
+        character = arguments[i]
+        if character in "([{":
+            depth += 1
+        elif character in ")]}":
+            depth -= 1
+        elif character in "\"'`":
+            i = _skip_string(arguments, i)
+            continue
+        elif character == "," and depth == 0:
+            return arguments[:i], arguments[i + 1:]
+        i += 1
+    return arguments, ""
+
+
+_TEMPLATE_HOLE = re.compile(r"\$\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}")
+
+
+def _route_of(expression: str) -> str:
+    """A path EXPRESSION reduced to the one route it can reach.
+
+    Literal characters are kept and everything computed collapses to `{p}`, so
+    `"/glossaries/" + encodeURIComponent(name)` and `` `/jobs/${id}/audio` ``
+    come out spelled the way the allowlists spell them. The query string is
+    cut: ?force=true and ?token=... are arguments to a route, not routes, and
+    both proxies append request.url.query without consulting any table.
+
+    A TRAILING HOLE THAT DOES NOT BEGIN A SEGMENT IS A QUERY STRING, and is cut
+    with it. `json("/jobs" + (query ? "?" + query : ""))` builds its own `?`
+    inside the computed half, so the cut above cannot see one -- and the route
+    is /jobs either way. The hole has to be at the end and NOT after a slash: a
+    `{p}` mid-path is a segment this scanner could not read, and it stays in so
+    the assertion fails rather than quietly matching a shorter route.
+    """
+    parts: list[str] = []
+    i = 0
+    while i < len(expression):
+        character = expression[i]
+        if character in "\"'`":
+            end = _skip_string(expression, i)
+            literal = expression[i + 1:end - 1]
+            parts.append(_TEMPLATE_HOLE.sub("{p}", literal)
+                         if character == "`" else literal)
+            i = end
+            continue
+        if character in " \t\r\n+":
+            i += 1
+            continue
+        # A call, an identifier or a parenthesised group: one opaque segment.
+        depth = 0
+        while i < len(expression):
+            character = expression[i]
+            if character in "([{":
+                depth += 1
+            elif character in ")]}":
+                depth -= 1
+            elif depth == 0 and character in "\"'`+":
+                break
+            i += 1
+        parts.append("{p}")
+    route = re.sub(r"(\{p\})+", "{p}", "".join(parts).split("?")[0])
+    return re.sub(r"(?<!/)\{p\}$", "", route)
+
+
+def _helper_spans(source: str) -> list[tuple[int, int]]:
+    """Where api() and json() are DEFINED, so their bodies are not read as uses.
+
+    json() calls api(path, options) and api() calls fetch(target, ...): both
+    forward a variable that names no route of its own. Counted as call sites
+    they would turn every literal ever assigned to `path` anywhere in the file
+    into a GET the page never issues.
+    """
+    spans: list[tuple[int, int]] = []
+    for match in re.finditer(r"\basync\s+function\s+(?:api|json)\s*\(", source):
+        arguments = _closing(source, match.end() - 1)
+        body = source.index("{", arguments)
+        spans.append((match.start(), _closing(source, body) + 1))
+    return spans
+
+
+_CALL = re.compile(r"(?<![\w.$])(?:api|json|fetch)\s*\(")
+
+
+def _page_requests() -> set[tuple[str, str]]:
+    """Every (METHOD, route) the page can issue, read out of ui.html.
+
+    api() and json() are the two seams every proxied call goes through, and
+    bare fetch() is read as well because /ui/health and /ui/config still use
+    it. A URL assigned to a media element's `src` is NOT read here: /ui/media
+    is the only one and test_the_media_relay_is_routed stands over it already.
+    """
+    assert UI_PAGE.exists(), (
+        f"{UI_PAGE} is missing from this checkout, so the one assertion that "
+        "catches a 405 from the direction a person hits it cannot run.")
+    source = UI_PAGE.read_text(encoding="utf-8")
+    spans = _helper_spans(source)
+    assert spans, "could not find api() or json() in ui.html"
+
+    requests: set[tuple[str, str]] = set()
+    for match in _CALL.finditer(source):
+        if any(start <= match.start() < end for start, end in spans):
+            continue
+        first, rest = _first_argument(_balanced(source, match.end() - 1))
+        first = first.strip()
+        if not first:
+            continue
+        method = re.search(r"""method\s*:\s*["']([A-Za-z]+)["']""", rest)
+        method = method.group(1).upper() if method else "GET"
+
+        if first.isidentifier():
+            # `path` is chosen in a branch just above the call -- /speak or
+            # /v1/audio/speech, the native transcribe route or the OpenAI one.
+            # Every literal it is ever given is a route that call can reach, so
+            # all of them are checked.
+            line = source.count("\n", 0, match.start()) + 1
+            assigned = re.findall(
+                r"\b" + re.escape(first) + r"""\s*=\s*(["'`][^"'`]*["'`])""",
+                source)
+            assert assigned, (
+                f"ui.html:{line} makes a request with the variable `{first}` "
+                "and this fence cannot tell which route that is. Give it a "
+                "literal, or the allowlists have a hole nothing here can see.")
+            requests.update((method, _route_of(literal)) for literal in assigned)
+            continue
+        if re.match(r"""["'`]\s*/""", first):
+            requests.add((method, _route_of(first)))
+        # Anything else is an absolute URL or a blob and reaches no table here.
+    return requests
+
+
+def _balanced(text: str, opening: int) -> str:
+    """The text between `opening` and the bracket that closes it."""
+    return text[opening + 1:_closing(text, opening)]
+
+
+def test_every_request_the_page_issues_has_a_route():
+    """THE DEFECT THIS PREVENTS, reproduced against the deployed stack: the
+    Jobs tab's "delete the audio" button died with 405 method_not_supported.
+
+    tts-long had answered DELETE /jobs/{id}/audio all along and both tables in
+    front of it carried only the GET on that path. The test this replaces read
+    the tables as sets of METHOD STRINGS, so the missing pair added no method
+    they did not already hold and it stayed green.
+
+    This one starts from the page instead: every call site in ui.html, the
+    method it sends and the route it can reach. It is the only assertion in the
+    estate that comes at the allowlists from the direction a person hits them,
+    and it fails in whichever table is short.
+    """
+    page = _page_requests()
+    assert page, "read no requests at all out of ui.html"
+
+    proxied = {(method, _pattern(path)) for method, path in _proxied_table()}
+    # voice-ui answers its own /ui/* family without forwarding anything, so
+    # those calls are allowed by its routes rather than by its allowlist.
+    own = {(method, _pattern(path)) for method, path in _declared_routes("ui")}
+
+    missing = sorted(page - proxied - own)
+    assert not missing, (
+        "the page issues these and no table lets them through, which is a 405 "
+        f"in the browser and a line in no log: {missing}")
+
+
+def test_every_backend_route_is_routed_or_named_as_unrouted():
+    """A route a backend answers is either reachable or exempt on the record.
+
+    The failure this prevents is the quiet one: tts-long grows a route, the
+    page grows a control for it, and the two tables in between get written by
+    whoever remembers. Everything a backend answers has to be accounted for
+    here, and an exemption has to say why in NOT_ROUTED -- so "we never routed
+    it" stops being something you find out from a 405.
+    """
     from app import main as gateway_main
 
-    passthrough = {m for m, p in gateway_main.UI_PATHS
-                   if p == "/ui/api/{rest:path}"}
-    missing = proxied - passthrough
-    assert not missing, (
-        f"voice-ui proxies {sorted(missing)} but /ui/api does not allow it here, "
-        "so the page gets 405 before its request reaches voice-ui")
+    gateway = {(method, _pattern(path))
+               for method, path in _gateway_routes(gateway_main)}
+    proxied = {(method, _pattern(path)) for method, path in _proxied_table()}
+
+    unreachable: list[str] = []
+    for service in ("stt", "tts", "tts-long"):
+        for method, path in sorted(_declared_routes(service)):
+            if (service, method, path) in NOT_ROUTED:
+                continue
+            pair = (method, _pattern(path))
+            if pair not in gateway:
+                unreachable.append(
+                    f"{service} answers {method} {path} and this service does "
+                    "not route it")
+            elif pair not in proxied:
+                unreachable.append(
+                    f"{service} answers {method} {path} and voice-ui's PROXIED "
+                    "does not list it, so the page cannot reach it")
+    assert not unreachable, "\n".join(unreachable) + (
+        "\n\nRoute it in both tables, or name it in NOT_ROUTED with the reason "
+        "it never reaches a browser.")
+
+
+def test_no_allowlist_entry_points_at_nothing():
+    """The same comparison the other way round, which catches the other rot.
+
+    An entry left behind after a route is renamed forwards a request to a
+    backend 404, and from the outside that reads exactly like a broken
+    backend. Router prefixes are followed on both sides -- stt's /v1 and
+    voice-ui's ingest router -- because a route visible only through an
+    include_router is the one this would otherwise report as missing when it
+    is there.
+    """
+    from app import main as gateway_main
+
+    backends = {(method, _pattern(path))
+                for service in ("stt", "tts", "tts-long")
+                for method, path in _declared_routes(service)}
+    voice_ui = {(method, _pattern(path))
+                for method, path in _declared_routes("ui")}
+
+    dangling = [f"this service routes {method} {path} and no backend answers it"
+                for method, path in sorted(_gateway_routes(gateway_main))
+                if (method, _pattern(path)) not in backends | ANSWERED_HERE]
+    dangling += [f"voice-ui proxies {method} {path} and no backend answers it"
+                 for method, path in sorted(_proxied_table())
+                 if (method, _pattern(path)) not in backends | ANSWERED_HERE]
+    # /ui/api is excluded by path: it is the prefixed mount of PROXIED, checked
+    # on the lines above, and voice-ui declares no route by that name because
+    # it strips the prefix before matching its own allowlist.
+    dangling += [f"UI_PATHS carries {method} {path} and voice-ui answers no "
+                 "such route"
+                 for method, path in sorted(gateway_main.UI_PATHS)
+                 if not path.startswith("/ui/api/")
+                 and (method, _pattern(path)) not in voice_ui]
+    assert not dangling, "\n".join(dangling)
+
+
+def test_a_second_model_string_adds_no_row_to_any_of_the_three_tables():
+    """The claim the routing package makes and must not simply assert in prose.
+
+    Selecting an engine is a REQUEST FIELD, not a route. All three allowlists
+    are keyed on (METHOD, path), so a second model string is invisible to every
+    one of them -- and the three speech paths it can arrive on are already
+    listed. That is the whole reason this change reaches the page without a
+    voice-ui deploy.
+
+    It is asserted rather than believed because the opposite mistake is the one
+    this estate keeps making: the two live bugs this week were both a surface
+    that grew and a table that did not. If the engine ever stops being a field
+    -- a /v1/audio/speech/{engine}, a per-engine job route -- this fails and
+    says which table to write in.
+    """
+    raw = _proxied_table()
+    proxied = {(method, _pattern(path)) for method, path in raw}
+    for pair in (("POST", "/v1/audio/speech"), ("POST", "/jobs"),
+                 ("GET", "/voices")):
+        assert pair in proxied, (
+            f"the page reaches the engine selector through {pair[0]} {pair[1]} "
+            "and voice-ui's PROXIED does not carry it")
+
+    # READ OFF THE RAW PATHS, NOT THE PATTERNED ONES, and the first draft of
+    # this test got that wrong in a way that proves the point of writing it.
+    # `_pattern` rewrites every `{name}` to `{p}` on purpose -- a parameter's
+    # name is a local variable and renaming it breaks no client -- so a
+    # deliberately planted `/v1/audio/speech/{engine}` came through as
+    # `/v1/audio/speech/{p}`, the word this was searching for had been erased,
+    # and the mutation PASSED. That is the same silent-green shape as the
+    # earlier fence which compared sets of method strings. Here the parameter's
+    # name IS the thing being looked for, so it must survive to be looked at.
+    offenders = sorted(
+        f"{method} {path}" for method, path in raw
+        # A path parameter named for an engine or a model: the engine promoted
+        # out of the body and into the URL. `/v1/models` is not that and must
+        # not be caught -- it is the meta route that publishes the names, and
+        # it carries no parameter at all.
+        if re.search(r"\{[^{}]*(?:engine|model)[^{}]*\}", path)
+        # Or a new segment hung off one of the two speech routes, which is what
+        # a per-engine variant would look like without a parameter:
+        # /v1/audio/speech/turbo. /jobs is excluded because /jobs/{id} and
+        # /jobs/{id}/audio are legitimate and already listed.
+        or path.startswith(("/v1/audio/speech/", "/speak/")))
+    assert not offenders, (
+        "an engine-shaped PATH appeared in voice-ui's PROXIED: the engine is a "
+        "request field, and a path is three tables' worth of work -- this one, "
+        f"the gateway's routes, and the backend's: {offenders}")

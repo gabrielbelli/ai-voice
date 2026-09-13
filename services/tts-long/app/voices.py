@@ -58,9 +58,20 @@ class Registry:
 
     def __init__(self, clips: dict[str, Path], strict: bool = False,
                  directory: Path | None = None,
-                 stamp: tuple[float, int] | None = None) -> None:
+                 stamp: tuple[float, int] | None = None,
+                 seconds: dict[str, float | None] | None = None) -> None:
         self.clips = clips
         self.strict = strict
+        # HOW LONG EACH CLIP IS, read at scan time and never per request.
+        # Chatterbox Turbo asserts a reference longer than five seconds, and
+        # that is a property of the PAIR (engine, voice) rather than of either
+        # -- so it has nowhere else to live, and the only alternative is an
+        # AssertionError inside somebody's job after a job id already exists.
+        #
+        # None WHERE IT COULD NOT BE READ CHEAPLY, and a None never refuses
+        # anything: a header this side cannot parse is not evidence the clip is
+        # short. Turbo's own assert catches that case, loudly and rarely.
+        self.seconds: dict[str, float | None] = dict(seconds or {})
         # Where the clips came from, and what the directory looked like when
         # they were read. Both optional so a hand-built Registry — every one in
         # the test suite — still works and simply never refreshes.
@@ -104,6 +115,7 @@ class Registry:
             return
         fresh = load_registry(self.directory, self.strict)
         self.clips = fresh.clips
+        self.seconds = fresh.seconds
         self.stamp = fresh.stamp
 
     @property
@@ -116,6 +128,14 @@ class Registry:
         if self.strict:
             return []
         return [name for name in OPENAI_VOICES if name not in self.clips]
+
+    def seconds_for(self, name: str) -> float | None:
+        """How long this voice's reference clip is, or None if it is unknown.
+
+        The built-in speaker has no clip at all, which is not a short clip: it
+        is the model's own voice and no engine's minimum applies to it.
+        """
+        return self.seconds.get(name)
 
     def resolve(self, requested: str | None) -> tuple[str, str | None] | None:
         """(name, reference clip path or None), or None if the voice is unknown.
@@ -164,4 +184,29 @@ def load_registry(directory: str | os.PathLike[str] | None = None,
             stamp = (info.st_mtime_ns, info.st_ino)
         except OSError:
             stamp = None
-    return Registry(clips, strict=strict, directory=path, stamp=stamp)
+    return Registry(clips, strict=strict, directory=path, stamp=stamp,
+                    seconds={name: _clip_seconds(clip)
+                             for name, clip in clips.items()})
+
+
+def _clip_seconds(clip: Path) -> float | None:
+    """The duration of a reference clip, from its HEADER. Never a decode.
+
+    A HEADER READ AND NOTHING MORE. This runs for every clip in the directory
+    on every rescan, and a rescan happens on the request after a file lands, so
+    decoding a few minutes of audio here would put that cost on somebody's next
+    request. soundfile.info is a seek and a struct.
+
+    NEVER FATAL, and the answer to "I could not read it" is None rather than
+    zero. Zero is a length, and a length shorter than every engine's minimum
+    would refuse a voice that is probably fine -- for an mp3 this build cannot
+    parse, or a file being written as the scan walked past it.
+    """
+    try:
+        import soundfile
+    except ImportError:  # pragma: no cover - the image installs it
+        return None
+    try:
+        return float(soundfile.info(str(clip)).duration)
+    except Exception:  # noqa: BLE001 - the failure IS "unknown", see above
+        return None

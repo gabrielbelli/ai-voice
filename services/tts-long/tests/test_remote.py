@@ -117,6 +117,14 @@ def segs(n):
 # exactly the signature Synth.speak_segments has. See RemoteSynth.__init__.
 JOB = "the-local-uuid"
 
+# The three fields the multilingual checkpoint reads, as one mapping. It is one
+# mapping and not three positional floats because `speak_segments` has to keep
+# byte for byte the signature the local Synth has -- `_run` calls it
+# positionally on whichever backend it was handed -- and a per-field parameter
+# is a signature that has to be widened in four places for every engine after
+# the third. Which keys exist is the ENGINE's business now, not this call's.
+DIALS = {"exaggeration": 0.5, "cfg_weight": 0.5, "temperature": 0.8}
+
 
 # --------------------------------------------------- the unconfigured case ---
 
@@ -134,7 +142,7 @@ def test_with_no_runner_configured_nothing_remote_is_constructed(speech):
 
     assert main.state.get("runner") is None
     job = {"id": "abc123", "segments": segs(1)}
-    assert main._backend_for(job) is main.state["synth"]
+    assert main._backend_for(job) is main._local_synth("chatterbox")
     # Same change as the route-level test above: the job record now names its
     # backend on every path, so the proof that nothing remote happened is the
     # returned object being the local Synth, not the absence of a label.
@@ -183,10 +191,11 @@ def test_not_installed_is_not_the_same_answer_as_gpu_busy(speech, caplog, state,
     client = FakeClient()
     client.state = state
     main.state["runner"] = client
+    probe = main.dispatch.lanes["runner"].probe
     try:
         with caplog.at_level("INFO"):
-            chosen = main._backend_for({"id": "abc123"})
-        assert chosen is main.state["synth"], "a runner that cannot help must not be used"
+            probe.once()
+        assert probe.ok() is False, "a runner that cannot help must not be used"
         warned = any(r.levelname == "WARNING" for r in caplog.records)
         assert warned is expect_warning
     finally:
@@ -204,7 +213,7 @@ def test_a_ready_runner_is_used_and_says_so_on_the_job(speech):
     main.state["runner"] = FakeClient()
     try:
         job = {"id": "abc123"}
-        assert isinstance(main._backend_for(job), FreshRemoteSynth)
+        assert isinstance(main._backend_for(job, "runner"), FreshRemoteSynth)
         # The label is what routes the timing to the right EMA below.
         assert job["backend"] == "runner"
     finally:
@@ -214,7 +223,12 @@ def test_a_ready_runner_is_used_and_says_so_on_the_job(speech):
 def test_an_unreachable_runner_falls_back_rather_than_failing_the_job(speech):
     """A runner on somebody's desk is off, asleep or on a different network
     most of the time. That is an ordinary condition, not an error: this service
-    has a CPU path that works and it must use it silently."""
+    has a CPU path that works and it must use it silently.
+
+    ASKED ON THE PROBE'S THREAD, WHICH IS THE WHOLE POINT. The refusal used to
+    be discovered by the worker, on the job's own clock, so an unreachable
+    runner charged its connect timeout to a job it was never going to run.
+    """
     import app.main as main
 
     class Dead(FakeClient):
@@ -222,8 +236,14 @@ def test_an_unreachable_runner_falls_back_rather_than_failing_the_job(speech):
             raise RemoteUnavailable("connection refused")
 
     main.state["runner"] = Dead()
+    probe = main.dispatch.lanes["runner"].probe
     try:
-        assert main._backend_for({"id": "abc123"}) is main.state["synth"]
+        probe.once()
+        assert probe.ok() is False
+        assert "unreachable" in probe.why
+        job = {"id": "abc123"}
+        # And the lane the chooser would then pick is this host.
+        assert main._backend_for(job, "local") is main._local_synth("chatterbox")
     finally:
         main.state["runner"] = None
 
@@ -267,7 +287,7 @@ def test_each_segment_arrives_separately_so_streaming_still_works():
     client = FakeClient(segments=3)
     seen: list[int] = []
     spoken = RemoteSynth(client, JOB).speak_segments(
-        segs(3), "en", 0.5, 0.5, 0.8, None,
+        segs(3), "en", DIALS, None,
         on_chunk=lambda piece: seen.append(piece.size))
 
     assert len(seen) == 3, f"expected one callback per segment, got {len(seen)}"
@@ -287,7 +307,7 @@ def test_segments_past_the_ninth_are_not_spoken_out_of_order():
     client = FakeClient(segments=12)
     order: list[float] = []
     RemoteSynth(client, JOB).speak_segments(
-        segs(12), "en", 0.5, 0.5, 0.8, None,
+        segs(12), "en", DIALS, None,
         on_chunk=lambda piece: order.append(round(float(piece[0]), 3)))
 
     # The fake makes segment i a constant of 0.1 * (i + 1), so the amplitudes
@@ -302,7 +322,7 @@ def test_the_runner_is_sent_text_and_never_a_pause():
     chunking policies would need two runners."""
     client = FakeClient(segments=2)
     RemoteSynth(client, JOB).speak_segments(
-        [("first", 0.4), ("second", 1.2)], "en", 0.5, 0.5, 0.8, None)
+        [("first", 0.4), ("second", 1.2)], "en", DIALS, None)
     params, _ = client.submitted[0]
     assert params["segments"] == ["first", "second"]
     assert "0.4" not in repr(params) and "1.2" not in repr(params)
@@ -313,7 +333,7 @@ def test_the_local_job_id_is_the_idempotency_key():
     Without the key that retry is a second generation, which for speech means
     the same sentence spoken twice into the same file."""
     client = FakeClient()
-    RemoteSynth(client, JOB).speak_segments(segs(1), "en", 0.5, 0.5, 0.8, None)
+    RemoteSynth(client, JOB).speak_segments(segs(1), "en", DIALS, None)
     _, key = client.submitted[0]
     assert key == "the-local-uuid"
 
@@ -332,7 +352,7 @@ def test_a_reference_clip_crosses_as_a_digest_and_never_as_a_path(tmp_path):
     clip.write_bytes(b"RIFF....fake wav bytes")
 
     client = FakeClient()
-    RemoteSynth(client, JOB).speak_segments(segs(1), "en", 0.5, 0.5, 0.8, str(clip))
+    RemoteSynth(client, JOB).speak_segments(segs(1), "en", DIALS, str(clip))
     params, _ = client.submitted[0]
 
     blob = repr(params)
@@ -350,7 +370,7 @@ def test_the_sample_rate_crosses_so_a_mismatch_can_be_caught():
     and silent about it. Telling the runner the rate is what makes it a contract
     rather than an assumption."""
     client = FakeClient()
-    RemoteSynth(client, JOB).speak_segments(segs(1), "en", 0.5, 0.5, 0.8, None)
+    RemoteSynth(client, JOB).speak_segments(segs(1), "en", DIALS, None)
     assert client.submitted[0][0]["sample_rate"] == SAMPLE_RATE
 
 
@@ -362,7 +382,7 @@ def test_a_truncated_segment_is_refused_rather_than_reinterpreted():
     client = FakeClient()
     client.artefact = lambda job_id, name: b"\x00\x01\x02"
     with pytest.raises(RemoteUnavailable, match="float32"):
-        RemoteSynth(client, JOB).speak_segments(segs(1), "en", 0.5, 0.5, 0.8, None)
+        RemoteSynth(client, JOB).speak_segments(segs(1), "en", DIALS, None)
 
 
 # ------------------------------------------------------------- the yield -----
@@ -379,7 +399,7 @@ def test_a_yield_is_waited_out_rather_than_reported_at_all():
     """
     client = FakeClient(segments=4, yield_after=2, yield_polls=3)
     spoken = RemoteSynth(client, JOB).speak_segments(
-        segs(4), "en", 0.5, 0.5, 0.8, None)
+        segs(4), "en", DIALS, None)
 
     assert client._stalled == 3, "the fake did not actually yield"
     assert spoken.audio.size == 4 * (SAMPLE_RATE // 10), \
@@ -395,7 +415,7 @@ def test_the_local_job_reads_queued_again_while_the_owner_is_gaming():
     client = FakeClient(segments=3, yield_after=1, yield_polls=2)
     seen: list[bool] = []
     RemoteSynth(client, JOB, on_wait=seen.append).speak_segments(
-        segs(3), "en", 0.5, 0.5, 0.8, None)
+        segs(3), "en", DIALS, None)
 
     assert seen == [True, False], \
         "expected queued-then-running exactly once, got " + repr(seen)
@@ -423,7 +443,7 @@ def test_a_segment_made_before_a_yield_is_never_spoken_or_delivered_twice():
     client = FakeClient(segments=5, yield_after=2, yield_polls=4)
     pieces: list[np.ndarray] = []
     spoken = RemoteSynth(client, JOB).speak_segments(
-        segs(5), "en", 0.5, 0.5, 0.8, None, on_chunk=pieces.append)
+        segs(5), "en", DIALS, None, on_chunk=pieces.append)
 
     assert len(client.submitted) == 1, \
         "the runner was asked to generate twice: " + repr(client.submitted)
@@ -441,7 +461,7 @@ def test_a_real_failure_is_still_a_failure():
     passing on a client that had stopped distinguishing anything at all."""
     client = FakeClient(fail="out of VRAM")
     with pytest.raises(RemoteUnavailable, match="out of VRAM"):
-        RemoteSynth(client, JOB).speak_segments(segs(1), "en", 0.5, 0.5, 0.8, None)
+        RemoteSynth(client, JOB).speak_segments(segs(1), "en", DIALS, None)
 
 
 def test_waiting_forever_is_bounded_and_the_job_is_withdrawn():
@@ -454,7 +474,7 @@ def test_waiting_forever_is_bounded_and_the_job_is_withdrawn():
     # "using it", not "using the machine": the same wait now serves the
     # processor rung, where nothing about a card is involved.
     with pytest.raises(RemoteYield, match="its owner is using it") as caught:
-        RemoteSynth(client, JOB).speak_segments(segs(2), "en", 0.5, 0.5, 0.8, None)
+        RemoteSynth(client, JOB).speak_segments(segs(2), "en", DIALS, None)
     assert client.cancelled == ["remote-job-1"]
     # Nothing was produced, so nothing has left this host and speaking it
     # locally is invisible to every client. _worker reads exactly this.
@@ -470,7 +490,7 @@ def test_giving_up_says_how_much_had_already_been_streamed():
     pieces: list[np.ndarray] = []
     with pytest.raises(RemoteYield) as caught:
         RemoteSynth(client, JOB).speak_segments(
-            segs(9), "en", 0.5, 0.5, 0.8, None, on_chunk=pieces.append)
+            segs(9), "en", DIALS, None, on_chunk=pieces.append)
 
     # Counted against what actually went out rather than against a fixed
     # number, because that IS the invariant: `delivered` is a promise about how
@@ -482,7 +502,7 @@ def test_giving_up_says_how_much_had_already_been_streamed():
 
 def test_cancelling_locally_withdraws_the_job_on_the_runner():
     client = FakeClient(segments=99)
-    RemoteSynth(client, JOB).speak_segments(segs(2), "en", 0.5, 0.5, 0.8, None,
+    RemoteSynth(client, JOB).speak_segments(segs(2), "en", DIALS, None,
                                             cancelled=lambda: True)
     assert client.cancelled == ["remote-job-1"]
 
@@ -570,19 +590,39 @@ def _wait(client, job_id: str, timeout: float = 30.0) -> dict:
 def runner(client, cpu=None):
     """Attach a fake runner to the running app for the length of one test.
 
-    Two clients now, because the runner sells two things over one host. `cpu` is
-    the processor rung; leaving it None is a machine that offers only its card,
-    which is what TTS_RUNNER_CPU_SERVICE="" configures.
+    TWO THINGS HAVE TO HAPPEN AND BOTH ARE THE POINT OF LANES.
+
+    The probe is primed by hand. Nothing asks a runner whether it is free on
+    the job's own thread any more -- that is what used to add a thirty second
+    socket timeout to a job that was always going to run here -- so a fake
+    attached after startup is invisible until the probe next runs. Calling it
+    once here is the test's stand-in for the ten seconds a real deployment
+    would take, and it is deliberately explicit: a test that forgets it gets a
+    local job and a very clear reason why.
+
+    The hop is set to zero. Every test below is about the remote PROTOCOL --
+    idempotency keys, artefact ordering, what a yield does -- and not about
+    routing. With the real 8 s handover charged against it, "One short line" is
+    a second of speech and belongs on this host by any honest arithmetic, so
+    leaving the hop in would silently turn each of these into a test that the
+    runner is never used. Routing is asserted in test_dispatch.py, where it can
+    be read.
     """
     import app.main as main
 
     main.state["runner"] = client
     main.state["runner_cpu"] = cpu
+    lane = main.dispatch.lanes["runner"]
+    hop = lane.hop
+    lane.hop = 0.0
+    lane.probe.once()
     try:
         yield main
     finally:
         main.state["runner"] = None
         main.state["runner_cpu"] = None
+        lane.hop = hop
+        lane.probe.once()
 
 
 def test_the_runner_is_keyed_to_the_local_job_id_when_a_real_job_runs(speech):
@@ -767,7 +807,7 @@ def test_a_long_job_on_a_busy_runner_is_never_charged_for_working():
     client.cfg = RunnerConfig(host="runner.invalid", service="chatterbox",
                               poll=0.0, max_wait=0.0)
     spoken = RemoteSynth(client, JOB).speak_segments(
-        segs(6), "en", 0.5, 0.5, 0.8, None)
+        segs(6), "en", DIALS, None)
 
     assert spoken.audio.size == 6 * (SAMPLE_RATE // 10), \
         "a running runner was charged for running and the job was abandoned"
@@ -786,7 +826,7 @@ def test_only_the_time_the_owner_has_the_machine_counts_towards_the_bound():
                               poll=0.0, max_wait=0.0)
     with pytest.raises(RemoteYield) as raised:
         RemoteSynth(client, JOB).speak_segments(
-            segs(4), "en", 0.5, 0.5, 0.8, None)
+            segs(4), "en", DIALS, None)
 
     assert raised.value.delivered == 2, "the segments already made were forgotten"
     assert client.cancelled == ["remote-job-1"], \
@@ -806,7 +846,7 @@ def test_a_job_queued_before_it_ever_ran_says_so():
     client = FakeClient(segments=2, yield_after=0, yield_polls=2)
     seen: list[bool] = []
     spoken = RemoteSynth(client, JOB, on_wait=seen.append).speak_segments(
-        segs(2), "en", 0.5, 0.5, 0.8, None)
+        segs(2), "en", DIALS, None)
 
     assert seen == [True, False], \
         "expected queued-then-running with nothing delivered yet, got " + repr(seen)
@@ -966,211 +1006,46 @@ def test_an_older_runner_reports_no_limits_rather_than_zero_ones():
     assert snap["memory"] is None
 
 
-# ------------------------------------------------- the third rung ------------
+# ------------------------------------------- the rung that was never reached --
 #
-# ONE MACHINE, TWO OFFERS. The runner sells its card and its processor as two
-# service ids over one host, and they are not the same question: a game takes
-# the card and leaves twelve threads idle, a compile takes every thread and
-# leaves the card at five per cent. Everything below is about the chooser
-# getting that right, and about the two ways it could quietly get it wrong --
-# walking past idle threads, and handing a job to a machine that is giving away
-# five per cent of itself.
-
-
-def _cpu_client(pct=100, ready=True, why="", service="chatterbox-cpu"):
-    """A processor rung offering `pct` of its machine."""
-    c = FakeClient(cfg=RunnerConfig(host="runner.invalid", service=service, poll=0.0))
-    c.device = "cpu"
-    c.cpu_pct = pct
-    c.state = (ready, why)
-    return c
+# THE PROCESSOR RUNG IS GONE AND THIS IS THE RECORD OF WHY, because deleting a
+# feature quietly is how it gets reinvented.
+#
+# The runner sold its card and its processor as two service ids over one host,
+# and the chooser had a whole arithmetic for the second: read the published
+# cap, derate the measured rate by it, compare against the local backlog. Eight
+# tests covered it and all eight passed. NOT ONE OF THEM COULD HAVE FAILED IN
+# PRODUCTION, because the rung had never run a single job and could not:
+#
+#   * the server sets TTS_RUNNER_CPU_SERVICE=chatterbox-cpu and the runner
+#     registers exactly two services, `echo` and `chatterbox`. Every offer was
+#     `no_such_service`;
+#   * and the rung sat BELOW `local` in the shipped order, while `local` is a
+#     rung that is always willing -- so nothing below it was ever asked.
+#
+# The arithmetic refuses it anyway at the measured rates: 300 s of speech is
+# 1250 s on the runner's processor against 1304 s here, and 1250 x 1.25 is more
+# than 1304. It is not a special case any more; it is a lane that would lose.
+# The two-lane chooser is asserted in tests/test_dispatch.py instead.
 
 
 def _spoken(chars=400):
-    """A job the size of a real one, because the cap arithmetic is about size."""
+    """A job the size of a real one, because the arithmetic is about size."""
     return {"id": "abc123", "segments": [("x" * chars, 0.0)]}
 
 
-def test_a_game_on_the_card_does_not_walk_past_twelve_idle_threads(speech,
-                                                                   monkeypatch):
-    """THE DEFECT THIS PREVENTS, and it is the reason the rung exists at all.
+def test_the_processor_rung_is_not_a_lane_and_naming_it_does_not_make_one(speech):
+    """THE DEFECT THIS PREVENTS: a configuration knob that silently does
+    nothing.
 
-    Somebody starts a game. The card goes, and sixteen threads on the same
-    machine do not. A chooser that reads one answer for the whole runner falls
-    back to a machine across the LAN for work the runner was about to do, at the
-    precise moment the runner is most willing to do it.
+    TTS_BACKEND_ORDER used to be a ladder and `runner_cpu` was a rung on it.
+    Somebody who still has it in their environment must not be left believing
+    a third machine is in play.
     """
     import app.main as main
 
-    monkeypatch.setattr(main, "BACKEND_ORDER", ("runner", "runner_cpu", "local"))
-    gpu = FakeClient()
-    gpu.state = (False, "machine_busy: a game is running")
-    with runner(gpu, cpu=_cpu_client(pct=100)):
-        job = _spoken()
-        chosen = main._backend_for(job)
-
-    assert job["backend"] == "runner_cpu", job.get("fell_back_reason")
-    assert chosen is not main.state["synth"]
-    assert job["runner_service"] == "chatterbox-cpu"
-    # The card's refusal is still on the record. A job that ended up on the
-    # processor because a game was running reads differently from one that
-    # ended up there because the card was never installed.
-    assert "runner: machine_busy" in job["fell_back_reason"]
-
-
-def test_a_cap_that_makes_the_runner_slower_than_here_is_not_taken(speech,
-                                                                  monkeypatch):
-    """THE DEFECT THIS PREVENTS: routing on the boolean instead of the cap.
-
-    `available: true` while the runner is giving a hundred per cent of a sixteen
-    thread machine and `available: true` while it is giving ten are the same
-    field and a ten to one difference in delivered speech. A ten minute job sent
-    to the second one takes over an hour, on somebody's desktop, while they are
-    sitting at it -- and nothing anywhere reports a fault.
-    """
-    import app.main as main
-
-    monkeypatch.setattr(main, "BACKEND_ORDER", ("runner_cpu", "local"))
-    with runner(None, cpu=_cpu_client(pct=10)):
-        job = _spoken()
-        chosen = main._backend_for(job)
-
-    assert chosen is main.state["synth"]
-    assert job["backend"] == "local"
-    assert "10%" in job["fell_back_reason"], job["fell_back_reason"]
-
-
-def test_an_unknown_cap_is_a_refusal_and_never_a_hundred_per_cent(speech,
-                                                                  monkeypatch):
-    """THE ONE PLACE THIS FILE FAILS CLOSED ON A MISSING FIELD.
-
-    Everywhere else a runner that does not publish something gets the benefit of
-    the doubt, because the cost of being wrong is a fallback to a CPU that
-    works. Here the cost is a job going slowly on a machine nobody is watching,
-    which is the failure that does not announce itself. A runner that will not
-    say how much of its processor it is selling does not get the job.
-    """
-    import app.main as main
-
-    monkeypatch.setattr(main, "BACKEND_ORDER", ("runner_cpu", "local"))
-    with runner(None, cpu=_cpu_client(pct=None)):
-        job = _spoken()
-        assert main._backend_for(job) is main.state["synth"]
-
-    assert job["backend"] == "local"
-    assert "how much" in job["fell_back_reason"]
-
-
-def test_a_queue_here_is_what_earns_the_processor_rung_its_first_job(speech,
-                                                                     monkeypatch):
-    """THE SELF-FULFILLING REFUSAL, and the only escape from it.
-
-    The runner's processor is measured at 0.24x against this host's 0.23x, so on
-    an idle stack there is no reason to send it anything and the default order
-    puts it below a local backend that is always willing -- which makes it
-    unreachable, so it is never measured, so its seed is permanent.
-
-    A queue is what changes the arithmetic: 0.24x starting now beats 0.23x
-    starting four minutes from now. This is the one rule that gets the third
-    backend its first observation, and without it `backend_observations` would
-    read zero for ever.
-    """
-    import app.main as main
-
-    monkeypatch.setattr(main, "BACKEND_ORDER", ("runner", "local", "runner_cpu"))
-    monkeypatch.setattr(main, "RUNNER_CPU_WHEN_BACKLOG_S", 120.0)
-
-    with runner(None, cpu=_cpu_client(pct=100)):
-        quiet = _spoken()
-        assert main._backend_for(quiet) is main.state["synth"], \
-            "a rung below an always-willing floor must be unreachable while quiet"
-        assert quiet["backend"] == "local"
-
-        # A queue in front of it: several minutes of accepted work.
-        main.jobs["queued-1"] = {"id": "queued-1", "status": "queued",
-                                 "segments": [("y" * 20000, 0.0)]}
-        try:
-            assert main._backlog_seconds() > 120
-            busy = _spoken()
-            main._backend_for(busy)
-        finally:
-            main.jobs.pop("queued-1", None)
-
-    assert busy["backend"] == "runner_cpu", busy.get("fell_back_reason")
-
-
-def test_a_yield_off_the_card_steps_to_the_processor_beside_it(speech,
-                                                              monkeypatch):
-    """THE DEFECT THIS PREVENTS: a ladder with its bottom rung hard coded.
-
-    The fallback used to be one line -- `job["backend"] = "local"` and run here
-    -- because this host was the only other place there was. With three places
-    that can skip the machine that just said no to its card and yes to its
-    threads, which is the same machine, one service along, with the model
-    already on its disk.
-
-    The order is set here rather than left at the default, and that is the
-    point of the setting: the SHIPPED order puts this host between the two
-    rungs, because the runner's processor is measured at about the same rate as
-    this host and is across a network. An operator who wants the machine's own
-    threads tried first says so, and the ladder must then actually go there.
-    """
-    import app.main as main
-
-    monkeypatch.setattr(main, "BACKEND_ORDER", ("runner", "runner_cpu", "local"))
-    gpu = FakeClient(cfg=RunnerConfig(host="h", max_wait=0.0, poll=0.0), segments=99)
-    gpu.job = lambda job_id: {"status": "queued", "artefacts": []}
-    cpu = _cpu_client(pct=100)
-
-    with runner(gpu, cpu=cpu):
-        created = speech.post("/jobs", json={"text": "One short line.",
-                                             "voice": "default"}).json()
-        finished = _wait(speech, created["id"])
-
-    assert finished["status"] == "done", finished.get("error")
-    assert finished["backend"] == "runner_cpu", "it jumped past the processor"
-    # WHERE IT CAME FROM, which `fell_back` alone cannot say once there is more
-    # than one place to fall back from.
-    assert finished["fell_back_from"] == "runner"
-    assert cpu.submitted, "the processor rung was never asked to do anything"
-
-
-def test_segments_from_two_rungs_are_added_up_and_not_overwritten(speech,
-                                                                 monkeypatch):
-    """THE DEFECT THIS PREVENTS is a record that under-reports what was done.
-
-    `segments_from_runner` was assigned, which was right while a job could leave
-    exactly one machine. A job that has segments spoken on the card and more on
-    the processor before ending up here would report only the second lot, and
-    that number is the only evidence of how much work a yield actually cost.
-    """
-    import app.main as main
-
-    monkeypatch.setattr(main, "BACKEND_ORDER", ("runner", "runner_cpu", "local"))
-
-    def stalls_after_one(host, service):
-        # One segment delivered, then the owner comes back and never leaves.
-        c = FakeClient(cfg=RunnerConfig(host=host, service=service,
-                                        max_wait=0.0, poll=0.0),
-                       segments=2, yield_after=1)
-        return c
-
-    gpu = stalls_after_one("h", "chatterbox")
-    cpu = stalls_after_one("h", "chatterbox-cpu")
-    cpu.device, cpu.cpu_pct = "cpu", 100
-
-    with runner(gpu, cpu=cpu):
-        created = speech.post("/jobs", json={"text": "One short line.",
-                                             "voice": "default"}).json()
-        finished = _wait(speech, created["id"])
-
-    assert finished["status"] == "done", finished.get("error")
-    assert finished["backend"] == "local", "the floor is still the floor"
-    assert finished["fell_back_from"] == "runner, runner_cpu"
-    assert finished["segments_from_runner"] == 2, (
-        "each rung delivered one segment before handing the job back; a record "
-        "that says " + repr(finished["segments_from_runner"]) + " has kept only "
-        "the last of them")
+    assert "runner_cpu" not in main.dispatch.lanes
+    assert set(main.dispatch.lanes) <= {"local", "runner"}
 
 
 def test_the_processors_rate_never_enters_the_cards_average_or_this_hosts(speech):
@@ -1278,27 +1153,176 @@ def test_a_runner_that_publishes_no_limits_gives_a_cap_of_none_not_zero():
     assert offer.cpu_pct is None
 
 
-def test_a_runner_that_sells_only_its_card_is_not_a_misconfiguration(speech,
-                                                                     caplog,
-                                                                     monkeypatch):
-    """THE DEFECT THIS PREVENTS: a warning per job that trains people to ignore
-    the log.
 
-    A machine whose owner installed the speech service for the card and not for
-    the processor is an ordinary configuration and a deliberate one. Telling
-    them once a job to run `idlegpu service install` is noise, and it is the
-    same message that means something real when the CARD is missing, so it
-    devalues both.
+# ------------------------------------------- two engines on one machine -----
+#
+# The runner sells one card and now carries two speech services on it. "Is the
+# runner free" stopped being a question with one answer, and every test below
+# is a way that could have gone unnoticed.
+
+
+TURBO = "chatterbox-turbo"
+
+
+def _two_services(*, turbo=None, baseline=None):
+    """A /v1/services document with both speech services on it.
+
+    Passing None for either leaves it OUT of the document entirely, which is
+    what a runner whose worker.ini has no such section really answers -- and is
+    exactly the state `chatterbox-cpu` was in for its whole life.
+    """
+    services = []
+    if baseline is not None:
+        services.append({"id": "chatterbox", "device": "gpu", **baseline})
+    if turbo is not None:
+        services.append({"id": TURBO, "device": "gpu", **turbo})
+    return {"gpu_available": True, "services": services}
+
+
+READY = {"installed": True, "enabled": True, "available": True}
+
+
+def test_offer_reports_every_service_not_only_ours():
+    """THE DEFECT THIS PREVENTS IS HOW `chatterbox-cpu` DIED.
+
+    It was configured server-side, never registered on the runner, and because
+    the loop `continue`d past every service but its own, `offer()` was never
+    called for it and `no_such_service` never fired. THE DETECTOR EXISTED AND
+    NOTHING RAN IT. Asking about the second service is the same HTTP request.
+    """
+    offer = _client_answering(_two_services(
+        baseline=READY,
+        turbo={"installed": False, "enabled": True})).offer()
+    # UNCHANGED for the service this client is pinned to: every existing caller
+    # reads `ready` and `why` and must keep getting the same two answers.
+    assert (offer.ready, offer.why) == (True, "")
+    assert offer.state_for("chatterbox") == (True, "")
+    assert offer.state_for(TURBO) == (False, "not_installed")
+    # A service the runner does not list at all is the sentence that will never
+    # clear on its own, not a shrug.
+    assert offer.state_for("nothing-like-this") == (False, "no_such_service")
+
+
+def test_a_missing_turbo_service_does_not_shut_the_lane_for_baseline(speech):
+    """One card, two services, and they fail independently.
+
+    A turbo service that was never installed must not take the card away from
+    baseline, which is installed, enabled and idle. Shutting the whole lane
+    would be this side inventing an outage for an engine baseline never needed.
     """
     import app.main as main
 
-    monkeypatch.setattr(main, "BACKEND_ORDER", ("runner_cpu", "local"))
-    absent = _cpu_client(ready=False, why="no_such_service")
-    with runner(None, cpu=absent):
-        with caplog.at_level("INFO"):
-            job = _spoken()
-            assert main._backend_for(job) is main.state["synth"]
+    client = _client_answering(_two_services(baseline=READY))
+    main.state["runner"] = client
+    probe = main.dispatch.lanes["runner"].probe
+    try:
+        probe.once()
+        assert probe.ok() is True, "the lane shut for a service it does not need"
+        assert probe.ok_for("chatterbox") is True
+        assert probe.ok_for(TURBO) is False
+        assert probe.why_for(TURBO) == "no_such_service"
+    finally:
+        main.state["runner"] = None
 
-    assert not [r for r in caplog.records if r.levelname == "WARNING"]
-    assert any("TTS_RUNNER_CPU_SERVICE" in r.getMessage() for r in caplog.records), \
-        "the log did not say how to switch the rung off"
+
+def test_a_manifest_id_mismatch_shuts_that_engine_only():
+    """THE SINGLE MOST LIKELY COPY-PASTE IN THE WHOLE EXERCISE, and the only one
+    whose output is WRONG rather than absent.
+
+    `Install.Json` writes the outer id from the INI section and splices the
+    controller's own manifest underneath it verbatim. Nothing reconciles the
+    two, so a turbo controller copied from the baseline one with `"id":
+    "chatterbox"` left in publishes a turbo service that produces BASELINE
+    AUDIO FROM A TURBO REQUEST, silently.
+    """
+    offer = _client_answering(_two_services(
+        baseline=READY,
+        turbo={**READY, "manifest": {"id": "chatterbox"}})).offer()
+    assert offer.state_for("chatterbox") == (True, "")
+    assert offer.state_for(TURBO) == (False, "manifest_mismatch")
+
+
+def test_an_older_agent_publishing_no_manifest_is_not_refused():
+    """ABSENT IS SKIPPED, NEVER FAILED. Refusing a runner for not carrying a
+    field it predates would be this side manufacturing an outage."""
+    assert _client_answering(_two_services(
+        turbo={**READY})).offer().state_for(TURBO) == (True, "")
+    assert _client_answering(_two_services(
+        turbo={**READY, "manifest": {}})).offer().state_for(TURBO) == (True, "")
+    assert _client_answering(_two_services(
+        turbo={**READY, "manifest": {"id": TURBO}})).offer().state_for(TURBO) \
+        == (True, "")
+
+
+def test_the_runners_own_words_reach_the_row_per_engine():
+    """NEVER FLATTENED. "another service holds the card" and "somebody is at the
+    keyboard" have to arrive as different sentences, or turbo starving baseline
+    off the card is indistinguishable from a week of gaming."""
+    offer = _client_answering(_two_services(
+        baseline={"installed": True, "enabled": True, "available": False,
+                  "unavailable_reason": "chatterbox-turbo holds the card"},
+        turbo=READY)).offer()
+    ready, why = offer.state_for("chatterbox")
+    assert ready is False
+    assert "holds the card" in why
+    assert offer.state_for(TURBO) == (True, "")
+
+
+def test_turbo_params_omit_language_exaggeration_and_cfg_weight():
+    """ABSENT, NOT NULL, and the difference is the whole house rule on the wire.
+
+    `{"exaggeration": null}` is a VALUE to a controller that reads the key and
+    passes it on: turbo's generate() accepts it, logs a warning nobody sees and
+    discards it. `language` is worse -- turbo's generate() has no language_id
+    at all and raises TypeError, so sending it fails the job on the runner.
+    """
+    from app.engines import ENGINES
+
+    fake = FakeClient(segments=1)
+    RemoteSynth(fake, JOB, spec=ENGINES["chatterbox"]).speak_segments(
+        segs(1), "en",
+        {"exaggeration": 0.3, "cfg_weight": 0.3, "temperature": 0.6})
+    baseline, _ = fake.submitted[-1]
+    assert baseline["language"] == "en"
+    assert baseline["exaggeration"] == 0.3 and baseline["cfg_weight"] == 0.3
+
+    # And with turbo enabled, the same call sends three fewer keys.
+    import os
+
+    os.environ["TTS_ENGINES"] = "chatterbox,chatterbox-turbo"
+    try:
+        import importlib
+
+        import app.engines as engines_module
+        importlib.reload(engines_module)
+        turbo_spec = engines_module.ENGINES[TURBO]
+    finally:
+        del os.environ["TTS_ENGINES"]
+
+    fake = FakeClient(segments=1)
+    RemoteSynth(fake, JOB, spec=turbo_spec).speak_segments(
+        segs(1), "en",
+        {"exaggeration": 0.3, "cfg_weight": 0.3, "temperature": 0.6})
+    params, _ = fake.submitted[-1]
+    assert "language" not in params, "turbo's generate() raises TypeError on it"
+    assert "exaggeration" not in params, "accepted, logged and discarded"
+    assert "cfg_weight" not in params, "accepted, logged and discarded"
+    assert params["temperature"] == 0.6, "a control turbo DOES read was dropped"
+    assert params["segments"] == ["segment 0"]
+
+
+def test_a_synth_with_no_spec_sends_exactly_what_it_always_did():
+    """The engine that existed before there were two, byte for byte.
+
+    Every deployment that has not enabled a second engine, every older caller
+    and every other test in this file goes down this path, so a change here
+    would be a wire change nobody asked for.
+    """
+    fake = FakeClient(segments=1)
+    RemoteSynth(fake, JOB).speak_segments(segs(1), "fr",
+        {"exaggeration": 0.4, "cfg_weight": 0.5, "temperature": 0.7})
+    params, _ = fake.submitted[-1]
+    assert params["language"] == "fr"
+    assert params["exaggeration"] == 0.4
+    assert params["cfg_weight"] == 0.5
+    assert params["temperature"] == 0.7

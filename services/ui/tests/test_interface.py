@@ -313,9 +313,17 @@ def test_a_progress_bar_moves_a_transform_and_not_a_width():
     leaves a bar frozen at zero with no error anywhere. width also animated
     layout on a two-second timer, and its transition was dead code besides:
     renderJobs reassigns #joblist.innerHTML, so a transition on an element
-    created this tick never fires."""
+    created this tick never fires.
+
+    THE COUNT IS ALSO A CEILING, and that half is new. The jobs tab lists
+    instant speech and transcriptions now, and both are terminal by
+    construction -- an imported record has already finished, so there is
+    nothing left for a bar to be a fraction of. A third bar here would be one
+    drawn at 100% the moment its row appeared, which teaches a reader to
+    distrust the two that mean something."""
     assert HTML.count('class="bar-fill" style="transform:scaleX(') == 2, (
-        "one of the two progress bars still writes a width")
+        "one of the two progress bars still writes a width, "
+        "or a finished row has grown a bar of its own")
     assert 'class="bar-fill" style="width:' not in HTML
     fill = rule(".bar-fill{")
     assert "transform-origin:left" in fill and "width:100%" in fill
@@ -745,14 +753,38 @@ def test_every_rate_on_this_page_is_one_that_was_measured():
     # describes no machine that exists, so the rate the rule reads is keyed on
     # the backend the next job will actually run on.
     assert "realtime_factor_by_backend" in HTML
-    assert "function cloneBackend()" in HTML
-    assert 'r.service === "chatterbox"' in HTML
+    assert "function cloneBackend(engine)" in HTML
+    # AND IT IS KEYED PER ENGINE AS WELL AS PER LANE, because one lane running
+    # two engines 2.36x apart has two rates and an average of them describes
+    # neither. The lane-only map is still read, for a tts-long that publishes
+    # only that one.
+    assert "realtime_factor_by_engine" in HTML
     # A backend with no key has never been measured, and that is a state rather
     # than a zero: the live payload carries {"local": 0.21} and no "runner" key
     # at all while the runner sits there able to run.
-    body = HTML[HTML.index("function cloneRate()"):]
+    body = HTML[HTML.index("function cloneRate(engine)"):]
     body = body[:body.index("\n}\n")]
     assert "f > 0 ? f : null" in body, "an unmeasured backend gets a default number"
+
+
+def test_the_lane_is_never_decided_by_a_service_id_this_file_spells():
+    """`r.service === "chatterbox"` was the fourth model table on this stack.
+
+    It failed in the worst direction. An unrecognised runner service id -- a
+    deployment that named it chatterbox-gpu, or the second engine's own service
+    -- read as "local", so the page showed the NAS rate for a job about to run
+    on the card: confidently, with no sign anything had been assumed, on the
+    number every Chatterbox estimate here is divided by.
+
+    The engine block answers it per engine now, because with two engines the
+    runner can serve one and not the other; without that block there is one
+    engine and the runner's own can_run is the whole answer.
+    """
+    body = bare(HTML[HTML.index("function cloneBackend(engine)"):])
+    body = body[:body.index("\n}\n")]
+    assert '"chatterbox"' not in body, "a service id is spelled in the page again"
+    assert "spec.runner" in body, "the per-engine readiness is not read"
+    assert "r.can_run" in body, "the one-engine deployment lost its answer"
 
 
 def test_the_two_engines_do_not_share_one_speech_rate():
@@ -1023,9 +1055,15 @@ def test_streaming_is_the_default_when_the_arithmetic_allows_it():
     # An explicit choice survives. dataset.touched is set by the change
     # handlers, and streamDefaults returns early when either is set.
     assert 'route.dataset.touched === "1" || stream.dataset.touched === "1"' in HTML
-    # speechPlan is the gate, not a guess, and a clone never streams: at 0.23x
-    # realtime Chatterbox needs more lead than the audio is long.
-    assert 'currentVoice().kind !== "clone"' in HTML
+    # speechPlan is the gate, not a guess, and NOTHING THAT QUEUES ever
+    # streams: at 0.23x Chatterbox needs more lead than the audio is long, and
+    # the engine below it is four times slower again. This tested for a clone,
+    # which was the same question only while a clone was the only job -- a
+    # preset voice fell through and was planned against Kokoro's 2.79x, so the
+    # route was set to /v1 and the stream to sse for a request about to be
+    # posted to /jobs.
+    assert "&& !isJob()" in HTML, \
+        "the stream default asks what kind of voice it is rather than where it runs"
     assert 'speechPlan("kokoro", text).mode === "audio"' in HTML
 
 

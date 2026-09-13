@@ -139,10 +139,22 @@ def test_the_job_audio_is_fetched_with_the_key_and_not_put_in_a_src():
 
     Pointing the element straight at the route is a 401 on any deployment with
     GATEWAY_API_KEYS set, which is the deployment this is for.
+
+    THE SLICE STARTS AT playBlob NOW, and that is the change rather than a
+    widening. There are two sources for this one player: a stored job's audio,
+    fetched from the route, and an instant run said again, which arrives as the
+    body of the POST that made it because nothing on that path keeps a file.
+    Both end in playBlob so that the previous object URL is revoked exactly
+    once -- two copies of that leak a blob per press, and on this tab a blob is
+    megabytes. The rule under test is unchanged: the element is given a blob,
+    never the route.
     """
-    play = body_of("async function playJob(", "\n$(\"jobclose\")")
+    play = body_of("function playBlob(blob, label)", "\n$(\"jobclose\")")
     assert "await api(" in play, "the job audio is not fetched through api()"
     assert "URL.createObjectURL" in play
+    assert "URL.revokeObjectURL" in play, "the previous blob is never released"
+    assert 'src = `/jobs' not in HTML and 'src="/jobs' not in HTML, \
+        "the player is pointed at a route that needs a header it cannot send"
 
 
 # ------------------------------------------------------- where cues come --
@@ -699,7 +711,21 @@ def test_a_mismatched_offset_count_is_ignored_rather_than_guessed():
     # The jobs tab counts what it was given and interpolates nothing between.
     rows = code(body_of("function renderJobs()", "let jobUrl = null;"))
     assert "job.offsets.length" in rows, "the live boundaries are not read"
-    assert "chars" not in rows, "a character-count estimate is back on the row"
+    # THE BAN NARROWED, AND ONLY BECAUSE THE WORD ACQUIRED A SECOND MEANING.
+    # It used to be `"chars" not in rows`, which worked while the only thing
+    # `chars` could be on this tab was the old duration x (chars so far / chars
+    # total) estimate. A transcription record REPORTS `chars` -- the number of
+    # characters in the transcript, measured after the fact, printed beside the
+    # audio seconds and the realtime factor -- and a reported measurement is
+    # the opposite of an interpolated one. What stays banned is the arithmetic:
+    # a character count must never be divided into or by anything to guess how
+    # far along a live job is.
+    assert "/ job.chars" not in rows and "job.chars /" not in rows, \
+        "a character-count estimate is back on the row"
+    assert "chars_total" not in rows and "charsDone" not in rows, \
+        "a character-count estimate is back on the row under another name"
+    # And the bar is still driven by boundaries the synthesiser measured.
+    assert "Math.min(95, madeCount / job.chunks * 100)" in rows
 
 
 # ================================================ subtitles as transcript ==
@@ -1181,8 +1207,12 @@ def test_the_clone_path_does_not_stream():
     flat = re.sub(r"\s+", " ", code(body))
     assert 'model:"chatterbox"' not in flat, "a clone reaches the streaming path again"
     assert 'model:"kokoro"' in flat, "the Kokoro path went with it"
-    # The clone branch posts a job instead, which is the whole difference.
-    assert 'if (voice.kind === "clone") await queueJob(voice.name, text);' in HTML
+    # ANYTHING THAT QUEUES posts a job instead, which is the whole difference.
+    # The test is where it runs and not what the voice is: a preset voice is
+    # not a clone, it is four times slower again than Chatterbox on the CPU,
+    # and under the old test it went to speakNow -- a synchronous /speak
+    # against Kokoro carrying a voice name Kokoro has never heard of.
+    assert 'if (isJob(voice)) await queueJob(voice.name, text);' in HTML
 
 
 def test_a_stream_that_dies_half_way_still_hands_over_what_it_made():
@@ -1523,8 +1553,14 @@ def test_a_clone_has_no_listen_button():
     the page. Two buttons doing the same thing under different names would be a
     promise this backend cannot keep."""
     est = code(body_of("function estimate()", "\n/* The nearest instant voice"))
-    assert '$("go-tts").hidden = voice.kind === "clone";' in est
-    assert '$("go-tts-quiet").classList.toggle("primary", voice.kind === "clone");' in est
+    # ON WHERE IT RUNS, NOT ON WHAT THE VOICE IS. A preset voice is not a clone
+    # and it is not instant either: under `kind === "clone"` it kept "Generate
+    # & listen" -- an offer to play a stream that will not exist for three and
+    # a half minutes -- and skipped the ETA that says so.
+    assert '$("go-tts").hidden = job;' in est
+    assert '$("go-tts-quiet").classList.toggle("primary", job);' in est
+    assert "const job = isJob(voice);" in est, \
+        "the two buttons decide from the voice's kind again"
 
 
 def test_the_quiet_press_still_gets_a_bar_in_the_press_frame():

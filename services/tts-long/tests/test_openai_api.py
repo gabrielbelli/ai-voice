@@ -241,7 +241,7 @@ def test_the_synchronous_boundary_accounts_for_the_queue(speech, monkeypatch):
     from app import main
 
     monkeypatch.setattr(main, "SYNC_TIMEOUT", 1.0)
-    monkeypatch.setattr(main, "_backlog_seconds", lambda: 1000.0)
+    monkeypatch.setattr(main, "_pending_work", lambda: 1000.0)
     response = speech.post("/v1/audio/speech",
                            json={"input": "Two words.", "response_format": "pcm"})
     assert response.status_code == 202

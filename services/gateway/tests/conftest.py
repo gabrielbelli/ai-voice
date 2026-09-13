@@ -120,8 +120,15 @@ class Router(httpx.AsyncBaseTransport):
         return await target.handle_async_request(request)
 
 
-def reload_gateway(monkeypatch, *, api_keys: str | None = None):
-    """Import a fresh copy of the app under the given environment."""
+def reload_gateway(monkeypatch, *, api_keys: str | None = None,
+                   long_models: str | None = None):
+    """Import a fresh copy of the app under the given environment.
+
+    `long_models` is GATEWAY_LONG_MODELS, and it is DELETED rather than left
+    alone when unset. The set decides both which names route long and which
+    names GET /v1/models advertises, so a value inherited from the shell that
+    ran pytest would silently change what half these tests assert.
+    """
     monkeypatch.setenv("GATEWAY_STT_URL", STT_URL)
     monkeypatch.setenv("GATEWAY_TTS_URL", TTS_URL)
     monkeypatch.setenv("GATEWAY_TTS_LONG_URL", LONG_URL)
@@ -129,14 +136,20 @@ def reload_gateway(monkeypatch, *, api_keys: str | None = None):
         monkeypatch.delenv("GATEWAY_API_KEYS", raising=False)
     else:
         monkeypatch.setenv("GATEWAY_API_KEYS", api_keys)
+    if long_models is None:
+        monkeypatch.delenv("GATEWAY_LONG_MODELS", raising=False)
+    else:
+        monkeypatch.setenv("GATEWAY_LONG_MODELS", long_models)
     return importlib.reload(importlib.import_module("app.main"))
 
 
 @asynccontextmanager
 async def gateway(monkeypatch, *, stt=None, tts=None, long=None,
-                  api_keys: str | None = None):
+                  api_keys: str | None = None,
+                  long_models: str | None = None):
     """A client speaking to the real app, which speaks to the mock backends."""
-    main = reload_gateway(monkeypatch, api_keys=api_keys)
+    main = reload_gateway(monkeypatch, api_keys=api_keys,
+                          long_models=long_models)
     router = Router({"stt.test": stt or MockBackend("stt-stack"),
                      "tts.test": tts or MockBackend("tts-stack"),
                      "long.test": long or MockBackend("tts-long")})

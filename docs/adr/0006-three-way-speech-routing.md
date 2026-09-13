@@ -1,6 +1,6 @@
 # ADR 0006 — Long-form speech is routed between three machines, on the cap the runner publishes rather than on a boolean
 
-**Status:** accepted
+**Status:** superseded by [ADR 0007](0007-two-lanes-not-three-rungs.md)
 **Date:** 2026-09-06
 
 ## Decision

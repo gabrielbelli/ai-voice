@@ -316,9 +316,66 @@ layer.
 
 So "use my own voice" is: record or drop a clip, the browser transcodes it to
 24 kHz mono WAV, this service writes it into a volume shared with tts-long, and
-the voice is selectable. In the picker it is one more row — the user never
-chooses between Kokoro and Chatterbox, because **picking the voice picks the
-engine**, and each row carries its own speed tag.
+the voice is selectable. In the picker it is one more row, and each row carries
+its own speed tag.
+
+**Picking the voice picks the *backend*. Whether it also picks the engine
+depends on what kind of voice it is**, and that is the distinction the picker is
+built on:
+
+* **A clip does not carry an engine.** `gabriel.wav` is read by `chatterbox` and
+  by `chatterbox-turbo` equally, so putting the engine on the voice list would
+  double every row and mean registering a second clip to change one parameter.
+  For a clip the engine is a **request field**, and it belongs with the request
+  controls.
+* **A preset voice does carry one.** `bm_george` is a Kokoro voice and nothing
+  else; `pt_male` is a tensor inside the `voxtral` checkpoint — an engine this
+  deployment has **retired**, kept here as the example because it is the one
+  that makes the distinction visible. There is nothing to choose: the voice
+  *is* the engine, and the same name in another engine's list would be a
+  different thing entirely.
+
+So an option's value is `engine:name` — `kokoro:bm_george`, `chatterbox:gabriel`,
+`voxtral:pt_male` — and every group in the picker is one engine's voices. The
+older one-letter `k:` and `c:` values still parse, so a selection remembered from
+before the change survives the deploy.
+
+**This deployment offers no long-form preset voices**, because `voxtral` is
+retired from it —
+[ADR 0010](../../docs/adr/0010-the-third-engine-was-measured-and-retired.md).
+The `voxtral:` rows above are what a deployment that enables it gets; the page
+needs no edit either way, because the groups come from `/health.engines`.
+
+**What decides the button, the estimate and the missing Listen is where a job
+runs and how long it takes, never where its voice came from.** Those are separate
+questions and the page had been answering them with the same test. Voxtral was
+what made the difference visible: a *preset* voice like Kokoro's and a
+*three-minute job* like Chatterbox's, so any gate that reads "preset means
+instant" gets both wrong at once. **The separation stays now that it is
+retired.** Re-joining the two questions because every preset voice on this
+deployment happens to be an instant one again is how the page would be wrong
+the day a preset engine comes back.
+
+The rules the picker has to keep are in
+[ADR 0008](../../docs/adr/0008-two-engines-and-both-stay-jobs.md) and
+[ADR 0009](../../docs/adr/0009-a-third-engine-that-cannot-run-here.md), and one
+of them is worth repeating here: **an engine that is enabled but unavailable is
+shown disabled with the reason on the line, never hidden** — a group renders
+greyed out with the runner's own reason in its labels. Hiding a control the
+reader could have had is how the deleted `chatterbox-cpu` rung stayed invisible
+for its whole life.
+
+**An engine a deployment has not enabled is a different case and is absent, not
+greyed out.** It is not something the reader could have had by waiting: it is
+not on `/health.engines` at all, and a disabled row for it would invite a
+request the gateway answers 404. Both engines on this deployment run on the
+container's own processor, so neither can be unavailable for want of a gaming
+PC.
+
+**No engine id is written as a string anywhere in the page.** The groups, the
+languages each voice speaks, the controls each engine takes and the rate each one
+runs at all come from `/health.engines`, which is why a fourth engine is a
+catalogue row and not an edit here. The page holds no voice list of its own.
 
 Two changes elsewhere made that possible:
 
@@ -689,6 +746,44 @@ Chatterbox: `exaggeration`, `cfg_weight` and `temperature`, each labelled
 values is exactly the state people get lost in. Resemble's demo offers
 exaggeration 0.25–2.0; our backend validates `ge=0.0, le=1.0`, so those ranges
 are reconciled rather than copied.
+
+**Those three sliders belong to the `chatterbox` engine, not to tts-long.**
+`chatterbox-turbo` has no expressive conditioning of any kind — its
+`hp.emotion_adv` is `False`, so the layer is never built, and it has no
+classifier-free-guidance path — and the backend answers **400** rather than
+accepting the values and dropping them. So the panel renders a slider only when
+the selected engine declares that control, and when turbo is selected the two
+expressive sliders are **removed and replaced by one line saying why**, with
+`temperature` left in place. A slider that moves nothing is the same failure as
+`X-Ignored-Parameters` one paragraph up, drawn in a nicer widget.
+
+**`voxtral` replaces all three with its own two** where a deployment enables
+it, for the same reason and read from the same place: `flow_steps` (1–64,
+**32**) and `cfg_alpha` (1.0–3.0, **1.2**). This deployment does not enable it,
+so neither slider is reachable here — and that took no edit to the page, which
+is the point: the panel builds itself from the controls the selected engine
+declares on `/health.engines` and has no list of its own to fall out of date.
+
+Two things about those two are worth knowing before touching them:
+
+* **`flow_steps` is the quality knob and it is also the cost.** 32 was chosen by
+  ear against 16, 8 and 4. It is the difference between roughly one minute and
+  roughly three minutes of somebody's graphics card per twenty seconds of
+  speech, and the estimate on the page moves with it.
+* **`cfg_alpha` is not `cfg_weight`.** Different engine, different scale,
+  different solver. Sending one where the other belongs is a **400 that names
+  the right field**, not a silent reinterpretation — and Retry copies whichever
+  controls the engine actually declares, so a retried job cannot quietly lose
+  one.
+
+**The Language control is disabled while a voice that carries its own language
+is selected**, with the reason on the line. A Voxtral voice is the long-form
+case — `pt_male` is Portuguese because of which tensor it is, so a language
+field beside it could only agree with the voice or contradict it. The rule is
+read from `language_from_voice` on the engine row and not from a name, so it
+applies to the next such engine without an edit. Kokoro's rows are filtered by
+language too; Chatterbox's clips are not, because language is a parameter those
+engines take.
 
 ### Vocabulary profiles: reading them, and changing them
 

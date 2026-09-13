@@ -44,6 +44,7 @@ from dataclasses import dataclass, field, replace
 
 import numpy as np
 from fastapi import HTTPException
+from voice_common.runlog import RunLog
 
 from . import asr, audio, glossary, profiles, vad
 
@@ -127,6 +128,20 @@ log = logging.getLogger("stt-stack")
 state: dict[str, object] = {}
 _slots = threading.BoundedSemaphore(MAX_CONCURRENT) if MAX_CONCURRENT > 0 else None
 
+# WHAT THIS CONTAINER HEARD, AFTER IT HAS FINISHED HEARING IT.
+#
+# A transcription leaves nothing behind: the text goes into the response and
+# the clip was never ours to keep, so "what did I dictate this morning" and
+# "how fast is this machine really" had no answer once the reply was closed.
+# tts-long has kept a record of every clone job all along; this posts the same
+# record to the same store, and the transcript is this kind's retrievable
+# artefact in the way the audio file is a clone job's.
+#
+# RUNLOG_URL IS UNSET BY DEFAULT AND THEN THIS IS A NO-OP, because the stack
+# has to work completely with tts-long stopped. See voice_common/runlog.py for
+# why nothing here runs on the request's clock. Replaced wholesale in tests.
+runlog = RunLog.from_env("stt", MODEL)
+
 
 class Busy(Exception):
     """Every recogniser slot is taken. The caller answers 429."""
@@ -140,6 +155,28 @@ class Tuning:
     min_silence_ms: int | None = None
     speech_pad_ms: int | None = None
     enabled: bool = True
+
+
+@dataclass(frozen=True)
+class Origin:
+    """Which route a run arrived on. Carried, never read, by the pipeline.
+
+    THE PIPELINE MUST NOT LEARN WHAT A ROUTE IS beyond passing this along.
+    Three routes share `run` exactly so the compatibility layer cannot quietly
+    become a second pipeline, and a branch on the route in here would be the
+    first crack in that. These three values reach the run record and nothing
+    else: a listing that also holds clone jobs from another service needs to
+    say which door a run came in by, and only the caller knows.
+    """
+
+    # NO DEFAULT ROUTE. Three routes reach run() and defaulting to one of
+    # their names would file the other two under a door they never came in by
+    # — silently, and only in the record, which is the one place nobody would
+    # look to find out. A caller that passes nothing records no route at all,
+    # which is a gap somebody can see.
+    route: str
+    client: str | None = None
+    model_requested: str | None = None
 
 
 @dataclass(frozen=True)
@@ -535,7 +572,8 @@ def _place_segments(segments: tuple[asr.Segment, ...], speech: vad.Speech,
 
 def run(data: bytes, opts: asr.Options | None = None, *,
         allow_resample: bool = False, tuning: Tuning | None = None,
-        rules: list[tuple[re.Pattern[str], str]] | None = None) -> Result:
+        rules: list[tuple[re.Pattern[str], str]] | None = None,
+        origin: Origin | None = None) -> Result:
     """Transcribe one clip. Blocking CPU work — never call this on the loop.
 
     `rules` is this request's compiled glossary, from the profiles it selected.
@@ -578,6 +616,11 @@ def run(data: bytes, opts: asr.Options | None = None, *,
     audio_seconds = samples.size / SAMPLE_RATE
 
     started = time.monotonic()
+    # The wall clock beside the monotonic one. The monotonic clock measures the
+    # run and means nothing outside this process; the record is read next to
+    # runs from two other services on two other machines, and only a wall clock
+    # can put those in one order.
+    started_at = time.time()
     speech = _speech(samples, tuning)
     speech_seconds = speech.samples.size / SAMPLE_RATE
     if rules is None:
@@ -643,6 +686,52 @@ def run(data: bytes, opts: asr.Options | None = None, *,
              len(windows), compute,
              audio_seconds / compute if compute else 0.0, repaired or "none",
              ", ".join(applied) or "none")
+
+    # ONE RECORD PER LOG LINE, BESIDE IT, so "was this run recorded" and "is
+    # there a line in the log for it" have the same answer and grep can settle
+    # which. One point covers all three routes because all three come through
+    # here; `origin` is the only thing they do not share.
+    #
+    # THE TRANSCRIPT IS THE ARTEFACT. A clone job's record points at a wav file
+    # that can be played back; a transcription has no such file and never did,
+    # so the text is the thing a reader came to get back. It is the reason
+    # `text` is sent at all, and the reason RUNLOG_TEXT=0 exists for a
+    # deployment that would rather keep the timings and lose the content.
+    origin = origin or Origin(route="")
+    runlog.record(
+        kind="transcribe",
+        route=origin.route or None,
+        client=origin.client,
+        model_requested=origin.model_requested,
+        status="done",
+        created_at=started_at,
+        started_at=started_at,
+        finished_at=started_at + compute,
+        # THE CLIP'S LENGTH, NOT THE SPEECH'S. `audio_seconds` means the same
+        # thing on all three kinds of record — how much audio the run is about
+        # — and for a transcription that is what arrived, not what survived the
+        # VAD. `speech_seconds` carries the second number, which no other kind
+        # has.
+        audio_seconds=round(audio_seconds, 2),
+        speech_seconds=round(speech_seconds, 2),
+        compute_seconds=round(compute, 2),
+        realtime_factor=(round(audio_seconds / compute, 2) if compute
+                         else None),
+        chars=len(text),
+        chunks=len(windows),
+        text=text,
+        language=language,
+        # ALWAYS LOCAL, AND SENT ANYWAY. There is no Parakeet on the other
+        # machine to dispatch to, so this field has one value today and looks
+        # redundant from in here; it is not, because the reader is a listing
+        # that also holds clone jobs which ran across the LAN, and a row with
+        # no backend reads as a row whose backend is unknown. It is also the
+        # field that will tell anyone whether building the second lane is worth
+        # it: 8.81x here against 17.14x there only repays a round trip above
+        # about ninety seconds of audio, and this record is how we find out
+        # whether any clip is ever that long.
+        backend="local",
+    )
 
     return Result(
         text=text,

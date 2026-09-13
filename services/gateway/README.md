@@ -11,8 +11,10 @@ One port, one key, three speech services.
   /v1/audio/speech  model=│kokoro tts-1 tts-1-hd …  ─►  tts-stack:8001
   /speak  /voices         │                             Kokoro, 1.2-1.5x
                           │
-  /v1/audio/speech  model=│chatterbox tts-long      ─►  tts-long:8002
-  /jobs  /jobs/{id}[/audio]  DELETE /jobs/{id}           Chatterbox, 0.138x
+  /v1/audio/speech  model=│chatterbox chatterbox-turbo tts-long
+  /jobs  /jobs/{id}[/audio]  DELETE /jobs/{id}     ─►  tts-long:8002
+                          │                            Chatterbox 0.138x here,
+                          │                            turbo 1.54x on the card
                           │
   /v1/models              ├─  answered here, from a static table
   /health                 └─  all three, fanned out, no key required
@@ -130,12 +132,49 @@ kilobytes. Responses stream in every case.
 |---|---|
 | `kokoro`, `tts-1`, `tts-1-hd`, `gpt-4o-mini-tts` | tts-stack |
 | absent, empty, or **any unrecognised value** | tts-stack |
-| `chatterbox`, `tts-long` | tts-long |
+| every name in `GATEWAY_LONG_MODELS` — here `chatterbox`, `chatterbox-turbo`, `tts-long` | tts-long |
+| a catalogue name **tts-long owns** that this deployment has not enabled | **404**, naming `GATEWAY_LONG_MODELS` |
+| a catalogue name **another backend owns** | that backend, exactly as before |
 
 `GET /v1/models` returns that table as OpenAI's model list, with the backend in
 `owned_by`. It is answered from a static table with no backend call: the names
 are a property of the routing contract, not of any backend's state, and a
-client most wants to know what it can send while a backend is restarting.
+client most wants to know what it can send while a backend is restarting. The
+tts-long rows are generated from `GATEWAY_LONG_MODELS`, so what is advertised
+and what is routed cannot disagree.
+
+**The 404 row exists because the rule above it became a trap, and this
+deployment is now living in exactly the case it was built for.** "Everything
+else goes fast, including an unrecognised name" is right for a typo and was
+right while there was one long-form engine. With a catalogue of three, somebody
+types `voxtral` — which this deployment has **retired**, see
+[ADR 0010](../../docs/adr/0010-the-third-engine-was-measured-and-retired.md) —
+falls off the end of `GATEWAY_LONG_MODELS`, and **gets Kokoro**: a different
+engine, a different voice, no error anywhere. So the gateway knows every name
+tts-long could own, from the same catalogue tts-long reads
+(`voice_common.engines.CATALOGUE`), and refuses those by name:
+
+```json
+{"error": {"message": "model 'chatterbox-turbo' is a long-form model this gateway knows but this deployment has not enabled. Add it to GATEWAY_LONG_MODELS (and to TTS_ENGINES on tts-long). Enabled: chatterbox, tts-long.",
+           "type": "invalid_request_error", "param": "model", "code": "model_not_found"}}
+```
+
+A name in *neither* set still goes fast, unchanged. **Adding an engine adds no
+route**: the path and method allowlists are untouched, because a third model
+string is a field value and not an endpoint. Voxtral arrived that way — a
+catalogue row, a compose key and a README line, and not one entry in any of the
+three tables, and retiring it took the same two keys back out.
+
+**The last row of that table is why the refusal reads `owned_by` and not the
+whole catalogue.** `EngineFacts.owned_by` names which service in the stack owns
+a checkpoint, and every row written so far says `tts-long` — so "in the
+catalogue" and "tts-long's" have been the same set, and the code said the
+second by spelling the first. They stop being the same set the moment the fast
+path's own `kokoro` gets a row, which is work already scheduled: `model=kokoro`
+would then be answered **404**, telling the caller to add the default voice of
+the whole stack to `GATEWAY_LONG_MODELS` — which would route it to a backend
+that has never held those weights. The gateway filters on the owner instead, so
+a row for a checkpoint tts-stack owns keeps going to tts-stack.
 
 **Input length is not a routing key**, and that is the decisive rejection.
 Length is a proxy for a quality choice, and the cost of getting it wrong is not
@@ -170,8 +209,25 @@ send `chatterbox` or split the text.
 
 ### The deviation, stated plainly
 
-**With `model=chatterbox`, `POST /v1/audio/speech` may answer `202` with JSON
-instead of audio bytes.**
+**With any long-form model — `chatterbox`, `chatterbox-turbo` or `tts-long` —
+`POST /v1/audio/speech` may answer `202` with JSON instead of audio bytes.**
+
+**That is true of `chatterbox-turbo` too, and deliberately so.** Turbo runs at
+1.5426x realtime on the runner's card, measured, which is past the point where a
+short request could be answered down the socket — but that card belongs to
+somebody who is often using it, so the same request is nine seconds when they are
+away and four minutes when they are not. tts-long always answers with a job id
+rather than sometimes; see
+[ADR 0008](../../docs/adr/0008-two-engines-and-both-stay-jobs.md). Nothing here
+should be built to make turbo synchronous.
+
+**`voxtral` is not one of them any more.** It is in the catalogue and switched
+off on this deployment, so `model=voxtral` is the 404 above and never reaches
+tts-long at all. What it was — 0.104x realtime, no local lane, a **503**
+`engine_unavailable` from tts-long whenever the runner was away, forwarded
+untouched like every other backend envelope — is recorded in
+[ADR 0010](../../docs/adr/0010-the-third-engine-was-measured-and-retired.md)
+along with the three measurements that retired it.
 
 The synchronous OpenAI contract cannot be honoured by tts-long. At the
 orko-measured 0.138x realtime, a 200-word request is 80 s of speech and 580 s
@@ -389,6 +445,7 @@ this in code.
 | `GATEWAY_STT_URL` | `http://stt-stack:8000` | |
 | `GATEWAY_TTS_URL` | `http://tts-stack:8001` | |
 | `GATEWAY_TTS_LONG_URL` | `http://tts-long:8002` | |
+| `GATEWAY_LONG_MODELS` | `chatterbox,tts-long` | Comma-separated `model` values routed to tts-long, and the set `GET /v1/models` advertises for it. Must agree with tts-long's `TTS_ENGINES` minus the `tts-long` alias — `docs/tests/test_deployment.py` asserts it has not drifted. Adding an engine here without adding it there advertises a name that 400s; the other way round hides an engine the box can run |
 | `GATEWAY_STT_TIMEOUT` | `900` | Read timeout, seconds |
 | `GATEWAY_TTS_TIMEOUT` | `300` | Read timeout, seconds |
 | `GATEWAY_TTS_LONG_TIMEOUT` | `240` | Must stay above tts-long's `TTS_OPENAI_SYNC_TIMEOUT` |

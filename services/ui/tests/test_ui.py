@@ -270,14 +270,26 @@ def test_the_three_expert_panels_are_still_on_the_page_and_openable(client):
 def test_the_two_engine_panels_still_swap_with_the_chosen_voice(client):
     """This is per-ENGINE, not per-expertise, and it is not what was removed.
 
-    onVoiceChange() shows Kokoro's panel for a Kokoro voice and Chatterbox's
-    for a clone. Deleting the global gate must leave that alone, or both panels
-    appear at once and half the controls on screen belong to a model that is
-    not going to run.
+    onVoiceChange() shows Kokoro's panel for an instant voice and tts-long's
+    for anything that queues. Deleting the global gate must leave that alone,
+    or both panels appear at once and half the controls on screen belong to a
+    model that is not going to run.
+
+    THE TEST IS WHERE IT RUNS, NOT WHAT THE VOICE IS. It was `clone`, which
+    answered the same way only while every tts-long voice was a clone: a preset
+    voice is not a clone and is not instant either, and under the old test it
+    opened KOKORO's panel -- a synthesis-speed slider and a segments editor,
+    neither of which that request can carry.
     """
     page = client()[0].get("/ui").text
-    assert '$("tts-expert-fast").hidden = clone;' in page
-    assert '$("tts-expert-clone").hidden = !clone;' in page
+    assert '$("tts-expert-fast").hidden = job;' in page
+    assert '$("tts-expert-clone").hidden = !job;' in page
+    # ANCHORED IN onVoiceChange, because `const job = isJob(voice);` also
+    # appears in estimate() -- so a search over the whole page passes while
+    # this function quietly goes back to reading the voice's kind.
+    body = page[page.index("function onVoiceChange()"):
+                page.index('$("voice").addEventListener')]
+    assert "const job = isJob(voice);" in body, "the panels swap on the voice again"
 
 
 # ------------------------------------------- the prefixed mount (one door) --

@@ -164,6 +164,17 @@ class FakeClock:
         return self._readings.pop(0) if len(self._readings) > 1 \
             else self._readings[0]
 
+    def time(self) -> float:
+        """The WALL clock, and deliberately not one of the readings above.
+
+        pipeline.run takes both — the monotonic one measures the job, the wall
+        one stamps the run record so it can be ordered against records from
+        another service on another machine. Popping a reading here would eat
+        one of the two this class exists to pin and shift every compute_seconds
+        it is holding still.
+        """
+        return 1788692520.0
+
 
 @pytest.fixture
 def engine() -> WindowedParakeet:

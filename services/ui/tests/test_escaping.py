@@ -184,7 +184,7 @@ def test_chatterbox_appears_even_with_nothing_cloned():
     body = _load_voices()
     group = body[body.index("Chatterbox, slow"):]
     head = group[:group.index("</optgroup>")]
-    assert 'value="c:default"' in head, "the built-in voice is not offered"
+    assert "${esc(clipPrefix)}:default" in head, "the built-in voice is not offered"
     # Comments are stripped first: this file's own comment explains the old
     # `if (clones.length)` behaviour, and matching prose would make the test
     # assert against its own documentation rather than against the code.
@@ -206,11 +206,21 @@ def test_both_engines_are_named_in_the_picker():
 
 def test_the_builtin_voice_offers_no_delete_button():
     """There is no file behind it; the delete would 404 on the one voice the
-    user cannot break."""
+    user cannot break.
+
+    AND THIS ONE STAYS CLIP-SHAPED WHILE ITS NEIGHBOURS MOVED. Everything else
+    in onVoiceChange asks where the run happens, which is now `job`; Delete
+    asks whether there is a file on disk, which is `clip`. A preset speaker is
+    a tensor inside a checkpoint -- no file, nothing to delete, and no engine
+    to ask -- so a Delete button drawn from the execution test would be a
+    DELETE against a voice that cannot be removed.
+    """
     start = HTML.index("function onVoiceChange()")
     body = HTML[start:HTML.index('$("voice").addEventListener')]
     assert 'voice.name === "default"' in body
-    assert '$("delvoice").hidden = !clone || builtin;' in body
+    assert '$("delvoice").hidden = !clip || builtin;' in body
+    assert 'const clip = voice.kind === "clone";' in body, \
+        "the clip test is no longer named apart from the execution test"
 
 
 def test_the_engine_is_named_where_the_choice_is_made():
@@ -378,11 +388,60 @@ def test_a_chosen_language_goes_through_toenginelang():
 
 def test_the_two_engines_disagree_about_spelling_and_that_is_handled():
     """Kokoro wants pt-br, en-us and cmn; Chatterbox wants pt, en and zh. One
-    control, two vocabularies, and toEngineLang is the only translator."""
+    control, two vocabularies, and ONE table translating between them.
+
+    IT USED TO TRANSLATE ONE WAY ONLY, and the missing direction cost a whole
+    language. The table was a literal inside toEngineLang, so ISO -> Kokoro
+    worked and Kokoro -> ISO had no reader at all: everything else on the page
+    stemmed a code by splitting on the hyphen, which turns "pt-br" into "pt"
+    and leaves "cmn" as "cmn". Mandarin was therefore filed under two different
+    stems and listed twice in one control, and each entry was broken in its own
+    direction -- "Chinese" hid every Kokoro Mandarin voice, "Mandarin" was
+    disabled for every clone.
+
+    So the assertion is that the table is SHARED and read both ways, not that a
+    particular pair appears in a particular function.
+    """
     fn = HTML[HTML.index("function toEngineLang"):]
     fn = fn[:fn.index("\n}\n")]
     assert 'kind === "clone"' in fn, "the clone path must not take Kokoro codes"
-    assert "pt:\"pt-br\"" in fn.replace(" ", "") or 'pt:"pt-br"' in fn
+    assert "KOKORO_SPELLING[iso]" in fn, \
+        "toEngineLang holds its own copy of the spelling table again"
+
+    table = HTML[HTML.index("const KOKORO_SPELLING = {"):]
+    table = table[:table.index("\n}\n")]
+    for pair in ('pt:"pt-br"', 'fr:"fr-fr"', 'zh:"cmn"'):
+        assert pair in table.replace(" ", ""), f"{pair} is no longer translated"
+    # AND THE INVERSE IS DERIVED FROM IT rather than written out again, which is
+    # the only arrangement where the two cannot drift apart.
+    assert "Object.entries(KOKORO_SPELLING)" in HTML, \
+        "the Kokoro -> ISO direction is a second literal that can go stale"
+
+
+def test_one_language_never_appears_twice_in_the_language_control():
+    """cmn AND zh ARE ONE LANGUAGE AND THE HYPHEN RULE CANNOT SEE IT.
+
+    populateLanguages merges Kokoro's list with Chatterbox's and keys on the
+    stem so that "pt-br" and "pt" collapse. Splitting on the hyphen collapses
+    those two and does nothing for "cmn" against "zh", so the control listed
+    Mandarin and Chinese as separate entries -- and the voice filter, which
+    compared the control's value against a PREFIX that answers "cmn", then
+    emptied the picker for whichever of the two was chosen.
+
+    Every stem on this page comes from isoStem now, so the merge, the voice
+    filter, the preset filter and the fallback voice all divide the world the
+    same way.
+    """
+    body = HTML[HTML.index("function populateLanguages()"):
+                HTML.index("function voicesForLanguage")]
+    assert "isoStem(code)" in body, "the merge still stems by splitting"
+    assert 'split("-")[0]' not in body, "a second stem rule survives in the merge"
+
+    voices = HTML[HTML.index("function voicesForLanguage"):
+                  HTML.index("function presetVoicesForLanguage")]
+    assert "isoStem(PREFIX[v[0]]" in voices, \
+        "the voice side of the comparison is not stemmed the same way"
+    assert 'split("-")[0]' not in voices, "a second stem rule survives in the filter"
 
 
 def test_the_page_and_the_backend_agree_on_chatterbox_languages():
@@ -496,8 +555,17 @@ def test_the_button_that_deletes_the_audio_says_so():
     # The rule the old assertion protected is unchanged and now applies twice:
     # every label names what it destroys, and neither of them says a bare
     # "Forget" beside a Download button.
+    #
+    # THREE LABELS NOW, NOT TWO, because a transcription's record is not an
+    # index pointing at the thing that ran -- it IS the thing that ran, the
+    # only copy of it, and "Delete the record" beside "Copy the transcript"
+    # reads as tidying a list. The rule is the one this test has always
+    # asserted; the third branch is it applied to a kind that did not exist
+    # when there were two.
     assert ">Delete the audio</button>" in row
-    assert 'audio ? "Delete the record too" : "Delete the record"' in row
+    assert 'audio ? "Delete the record too"' in row
+    assert 'kind === "transcribe" ? "Delete the transcript"' in row
+    assert '"Delete the record"' in row
     assert ">Forget</button>" not in row, "a label that hides the consequence is back"
     # The audio button only exists while there is audio to delete.
     assert 'audio ? `<button class="small" data-delaudio=' in row
@@ -533,11 +601,23 @@ def test_forget_asks_first_while_there_is_still_audio_to_lose():
 def test_a_row_with_no_audio_left_is_not_worth_a_dialog():
     """A failed, expired or already-swept job has nothing to lose, and a
     confirmation for a free action teaches people to click through the one that
-    is not free."""
+    is not free.
+
+    THE ONE EXCEPTION IS THE KIND WHOSE RECORD IS THE ARTEFACT. A transcription
+    has no audio and never had, so by the rule above it is the cheapest row on
+    the tab -- and the text in its record is the whole of what the run produced
+    and the only copy of it, with no clip kept anywhere to make it again. That
+    branch is gated on the kind, so a clone or an instant run with nothing left
+    to lose still goes without a dialog.
+    """
     body = HTML[HTML.index("async function forgetJob(id)"):]
     body = body[:body.index("\n}\n")]
     stripped = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
     assert "hasAudio(job)" in stripped, "the dialog is not gated on anything"
+    assert '=== "transcribe"' in stripped, \
+        "the transcript dialog is not gated on the kind, so every cheap row asks"
+    assert stripped.count("confirm(") == 2, \
+        "one dialog for two different losses, or a third that has no rule"
 
 
 # --------------------------------------------------- telling jobs apart --
@@ -817,7 +897,12 @@ def test_the_language_control_is_off_where_it_is_not_sent():
     control -- which exists precisely so the voice would stop deciding the
     language -- was inert, and said nothing about it.
     """
-    assert '$("lang").disabled = v1;' in _fn("function syncSpeakControls()")
+    # AND BOTH REASONS IT CAN BE OFF ARE ASKED IN ONE WRITE. An engine whose
+    # voices carry their own language takes no language field either, and this
+    # line ran AFTER the one that greys it for that -- so it handed the control
+    # straight back, and which of the two was true depended on call order.
+    assert '$("lang").disabled = v1 || languageCarried();' \
+        in _fn("function syncSpeakControls()")
     assert "no segments, no language" in HTML, \
         "the route option should name what it drops"
 

@@ -1011,7 +1011,11 @@ async def transcriptions(request: Request,
     form = await request.form()
 
     _reject_unknown(form, TRANSCRIPTION_FIELDS)
-    _model(form)
+    # Kept rather than discarded, because the run record carries what the
+    # client ASKED for next to what actually ran. This service has one engine
+    # and `model` chooses nothing; a listing that shows `whisper-1` requested
+    # and `parakeet` used is the only place that difference is visible.
+    model_requested = _model(form)
     response_format = _response_format(form, FORMATS)
     _reject_diarisation(form)
     _reject_languages(form)
@@ -1048,7 +1052,10 @@ async def transcriptions(request: Request,
     if streaming:
         return await _stream_response(data, opts, tuning, engine, rules)
     return await _run(data, opts, tuning, engine, response_format,
-                      granularities, want_logprobs, rules)
+                      granularities, want_logprobs, rules,
+                      origin=pipeline.Origin(route="/v1/audio/transcriptions",
+                                             client="openai",
+                                             model_requested=model_requested))
 
 
 @router.post("/audio/translations", openapi_extra=_TRANSLATION_SCHEMA)
@@ -1076,7 +1083,7 @@ async def translations(request: Request,
 
     form = await request.form()
     _reject_unknown(form, TRANSLATION_FIELDS)
-    _model(form)
+    model_requested = _model(form)
     response_format = _response_format(form, TRANSLATION_FORMATS)
     granularities = ("segment",) if response_format == "verbose_json" else ()
     selection = _glossary(form)
@@ -1100,12 +1107,16 @@ async def translations(request: Request,
     return await _run(data, opts, tuning=pipeline.Tuning(), engine=engine,
                       response_format=response_format,
                       granularities=granularities, want_logprobs=False,
-                      rules=_repair_rules(selection, terms))
+                      rules=_repair_rules(selection, terms),
+                      origin=pipeline.Origin(route="/v1/audio/translations",
+                                             client="openai",
+                                             model_requested=model_requested))
 
 
 async def _run(data: bytes, opts: asr.Options, tuning: pipeline.Tuning,
                engine, response_format: str, granularities: tuple[str, ...],  # noqa: ANN001
-               want_logprobs: bool, rules=None) -> Response:  # noqa: ANN001
+               want_logprobs: bool, rules=None,  # noqa: ANN001
+               origin: pipeline.Origin | None = None) -> Response:
     try:
         with pipeline.slot():
             # Blocking CPU work, kept off the event loop: declared inline it
@@ -1114,7 +1125,7 @@ async def _run(data: bytes, opts: asr.Options, tuning: pipeline.Tuning,
             # working correctly.
             result = await run_in_threadpool(
                 pipeline.run, data, opts, allow_resample=True, tuning=tuning,
-                rules=rules)
+                rules=rules, origin=origin)
     except pipeline.Busy as exc:
         raise _busy() from exc
     except HTTPException as exc:

@@ -106,6 +106,35 @@ PAGE = Path(__file__).with_name("static") / "ui.html"
 # tts-long has had that route all along (main.py:580) and only the gateway's
 # route table was missing it -- which is why the Jobs tab can offer "stop and
 # keep what's done" rather than a job that cannot be called off.
+#
+# CHOOSING THE SPEECH ENGINE ADDS NOTHING HERE, and that is a fact about this
+# table rather than an oversight in it. The engine is a `model` field in the
+# body of POST /v1/audio/speech and POST /jobs, both already listed, so a
+# second engine reaches the page without this service being rebuilt. If an
+# engine ever moves into a path -- /v1/audio/speech/{engine}, a per-engine job
+# route -- it needs a line here, a route at the gateway and a route at the
+# backend, and missing any one of the three is a 405 in the browser and a line
+# in no log. services/gateway/tests/test_gateway.py asserts both halves of
+# that: the three speech paths are present, and no engine-shaped path is.
+#
+# A THIRD ENGINE PROVED IT, INCLUDING THE ONE WITH TWENTY FIXED VOICES. An
+# engine whose speakers are baked into the weights has a voice list this table
+# cannot serve, and the obvious move -- routing tts-long's own GET /voices --
+# is the wrong one twice over. `("GET", "/voices")` below is tts-stack's, one
+# path answered by two backends, so a second entry cannot be spelled at all
+# without inventing a prefix and the rewriting rule that goes with it. The
+# preset names arrive instead on the health body the page already polls:
+# /ui/health -> the gateway's /health -> tts-long's own, inlined at each hop by
+# `response.json()` and never summarised, so `engines[*].voices` reaches the
+# browser verbatim with no line here and no line in the gateway's table.
+# WHICHEVER HOP STARTS PICKING KEYS OUT OF THAT BODY BREAKS THE VOICE PICKER
+# AND NOTHING ELSE: no route 404s, no allowlist changes, no log line differs --
+# the engine's group simply renders empty and the page offers a shorter list
+# than the stack has. So neither hop may summarise `health`; it is the
+# backend's own document, inlined whole. The gateway's half of that is pinned
+# by test_the_engine_detail_tts_long_publishes_reaches_the_caller_verbatim in
+# services/gateway/tests/test_gateway.py; this half is `response.json()` in
+# `health` below, and it must stay that and not a field list.
 PROXIED: tuple[tuple[str, str], ...] = (
     ("POST", "/v1/audio/transcriptions"),
     ("POST", "/transcribe"),
@@ -117,6 +146,20 @@ PROXIED: tuple[tuple[str, str], ...] = (
     ("GET", "/jobs/{job_id}"),
     ("DELETE", "/jobs/{job_id}"),
     ("GET", "/jobs/{job_id}/audio"),
+    # THE SAME PATH, THE OTHER METHOD, AND THE SAME DEFECT ONE LINE LATER. The
+    # page has offered "delete the audio, keep the record" since the Jobs tab
+    # was written, tts-long has answered it since then
+    # (`@app.delete("/jobs/{job_id}/audio")`), and this table carried only the
+    # GET -- so the press died on Starlette's 405 here, before it reached
+    # either. Reproduced against the deployed stack.
+    #
+    # Adding a method to a path that is already listed is the move that keeps
+    # slipping through, because the path looks present at a glance and the
+    # allowlist is matched on the PAIR. It has now cost a PUT (glossaries) and
+    # a DELETE (this one); test_every_request_the_page_issues_has_a_route in
+    # services/gateway/tests reads this table against the page's own call
+    # sites so the third one fails a test instead of a button.
+    ("DELETE", "/jobs/{job_id}/audio"),
     ("GET", "/v1/models"),
     # NO LONGER READ ONLY, and the entry it replaces said why it was: creating
     # and deleting a profile was an operator action over curl. That was the
