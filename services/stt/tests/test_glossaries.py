@@ -167,7 +167,7 @@ def test_the_shipped_profiles_carry_no_personal_vocabulary() -> None:
     """glossary.txt shipped one person's project names in a PUBLIC image.
 
     `catalaxy = Catallaxy`, `theory dashboard = Theoria dashboard` and
-    `ghost paper = Ghost Pepper` were copied into ai-voice-stt and applied to
+    `ghost paper = Ghost Pepper` were copied into calliope-stt and applied to
     every request, so anyone who pulled the image got rewrites naming projects
     they have never heard of. This test is the thing that stops them coming
     back one convenient commit at a time.

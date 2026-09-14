@@ -1,4 +1,4 @@
-# ai-voice
+# Calliope
 
 Self-hosted speech-to-text and text-to-speech. Five images and the package they
 share, one repository, deployed as a single app.
@@ -36,11 +36,11 @@ configuration table, the deployment notes. This file is about the repository.
 
 | | | |
 |---|---|---|
-| [`services/stt`](services/stt/README.md) | `ai-voice-stt` | Parakeet TDT 0.6B v3 by default, Whisper large-v3 on request |
-| [`services/tts`](services/tts/README.md) | `ai-voice-tts` | Kokoro-82M, 54 voices, six output formats |
-| [`services/tts-long`](services/tts-long/README.md) | `ai-voice-tts-long` | Chatterbox, a queue and an SSE stream |
-| [`services/gateway`](services/gateway/README.md) | `ai-voice-gateway` | One address, one key, one health answer |
-| [`services/ui`](services/ui/README.md) | `ai-voice-ui` | One page, no build step; links ingested through MeTube |
+| [`services/stt`](services/stt/README.md) | `calliope-stt` | Parakeet TDT 0.6B v3 by default, Whisper large-v3 on request |
+| [`services/tts`](services/tts/README.md) | `calliope-tts` | Kokoro-82M, 54 voices, six output formats |
+| [`services/tts-long`](services/tts-long/README.md) | `calliope-tts-long` | Chatterbox, a queue and an SSE stream |
+| [`services/gateway`](services/gateway/README.md) | `calliope-gateway` | One address, one key, one health answer |
+| [`services/ui`](services/ui/README.md) | `calliope-ui` | One page, no build step; links ingested through MeTube |
 | [`packages/common`](packages/common/README.md) | — | Auth, the error envelope, `/health`, the entrypoint |
 
 ## Why one repository
@@ -129,10 +129,10 @@ The build context is the **repository root** for every service, and each
 Containerfile is named by path:
 
 ```bash
-docker build -f services/stt/Containerfile      -t ai-voice-stt .
-docker build -f services/tts/Containerfile      -t ai-voice-tts .
-docker build -f services/tts-long/Containerfile -t ai-voice-tts-long .
-docker build -f services/gateway/Containerfile  -t ai-voice-gateway .
+docker build -f services/stt/Containerfile      -t calliope-stt .
+docker build -f services/tts/Containerfile      -t calliope-tts .
+docker build -f services/tts-long/Containerfile -t calliope-tts-long .
+docker build -f services/gateway/Containerfile  -t calliope-gateway .
 ```
 
 That is the whole cost of the path dependency: `packages/common` has to be

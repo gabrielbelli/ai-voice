@@ -64,7 +64,7 @@ docker run -p 8080:8080 \
   -e GATEWAY_TTS_URL=http://tts-stack:8001 \
   -e GATEWAY_TTS_LONG_URL=http://tts-long:8002 \
   -e GATEWAY_API_KEYS=sk-workstation,sk-laptop \
-  ghcr.io/gabrielbelli/ai-voice-gateway:pre
+  ghcr.io/gabrielbelli/calliope-gateway:pre
 ```
 
 ```bash
@@ -254,7 +254,7 @@ checks can tell.
 
 ```bash
 docker run -p 8080:8080 -e GATEWAY_API_KEYS=sk-workstation,sk-laptop \
-  ghcr.io/gabrielbelli/ai-voice-gateway:pre
+  ghcr.io/gabrielbelli/calliope-gateway:pre
 ```
 
 ```bash

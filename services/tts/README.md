@@ -22,7 +22,7 @@ publishes `:pre` and never `:latest`.
 ```bash
 docker run -p 8001:8001 -v tts-models:/models \
   --cpus 4 -e TTS_THREADS=4 \
-  ghcr.io/gabrielbelli/ai-voice-tts:pre
+  ghcr.io/gabrielbelli/calliope-tts:pre
 ```
 
 First start downloads ~340 MB into the volume. Later starts are immediate.
@@ -506,7 +506,7 @@ Off by default. Set `TTS_API_KEYS` to a comma-separated list to turn it on:
 ```bash
 docker run -p 8001:8001 -v tts-models:/models \
   -e TTS_API_KEYS=sk-workstation,sk-laptop \
-  ghcr.io/gabrielbelli/ai-voice-tts:pre
+  ghcr.io/gabrielbelli/calliope-tts:pre
 ```
 
 ```bash
@@ -571,7 +571,7 @@ docker run -p 8001:8001 -v tts-models:/models \
   -e TTS_TLS_CERT=/certs/fullchain.pem \
   -e TTS_TLS_KEY=/certs/privkey.pem \
   -e TTS_API_KEYS=sk-workstation \
-  ghcr.io/gabrielbelli/ai-voice-tts:pre
+  ghcr.io/gabrielbelli/calliope-tts:pre
 ```
 
 > **No self-signed certificate is ever generated.** A certificate that appears
@@ -696,7 +696,7 @@ threads.
 ```bash
 docker run -p 8001:8001 -v tts-models:/models \
   --cpus 4 -e TTS_THREADS=4 --memory 2g \
-  ghcr.io/gabrielbelli/ai-voice-tts:pre
+  ghcr.io/gabrielbelli/calliope-tts:pre
 ```
 
 Steady state is about 400 MB, so 2 GB is generous.

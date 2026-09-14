@@ -87,7 +87,7 @@ reasoning; `chunks` in the job body says how many a request became.
 docker run -p 8002:8002 \
   -v tts-long-models:/models -v tts-long-out:/output \
   --cpus 8 -e TTS_THREADS=8 --memory 10g \
-  ghcr.io/gabrielbelli/ai-voice-tts-long:pre
+  ghcr.io/gabrielbelli/calliope-tts-long:pre
 ```
 
 First job downloads ~3 GB of weights. The model **loads lazily and unloads
@@ -769,7 +769,7 @@ were enabled, and the pair `(engine, voice)` is the key precisely so that the
 two namespaces cannot collide when it is.
 
 ```bash
-docker run -v /srv/voices:/voices ... ghcr.io/gabrielbelli/ai-voice-tts-long:pre
+docker run -v /srv/voices:/voices ... ghcr.io/gabrielbelli/calliope-tts-long:pre
 # /voices/alloy.wav  -> voice "alloy"
 # /voices/gabriel.wav -> voice "gabriel"
 ```
@@ -873,7 +873,7 @@ docker run -p 8002:8002 \
   -e TTS_TLS_CERT=/certs/fullchain.pem \
   -e TTS_TLS_KEY=/certs/privkey.pem \
   -e TTS_API_KEYS='sk-alpha' \
-  ghcr.io/gabrielbelli/ai-voice-tts-long:pre
+  ghcr.io/gabrielbelli/calliope-tts-long:pre
 ```
 
 **Nothing generates a certificate.** A cert that appears by magic is a cert

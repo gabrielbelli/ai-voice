@@ -22,7 +22,7 @@
 # Build, from the repository root — the context is the root for every service
 # here, even this one, which has no path dependency to pull in. One context
 # rule beats a per-service exception nobody remembers:
-#   docker build -f services/gateway/Containerfile -t ai-voice-gateway .
+#   docker build -f services/gateway/Containerfile -t calliope-gateway .
 #
 # Run (compose or a TrueNAS app, on the network the three backends share):
 #   docker run -p 8080:8080 \
@@ -30,7 +30,7 @@
 #     -e GATEWAY_TTS_URL=http://tts-stack:8001 \
 #     -e GATEWAY_TTS_LONG_URL=http://tts-long:8002 \
 #     -e GATEWAY_API_KEYS=sk-workstation,sk-laptop \
-#     ai-voice-gateway
+#     calliope-gateway
 #
 # GATEWAY_API_KEYS unset means authentication is off and every request is
 # accepted — for all three backends, since this is the only thing checking a

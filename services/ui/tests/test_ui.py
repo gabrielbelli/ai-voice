@@ -19,7 +19,7 @@ def test_the_page_is_served_and_needs_no_key(client):
     gateway.keys = ("sk-real",)
     response = api.get("/ui")
     assert response.status_code == 200
-    assert "<title>ai-voice</title>" in response.text
+    assert "<title>Calliope</title>" in response.text
     # The page is static markup with no data and no credential in it, so it is
     # public. Every XHR it makes goes back to this origin, and this process is
     # what puts a key on the ones that leave it.
@@ -36,7 +36,11 @@ def test_the_page_has_no_external_reference_of_any_kind(client):
     api, _, _ = client()
     page = api.get("/ui").text
     for marker in ("http://", "https://cdn", "googleapis", "unpkg", "jsdelivr"):
-        assert marker not in page.replace("http://127.0.0.1", ""), marker
+        # AN XML NAMESPACE IS NOT A REQUEST. The favicon is an inline SVG data
+        # URI, and an SVG that does not declare xmlns="http://www.w3.org/2000/svg"
+        # does not render at all. Nothing is fetched from it.
+        clean = page.replace("http://127.0.0.1", "").replace("http://www.w3.org/2000/svg", "")
+        assert marker not in clean, marker
 
 
 def test_a_forwarded_route_reaches_the_gateway_with_the_key_intact(client):

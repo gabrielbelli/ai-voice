@@ -169,7 +169,7 @@ def test_the_empty_card_says_which_filter_is_holding_rows_back():
     from an empty card under a stack that has lost everything, and the second
     reading is the one people act on."""
     empty = RENDER[RENDER.index("if (!list.length)"):]
-    empty = empty[:empty.index('document.title = "ai-voice"')]
+    empty = empty[:empty.index('document.title = "Calliope"')]
     assert "JOB_FILTERS[filter].empty" in empty, "the empty state does not name the filter"
     # A phrase per filter, not the control's own label: "No Failures runs" is
     # what happens when the two are made to be one string.

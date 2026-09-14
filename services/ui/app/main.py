@@ -523,6 +523,12 @@ async def page() -> Response:
         # and it keeps working on a NAS with no internet.
         "Content-Security-Policy":
             "default-src 'self'; img-src 'self' data:; media-src 'self' blob:; "
+            # THE DISPLAY FACE IS A data: URI IN THE STYLESHEET. This service
+            # serves exactly one file, so a sibling .woff2 would need a route of
+            # its own; inlined, the page stays one thing to copy. Without this
+            # line fonts fall back to default-src 'self' and the face is
+            # silently blocked -- the page still renders, in system-ui.
+            "font-src 'self' data:; "
             "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
             "connect-src 'self'; frame-ancestors 'none'",
         "Referrer-Policy": "no-referrer",

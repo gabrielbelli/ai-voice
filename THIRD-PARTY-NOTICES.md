@@ -73,7 +73,7 @@ backend**. The ranges had to be reconciled, not copied.
 
 ### `speaches-ai/speaches` — MIT — Copyright (c) 2024 Fedir Zadniprovskyi
 
-The closest prior art to this whole stack, and the reason `ai-voice` is scoped
+The closest prior art to this whole stack, and the reason `Calliope` is scoped
 the way it is: it already does OpenAI-compatible STT and TTS over
 faster-whisper and Kokoro. What it does *not* do — Parakeet, post-decode
 glossary repair, a long-form job queue — is what justifies this repository

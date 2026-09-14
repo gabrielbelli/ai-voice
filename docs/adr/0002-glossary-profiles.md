@@ -25,7 +25,7 @@ open sauce  = open source
 
 Two different things are wrong with that list, and only one of them is obvious.
 
-**It is one person's vocabulary inside a public artefact.** `ai-voice-stt` is
+**It is one person's vocabulary inside a public artefact.** `calliope-stt` is
 published to a public registry under a BSD licence. Anyone who pulls it gets
 `catalaxy = Catallaxy` applied to their audio — a rewrite naming a project they
 have never heard of, that they cannot discover without reading the image, and

@@ -72,19 +72,19 @@ jobs:
           # which are genuinely different, and the import checks, which each
           # record a real failure.
           SERVICES = {
-              "stt":      {"image": "ai-voice-stt",      "base": "python:3.13-slim-trixie"},
-              "tts":      {"image": "ai-voice-tts",      "base": "python:3.13-slim-trixie"},
+              "stt":      {"image": "calliope-stt",      "base": "python:3.13-slim-trixie"},
+              "tts":      {"image": "calliope-tts",      "base": "python:3.13-slim-trixie"},
               # 3.12, not 3.13: resemble-perth imports pkg_resources. The old
               # workflow annotated this image as 3.13-slim-trixie while its
               # Containerfile said 3.12 — an annotation is a claim about the
               # image and that one was false.
-              "tts-long": {"image": "ai-voice-tts-long", "base": "python:3.12-slim-trixie"},
-              "gateway":  {"image": "ai-voice-gateway",  "base": "python:3.13-slim-trixie"},
+              "tts-long": {"image": "calliope-tts-long", "base": "python:3.12-slim-trixie"},
+              "gateway":  {"image": "calliope-gateway",  "base": "python:3.13-slim-trixie"},
               # The page, and the ingestion routes behind it. Same base and
               # nearly the same weight as the gateway: no torch, no numpy, no
               # ffmpeg and no audio library at all, because the decoding this
               # feature needs happens in the browser.
-              "ui":       {"image": "ai-voice-ui",       "base": "python:3.13-slim-trixie"},
+              "ui":       {"image": "calliope-ui",       "base": "python:3.13-slim-trixie"},
           }
           # Native runners per architecture rather than qemu. Every one of
           # these images has RUN instructions (apt, pip), and emulated arm64
@@ -485,7 +485,7 @@ jobs:
         if: matrix.service == 'ui'
         run: |
           buildah run --user root "$(buildah from localhost/build:ui-${{ matrix.arch }})" -- \
-            python -c "import pathlib,sys; p=pathlib.Path('/srv/app/static/ui.html'); sys.exit(0 if p.is_file() and '<title>ai-voice</title>' in p.read_text() else 'the page is missing from the image')"
+            python -c "import pathlib,sys; p=pathlib.Path('/srv/app/static/ui.html'); sys.exit(0 if p.is_file() and '<title>Calliope</title>' in p.read_text() else 'the page is missing from the image')"
 
       # Every image also carries the shared entrypoint, except the gateway and
       # the ui, which ship their own: neither terminates TLS, and the ui's

@@ -36,7 +36,7 @@ Two directories, and the distinction is visible in the API rather than implied:
 
 | | path | writable |
 |---|---|---|
-| built-in | `/etc/ai-voice/glossaries/` (in the image) | no |
+| built-in | `/etc/calliope/glossaries/` (in the image) | no |
 | custom | `/glossaries` (a volume) | yes |
 
 `PUT` or `DELETE` on a built-in name is a **409**, not a silent shadow. A

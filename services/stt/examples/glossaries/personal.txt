@@ -5,7 +5,7 @@
 # shipped profiles must never contain: one person's project names, colleagues
 # and internal systems.
 #
-# Why the split exists. `ai-voice-stt` is published to a public registry, and
+# Why the split exists. `calliope-stt` is published to a public registry, and
 # these rules used to live in services/stt/glossary.txt, which the image copied
 # in and applied to EVERY request. Anyone who pulled the image got
 # `catalaxy = Catallaxy` applied to their audio — a rewrite naming a project

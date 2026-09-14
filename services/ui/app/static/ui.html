@@ -3,7 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ai-voice</title>
+<title>Calliope</title>
+<!-- THE SAME GLYPH, INLINE. A favicon that is a different drawing from the
+     mark in the header is two identities, and an .ico is a second request and
+     a second thing to keep in step. Data URI: no network, no build step. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231B1512'/%3E%3Cpath d='M6 19.5C10.5 19.5 11.8 24.5 16 24.5C20.2 24.5 21.5 19.5 26 19.5' fill='none' stroke='%23EBE5DA' stroke-width='2.2' stroke-linecap='round'/%3E%3Ccircle cx='16' cy='12.5' r='3.8' fill='%23FF4438'/%3E%3C/svg%3E">
 <!--
   ONE FILE. No build step, no node_modules, no framework, no CDN, no external
   font, no analytics. The page makes requests to its own origin and nowhere
@@ -33,22 +37,57 @@
    weights. Every dimension is in rem so a larger OS text setting scales the
    layout with the text instead of overflowing it. */
 :root{
-  --bg:#f6f7f9; --panel:#fff; --line:#dfe3e8; --ink:#14181d; --dim:#525c68;
-  --accent:#2f6fed; --accent-ink:#fff; --warn:#8a5300; --warn-bg:#fff5e0;
-  --bad:#a3231d; --bad-bg:#fdeceb; --good:#1c6b3f; --good-bg:#e8f5ed;
+  /* THE GROUND IS WARM BECAUSE A COOL GREY GROUND IS THE SECOND TELL. The
+     first was the cyan accent -- #0c7c8a lit by a #22d3ee bead is the house
+     style of every AI product shipped since 2023, and a default is what makes
+     a thing look generated. The second was never flagged: #f6f7f9 is a blue
+     grey, and blue grey plus a cyan bead is the whole look.
+     --bg IS NO LONGER THE PAGE. It is a recess cut in the faceplate, and the
+     page is --panel, edge to edge, from the sticky head down through every
+     section. That is the weld: one declaration on body, and the head stops
+     being a lid over a separate slab. */
+  --panel:#F8F5EE; --bg:#EAE6DD; --sunk:#DFD9CB;
+  --line:#C6BEAE; --ink:#1A1714; --dim:#565049;
+  /* THE INSTRUMENT IS NEUTRAL AND THE SIGNAL IS RED. A hundred years of
+     recording hardware agrees and there is no counter-example: the VU face is
+     creme with black lettering, the PPM is white on black, the Neve chassis is
+     grey. The accent keeps a cool cast (OKLCh chroma .027, hue 246) so the
+     controls read as a DIFFERENT MATERIAL on the warm face rather than as
+     unpainted. Dead neutral here looks like a wireframe. 9.75:1 on --panel. */
+  --accent:#33404C; --accent-ink:#F8F5EE;
+  /* THE LAMP. The only saturated thing on the page, and it means exactly one
+     thing: something is happening right now. It may be a dot, a bead, a bar or
+     a playhead. IT IS NEVER A GROUND BEHIND TEXT, which is the whole of how it
+     stays distinct from --bad on a Jobs tab showing both at once. 5.22:1 on
+     --panel, 4.56:1 on --bg, which is the floor and still clears AA. */
+  --live:#C42A1E;
+  /* A LAMP THAT IS OFF IS STILL A LAMP. --lamp-off is dark red glass: it says
+     there is an indicator here before it ever lights, which is what makes you
+     notice when it does, and it is why the page is never wholly without red at
+     rest. 7.52:1 on --panel unlit against 3.20:1 lit versus unlit. */
+  --lamp-off:#7A3E33; --lamp-rim:#8E1E14; --lamp-core:#FF7A62;
+  --warn:#7A4A0F; --warn-bg:#F6EAD3;
+  --bad:#8E2A20; --bad-bg:#F3E3E0; --good:#1C6340; --good-bg:#E3EEE6;
   /* The karaoke highlight, which is deliberately NOT --accent: --accent is
      "this is a control you can press" everywhere else on the page, and a word
      of a transcript is not. A highlighter yellow is the one colour nobody
-     mistakes for a button. */
-  --mark-bg:#ffe9a8; --mark-ink:#14181d;
+     mistakes for a button -- and now also the one nobody mistakes for the
+     lamp, which is the second job this choice does. 13.17:1. */
+  --mark-bg:#F2DC9C; --mark-ink:#1A1714;
   --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-  --radius:10px;
-  /* SURFACE 1, light: carried by a soft two-stop shadow and no border. In the
-     dark block below it is carried by a border and an inset top highlight
-     instead, because a drop shadow does not read on #1b1f26 and pretending it
-     does is why dark modes look flat. One .card rule, two materials. */
-  --card-line:transparent;
-  --lift:0 1px 2px rgba(0,0,0,.04), 0 1px 0 rgba(0,0,0,.02);
+  /* Nine hard-coded 8px radii and the dialog's 14px, named. A radius repeated
+     as a literal is a radius that drifts the first time one of them is
+     touched. */
+  --radius:10px; --radius-s:7px; --radius-l:14px;
+  /* SURFACE 1, BOTH THEMES: A RECESS, NOT A SLAB. The light theme used to lift
+     the card off the page with a drop shadow; a glow under every card is the
+     third tell, after the cyan and the cool ground. A card is now a hole cut
+     in the faceplate, so it gets a dark top lip and a lit bottom one, which is
+     the exact opposite of a lift. The border carries the boundary in both
+     themes now -- --panel over --bg is only 1.14:1, and one 1.14:1 step alone
+     is unfindable on a poorly calibrated display. Two cues, never one. */
+  --card-line:var(--line);
+  --lift:inset 0 1px 1px rgba(0,0,0,.05), inset 0 -1px 0 rgba(255,255,255,.8);
   --scrim:rgba(0,0,0,.4);
   /* TYPE SCALE: 22 / 17 / 14 / 12 / 11. The old scale was 15/14/13/12/11 --
      four of its five steps one pixel apart, which is not a hierarchy, it is a
@@ -62,8 +101,17 @@
      dialog, which the owl does not reach and must not. */
   --s1:.25rem; --s2:.5rem; --s3:.75rem; --s4:1rem; --s5:1.5rem; --s6:2.5rem;
   /* Was max-width:920px, written out twice. Font-relative so the measure
-     grows with the reader's text size rather than cramping it. */
-  --measure:57.5rem;
+     grows with the reader's text size rather than cramping it.
+     46rem AND NOT 57.5, AND THE NUMBER IS THE DOCK. At 57.5 the card came out
+     886px against a 410px bar -- 2.2 to 1, sharing no edge and no rhythm, so
+     the two read as unrelated objects that happen to be on the same page. The
+     owner's word for it was "disconnected" and the diagnosis was "size
+     difference", which was right. 46rem puts the card at 704 against the same
+     bar: 1.7 to 1, close enough to read as two parts of one instrument.
+     It is also simply a better measure. 886px of prose is about 150 characters
+     a line, roughly twice the width anything is comfortable to read, and the
+     Transcribe tab is a wall of transcript. */
+  --measure:46rem;
   /* ONE SPRING, CRITICALLY DAMPED (damping 1.0, response .35 s), sampled from
      x(t)=1-(1+wt)e^(-wt) at thirteen points. Damping 1.0 and no bounce
      anywhere on this page, deliberately: nothing here is dragged, flicked or
@@ -72,22 +120,91 @@
      about. */
   --spring:linear(0, .1804, .4553, .6712, .8123, .8967, .9445, .9708, .9848,
     .9922, .996, .998, 1);
+
+  /* ------------------------------------------------------------ the dock --
+     THE LIVE ACCENT. Each tab carries its own, and the script lerps these
+     three channels between them as the bead travels, so the bead, its halo,
+     the label under it and the wash behind the whole page are one colour that
+     moves. Written as bare channels, not as a colour: mixing an accent with
+     `transparent` through color-mix goes milky, because the mix runs toward
+     transparent BLACK and desaturates on the way. Overwritten by JS. */
+  --glow-rgb:196 42 30;
+  --glow:rgb(var(--glow-rgb));
+  /* THE PLATE IS DARK IN BOTH THEMES, deliberately. A pale plate gives the
+     rim light nothing to be brighter than and the bead's halo nothing to
+     bloom against -- the socket loses its silhouette and the component stops
+     reading as a lit object. A dark console on a creme faceplate is what the
+     hardware this page is dressed as actually looks like. */
+  --plate:#1B1512; --plate-hi:#241C18; --plate-lo:#120C0A;
+  --icon-off:#B3A69E; --icon-on:#1A1210;
+  --bloom-a:.10; --bloom-top:#EFE7DA;
+  /* Geometry. JS measures the bar and overwrites all four; these are only
+     what the no-JS bar falls back to. */
+  --dock-r:18px; --bead-d:52px; --bead-cy:0px; --rise:38px;
 }
 @media (prefers-color-scheme:dark){
   :root{
-    --bg:#14171c; --panel:#1b1f26; --line:#2c323b; --ink:#e6eaef; --dim:#a2adba;
-    --accent:#5a8dff; --accent-ink:#0b1220; --warn:#ffce7a; --warn-bg:#3a2f16;
-    --bad:#ff9d97; --bad-bg:#3a1f1d; --good:#8ee0ae; --good-bg:#16301f;
-    --mark-bg:#54450f; --mark-ink:#ffeeb8;
+    /* WARM NEAR-BLACK, NOT BLUE-BLACK. A red lamp on a blue-black ground is a
+       Christmas pair, and it reads as stuck on rather than as lit. On a warm
+       chassis the same red reads as a filament. */
+    --panel:#201D18; --bg:#141210; --sunk:#0E0C0A;
+    --line:#423D33; --ink:#EBE5DA; --dim:#A69D8E;
+    /* The same graphite, one step up out of the chassis, because #33404C on
+       #201D18 is a hole rather than a control. 8.95:1 on --panel. */
+    --accent:#B2BFC9; --accent-ink:#12181D;
+    --live:#FF6A57;
+    /* THE BEAD INVERTS BETWEEN THE THEMES AND THE STOP CARRYING 3:1 SWAPS WITH
+       IT: the rim holds the boundary in light, the core holds it in dark. That
+       is what a real lamp does against two different chassis, and the two-stop
+       structure this page already had is what made it free. */
+    --lamp-off:#A85A4A; --lamp-rim:#C2452F; --lamp-core:#FFB9A6;
+    --warn:#EFC178; --warn-bg:#382C13;
+    --bad:#F2A79B; --bad-bg:#38201C; --good:#8DDFAC; --good-bg:#153020;
+    --mark-bg:#4E4211; --mark-ink:#FFEEB8;
+    --chassis:#2A2621;
     --card-line:var(--line);
-    --lift:inset 0 1px 0 rgba(255,255,255,.04);
+    --lift:inset 0 1px 1px rgba(0,0,0,.35), inset 0 -1px 0 rgba(255,255,255,.05);
     --scrim:rgba(0,0,0,.55);
+
+    /* The wash is the one thing on a dark ground that carries the accent at
+       full strength, so it runs twice as hot here as on the creme face. */
+    --bloom-a:.20; --bloom-top:#31211B;
   }
 }
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);
+/* THE WELD, IN ONE DECLARATION. The page was --bg with a --panel header
+   floating on it and --panel cards stacked under that, so the head read as a
+   lid and every card as a separate slab. The page IS the faceplate now and
+   --bg is only ever a recess cut into it, which is why the head, the tab strip
+   and the content column are one continuous surface with a seam drawn on it
+   rather than three things piled up. */
+/* THE PAGE IS COMPOSED AGAINST THE DOCK, not stacked from the top of the
+   viewport. Top-aligned, a short panel left 300px of nothing between the last
+   card and the bar, and two objects with a void between them read as
+   unrelated no matter what their widths are -- "the div and the nav feel
+   disconnected" was the note, and the width was only half of it.
+
+   safe center IS THE WHOLE TRICK. Plain `center` on a column taller than the
+   viewport overflows in BOTH directions, and the half that goes off the top is
+   unreachable -- no scrollbar reaches above the scroll origin. `safe` falls
+   back to flex-start the moment the content does not fit, so Transcribe with a
+   wall of transcript behaves exactly as it did before: top-aligned, scrolling.
+   The centring only ever applies when there is room for it.
+
+   The dialog is untouched by this: it is display:none closed and position:
+   absolute open, so it is never a flex item. */
+body{margin:0;background:var(--panel);color:var(--ink);
   font:var(--t-body)/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-  font-optical-sizing:auto}
+  font-optical-sizing:auto;
+  min-height:100svh;display:flex;flex-direction:column;
+  justify-content:safe center}
+/* width:100% IS NOT REDUNDANT BESIDE max-width AND margin:0 auto, and it cost
+   a render to see. A flex item with an auto margin on the CROSS axis does not
+   stretch -- the auto margin wins -- so the column stopped resolving against
+   the container and fell back to its own fit-content width. The card came out
+   328px inside a 736px measure. Stated explicitly, max-width caps it and the
+   auto margins centre it, exactly as they did in normal flow. */
+.masthead,main.wrap{flex:0 0 auto;width:100%}
 /* TRACKING IS SIZE-SPECIFIC, which this sheet used to have essentially none
    of: negative on display type, zero on body, positive on small. Leading runs
    the other way -- 1.15 display, 1.25 title, 1.55 body, 1.45 label, 1.3 micro
@@ -97,57 +214,252 @@ h1,h2,h3{margin:0;font-weight:600}
 h2{font-size:var(--t-title);line-height:1.25;letter-spacing:-.011em}
 h3{font-size:var(--t-label);line-height:1.3;color:var(--dim);
   text-transform:uppercase;letter-spacing:.07em}
-a{color:var(--accent)}
+/* AN ACHROMATIC ACCENT MEANS A LINK CANNOT BE MARKED BY HUE. Graphite on a
+   warm face is a material difference, not a colour one, and a material
+   difference is invisible inside a line of prose. The underline is the cue and
+   the colour is the reinforcement, which is the right way round anyway. */
+a{color:var(--accent);text-decoration-thickness:2px;text-underline-offset:2px}
 code,.num{font-family:var(--mono)}
 /* The dictation clock and the clone countdown both repaint every 100 ms, and
    proportional digits made them jitter sideways as the glyphs changed width. */
 .num,.ring,.job .id,.facts dd,.slider output{font-variant-numeric:tabular-nums}
-.wrap{max-width:var(--measure);margin:0 auto;padding:var(--s5) var(--s4) var(--s6)}
+.wrap{max-width:var(--measure);margin:0 auto;position:relative;z-index:2;
+  /* IT CLEARS THE DOCK. The navigation is a fixed object at the foot of the
+     viewport now, not a lid at the top, so the column has to end above it or
+     the last control on every tab sits underneath the bar: 76px of dock, the
+     22px it floats by, one --s6 of air, and whatever the phone reserves for
+     its home indicator. */
+  padding:var(--s5) var(--s4) calc(var(--s6) + 98px + env(safe-area-inset-bottom))}
 
-/* ------------------------------------------------------------- header -- */
-/* THE ONE PLACE backdrop-filter EARNS ITS KEEP. The header is already sticky
-   and the tabs now live in it, so content genuinely scrolls underneath. The
-   opaque declaration comes FIRST on purpose: an engine without color-mix drops
-   the second line and keeps a solid bar, where the other order would leave a
-   fully transparent sticky header over moving text. Nothing else on this page
-   gets a backdrop-filter -- stacked translucency is where legibility dies. */
-header{position:sticky;top:0;z-index:5;
-  background:var(--panel);
-  background:color-mix(in srgb, var(--bg) 72%, transparent);
-  -webkit-backdrop-filter:blur(20px) saturate(180%);
-  backdrop-filter:blur(20px) saturate(180%);
-  transition:box-shadow .2s ease}
-/* A SCROLL EDGE, NOT A DIVIDER: the line exists only while something is
-   actually underneath it. Toggled from a passive scroll listener at 4px. */
-body.scrolled header{box-shadow:0 1px 0 var(--line),
-  0 8px 24px -16px rgba(0,0,0,.25)}
-/* nowrap, and the brand truncates: .bar used to wrap, and with the tabs in it
-   a narrow viewport would grow the sticky header to two rows and eat the
-   space this change exists to give back. */
-.bar{max-width:var(--measure);margin:0 auto;padding:var(--s2) var(--s4);
-  display:flex;gap:var(--s3);align-items:center;flex-wrap:nowrap}
-.brand{font-size:var(--t-display);font-weight:700;line-height:1.15;
-  letter-spacing:-.021em;min-width:0;white-space:nowrap;overflow:hidden;
-  text-overflow:ellipsis}
-.spacer{flex:1}
-.pills{display:flex;gap:var(--s1);flex-wrap:wrap}
-.pill{font-size:var(--t-micro);line-height:1.3;letter-spacing:.02em;
-  padding:2px 8px;border-radius:999px;border:1px solid var(--line);
-  background:var(--bg);color:var(--dim);white-space:nowrap}
-.pill.ok{background:var(--good-bg);color:var(--good);border-color:transparent}
-.pill.bad{background:var(--bad-bg);color:var(--bad);border-color:transparent}
-.pill.warn{background:var(--warn-bg);color:var(--warn);border-color:transparent}
+/* ----------------------------------------------------------- masthead -- */
+/* THE BRAND IS NOT IN THE NAVIGATION ANY MORE, and that was the note: a mark
+   and a wordmark sharing one strip with four labels is two identities in one
+   object, and the owner's word for it was "terrible". It is one quiet line
+   above the thing the page is actually about, which is where a masthead goes.
 
+   THE DOT IS THE LAMP. It is the only saturated thing above the fold and it
+   still means exactly one thing -- something is happening right now -- so the
+   identity and the one signal on the page are the same object, drawn once.
+   Dark glass at rest, so you learn where it is before it ever lights. */
+.masthead{max-width:var(--measure);margin:0 auto;position:relative;z-index:2;
+  padding:clamp(1.25rem,3vh,2.25rem) var(--s4) 0}
+.brand{display:inline-flex;align-items:center;gap:.6rem;margin:0 0 clamp(.75rem,2vh,1.25rem);
+  font-size:var(--t-micro);font-weight:600;line-height:1.3;letter-spacing:.22em;
+  text-transform:uppercase;color:var(--dim);text-decoration:none}
+.brand .lamp{width:8px;height:8px;border-radius:50%;flex:0 0 auto;
+  background:var(--lamp-off);box-shadow:0 0 0 0 transparent;
+  transition:background .18s ease, box-shadow .18s ease}
+/* LIT IS A FILL AND A HALO, NOT A PULSE. A half-hertz oscillation in the
+   optical centre of the viewport, directly above a transcript somebody is
+   reading, is the hazard the house standard names -- and it would be there
+   for the life of the page. */
+.brand.lit .lamp{background:var(--live);
+  box-shadow:0 0 0 4px color-mix(in srgb, var(--live) 24%, transparent)}
+
+/* THE HEADLINE IS THE TAB YOU ARE ON. The page had a 22px wordmark nobody
+   ever presses as the largest object in the head, and the four things you do
+   press below it at 17px. This is the inversion of that: the section name at
+   display size, in the display face, and the name of the product small and
+   quiet above it. "I rather have things more bold" -- this is the bold. */
+@font-face{font-family:"Calliope Display";font-style:normal;font-weight:700;
+  font-display:swap;src:url(data:font/woff2;base64,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) format("woff2")}
+.word{margin:0;font-family:"Calliope Display",system-ui,-apple-system,sans-serif;
+  font-weight:700;font-size:clamp(2.75rem,9vw,6rem);line-height:.9;
+  letter-spacing:-.04em;color:var(--ink)}
+.tagline{margin:clamp(.5rem,1.4vh,.9rem) 0 0;font-size:var(--t-title);
+  line-height:1.35;letter-spacing:-.011em;color:var(--dim);max-width:34em}
+
+/* AN AMBIENT WASH, TINTED BY WHICHEVER TAB IS SELECTED. It is the only thing
+   on the page that carries the accent at full strength, it sits behind
+   everything, and it is what makes the ground read as lit rather than as a
+   flat swatch. Fixed, so it never scrolls and never repaints on scroll. */
+.bloom{position:fixed;inset:0;pointer-events:none;z-index:0;
+  background:
+    radial-gradient(42% 24% at 50% 100%, rgb(var(--glow-rgb) / var(--bloom-a)), transparent 72%),
+    radial-gradient(90% 44% at 50% 0%, var(--bloom-top), transparent 72%)}
+
+/* ------------------------------------------------------------- the dock --
+   The navigation. Its TOP edge is a liquid surface and the selected tab is a
+   bead the surface dips beneath; the icon of whichever tab is under the bead
+   rises into it, and the label appears below.
+
+   Ported from Meniscus by hasib41 (github.com/hasib41/meniscus-liquid-nav),
+   MIT: "Use it in anything." The geometry, the spring constants and the drag
+   are theirs and are not reinterpreted here -- the previous attempt cut the
+   trough into the BOTTOM edge with no bead riding it, which is the component
+   upside down and was rejected on sight.
+
+   ONE PATH, NOT PSEUDO-ELEMENTS. Assembling a socket from a border-radius and
+   two overlapping boxes leaves seams that show exactly when the shape goes
+   asymmetric, which is the whole point of the lean. */
+/* A FULL-WIDTH RAIL THAT FLEX-CENTRES THE DOCK. It was left:50% with a
+   translateX(-50%), which lands the layer on a half-pixel whenever the
+   computed width is odd -- and a fixed layer on a half-pixel renders every
+   icon and the label soft. That was the "resolution is strange" report.
+   Flex centring rounds to whole pixels. */
+.rail{position:fixed;left:0;right:0;z-index:20;
+  bottom:calc(22px + env(safe-area-inset-bottom));
+  display:flex;justify-content:center;pointer-events:none}
+.dock{position:relative;pointer-events:auto;
+  /* 410 AND NOT 380, AND THE NUMBER IS THE CORNER. The socket's outer
+     shoulder reaches about 42px from the bead's centre; at 380 the first
+     tab's centre sits 77px in with a 15px corner arc, leaving 14px of flat
+     run before the shoulder climbs into the radius -- visible as a pinched
+     top-left the moment the first tab is selected, which is the default. At
+     410 there are 22, which is the reference's clearance. */
+  width:min(410px,calc(100% - 36px));height:76px;
+  touch-action:pan-y;-webkit-tap-highlight-color:transparent;
+  /* No-JS fallback: a plain rounded bar. The script cuts the real skin. */
+  background:var(--plate);border-radius:var(--dock-r)}
+.js .dock{background:none}
+/* The ground shadow, living entirely under the bar's lower half so the socket
+   can never expose it. */
+.dock .cast{position:absolute;inset:46% 7% 6% 7%;border-radius:999px;
+  background:var(--plate);
+  box-shadow:0 10px 22px -8px rgba(0,0,0,.74),0 32px 56px -20px rgba(0,0,0,.82)}
+.dock .skin{position:absolute;inset:0;width:100%;height:100%;overflow:visible;
+  filter:drop-shadow(0 6px 14px rgba(0,0,0,.5))}
+.dock .skin path{fill:url(#dock-plate);stroke:url(#dock-rim);stroke-width:1}
+.plate-hi{stop-color:var(--plate-hi)} .plate-lo{stop-color:var(--plate-lo)}
+/* A specular highlight along the top edge, falling off down the sides. This
+   is the light source, not a border -- and because the rim follows the same
+   path, it is the rim that actually draws the meniscus curve. */
+.rim-hi{stop-color:#fff;stop-opacity:.58} .rim-lo{stop-color:#fff;stop-opacity:.06}
+
+/* THE BEAD. It rides ON the surface line, half in the socket and half out. */
+.dock .bead{position:absolute;top:var(--bead-cy);left:0;
+  width:var(--bead-d);height:var(--bead-d);
+  margin:calc(var(--bead-d) / -2) 0 0 calc(var(--bead-d) / -2);
+  border-radius:50%;
+  background:linear-gradient(168deg,color-mix(in srgb,var(--glow) 76%,#fff),var(--glow) 62%);
+  box-shadow:
+    0 0 0 1px rgb(var(--glow-rgb) / .5),
+    0 0 26px 2px rgb(var(--glow-rgb) / .32),
+    0 10px 18px -7px rgba(0,0,0,.68),
+    inset 0 0 0 1px rgba(255,255,255,.42),
+    inset 0 -3px 6px -3px rgba(26,16,16,.18);
+  will-change:transform;pointer-events:none}
+.dock:not(.ready) .bead{opacity:0}
+
+.tabs{position:absolute;inset:0;display:flex;padding-inline:clamp(26px,10.5%,54px)}
+.tabs button{position:relative;flex:1;display:block;height:100%;padding:0;
+  border:0;background:none;font:inherit;color:inherit;cursor:pointer;
+  border-radius:14px;--t:0}
+.tabs button:focus-visible{outline:2px solid var(--acc);outline-offset:-3px}
+/* The icon is ink while it sits on the plate and ink-on-accent once it is in
+   the bead, interpolated by --t so a drag reads as continuous rather than as
+   a step change at the halfway mark. */
+.tabs button svg{position:absolute;left:50%;top:50%;width:24px;height:24px;
+  fill:none;stroke:currentColor;stroke-width:1.8;
+  stroke-linecap:round;stroke-linejoin:round;
+  color:color-mix(in oklab,var(--icon-off) calc((1 - var(--t)) * 100%),var(--icon-on));
+  transform:translate(-50%,-50%) translateY(calc(var(--t) * var(--rise) * -1));
+  will-change:transform}
+.tabs .label{position:absolute;left:0;right:0;bottom:13%;
+  font-size:var(--t-micro);font-weight:600;letter-spacing:.06em;
+  color:var(--acc);opacity:0;
+  transform:translateY(calc((1 - var(--t)) * 7px));
+  pointer-events:none;white-space:nowrap}
+/* A label belongs to the chosen tab. While the bead is dragged every label
+   previews, so you can see what you are about to land on. */
+.tabs button[aria-selected=true] .label,
+.dock.dragging .label{opacity:var(--t)}
+
+/* THE RUNNING-JOB COUNT, readable from the other three tabs without opening
+   them. It was a numeral in a recess beside the word "Jobs"; the word is an
+   icon now, so it is a badge on the icon -- still a numeral, never a bare
+   dot, because a dot that means "some" is a dot that means nothing. */
+.tabs .count{position:absolute;left:50%;top:50%;
+  margin:-22px 0 0 4px;min-width:1.25em;padding:0 .25em;
+  border-radius:999px;background:var(--ink);color:var(--panel);
+  font-size:9px;font-weight:700;line-height:1.5;letter-spacing:0;
+  text-align:center;pointer-events:none;
+  transform:translateY(calc(var(--t) * var(--rise) * -1))}
+.tabs .count:empty{display:none}
+/* AND IT IS NEVER RED. --live and --bad share a hue by design and are 1.48:1
+   apart, so a deuteranope sees one red: the moment the lamp becomes a ground
+   with a word in it, "this is running" and "this went wrong" are the same
+   object on the one tab that shows both at once. The badge counts; the lamp in
+   the masthead is what says any of them is moving, and .live rings the badge
+   rather than filling it. */
+.tabs .count.live{box-shadow:0 0 0 2px var(--live)}
 /* -------------------------------------------------------------- forms -- */
 input,select,textarea,button{font:inherit;color:inherit}
+/* A FIELD IS A SLOT CUT IN THE CARD FACE, so it is one step below the card it
+   sits in rather than level with it. --sunk and --bg are 1.13:1 apart in light
+   and 1.04:1 in dark, which is why every --sunk surface on this page also
+   carries a border: in dark the border is the cue and the fill is the
+   reinforcement, not the other way round. */
 input[type=text],input[type=password],input[type=number],select,textarea{
-  background:var(--bg);border:1px solid var(--line);border-radius:8px;
-  padding:.4375rem .5625rem;width:100%}
+  background:var(--sunk);border:1px solid var(--line);
+  border-radius:var(--radius-s);padding:.4375rem .5625rem;width:100%}
 textarea{resize:vertical;min-height:7.5rem;font-family:inherit;line-height:1.55}
-button{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+/* A <select> WAS THE ONE FIELD STILL WEARING THE OPERATING SYSTEM. It was in
+   the shared rule above, so it had this page's fill, border, radius and
+   padding -- and then macOS drew its own control on top of all of it: its own
+   arrow, its own inset, and its own intrinsic height, which is why a select
+   sat a pixel or two off every input beside it on the same row. Nineteen of
+   them, on Jobs, on the engine picker and on every voice control.
+
+   appearance:none IS THE WHOLE FIX, and the arrow has to be replaced because
+   removing it removes the only thing saying this opens a list.
+
+   THE CHEVRON IS TWO GRADIENTS, NOT AN SVG. A data: URI would need its stroke
+   colour written in as a literal, so it would need one copy per theme and a
+   third for :disabled, and all three would drift. currentColor works inside a
+   gradient, so one declaration follows the ink into dark mode and greys itself
+   out when the control does. */
+select:not([multiple]){
+  -webkit-appearance:none;appearance:none;
+  /* Room for the chevron, so a long option never runs under it. */
+  padding-right:1.75rem;
+  background-color:var(--sunk);
+  background-image:
+    linear-gradient(45deg,transparent 50%,currentColor 50%),
+    linear-gradient(135deg,currentColor 50%,transparent 50%);
+  background-position:calc(100% - 1rem) calc(50% + 1px),
+                      calc(100% - .6875rem) calc(50% + 1px);
+  background-size:5px 5px,5px 5px;
+  background-repeat:no-repeat;
+  cursor:pointer}
+/* Matching the button ladder: hover moves to --dim and never to --accent, so a
+   pointer passing over a control cannot out-shout the focus ring. */
+select:not([multiple]):hover:not(:disabled){border-color:var(--dim)}
+
+/* THE SLIDERS WERE RAW. `.slider input[type=range]{width:100%}` was their only
+   rule, so eight of them rendered in the system's own blue -- the single
+   loudest colour anywhere on a page whose entire palette is warm neutrals plus
+   one red. The owner's word was "out of place", and it was the accent of a
+   different product sitting inside this one.
+
+   accent-color, AND NOT A HAND-ROLLED TRACK. The bespoke version needs
+   ::-webkit-slider-runnable-track plus ::-moz-range-track plus two thumbs, and
+   the FILLED portion cannot be expressed at all in WebKit -- there is no
+   ::-webkit-range-progress -- so it takes a JS listener writing a gradient
+   stop on every input event, at three call sites, to draw something the
+   browser already draws. accent-color is the property that exists for exactly
+   this, it colours the fill and the thumb together, and it keeps the native
+   hit target and keyboard behaviour that a rebuilt track has to re-earn.
+   .seekbar is untouched by this: it sets appearance:none and paints its own
+   track, and accent-color has no effect on a control that does. */
+input[type=range]{accent-color:var(--accent);cursor:pointer}
+input[type=range]:disabled{cursor:not-allowed}
+/* The shared ring sits tight against a rectangle; a slider's thumb overhangs
+   its own box at both ends, so the ring needs to stand off or it clips it. */
+input[type=range]:focus-visible{outline-offset:3px}
+
+/* The same one line for the two checkboxes, which were also raw. They are the
+   only other controls on the page the browser paints itself. */
+input[type=checkbox],input[type=radio]{accent-color:var(--accent);cursor:pointer}
+button{background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--radius-s);
   padding:.4375rem .8125rem;cursor:pointer;
   transition:transform .12s var(--spring),border-color .12s ease,opacity .12s ease}
-button:hover:not(:disabled){border-color:var(--accent)}
+/* HOVER MOVES TO --dim, NOT --accent. A 9.75:1 border on a hover state is
+   louder than the focus ring that sits below it in the ladder, which inverts
+   the two: a pointer passing over a control must never out-shout the ring
+   saying where the keyboard is. */
+button:hover:not(:disabled){border-color:var(--dim)}
 /* FEEDBACK ON PRESS, NOT ON RELEASE. :active fires on pointerdown, which is
    the whole of the reference's response rule for three lines of CSS. The page
    had none: every button was visually inert until its handler finished. */
@@ -155,9 +467,37 @@ button:active:not(:disabled){transform:scale(.975)}
 /* .seg{overflow:hidden} clips a scaling child, so a pressed segment would eat
    its own edge inside the shared border. */
 .seg button:active:not(:disabled){transform:none}
+/* AND .link HAD NO RULE EITHER, which made the comment below it FALSE: the
+   thing it calls "inline text inside a sentence" rendered as a bordered button
+   exactly like every other, at five call sites. Same defect as .primary and
+   .small, found the same way -- by drawing all four ranks beside each other.
+   It is the only rank with no box at all, and the underline is what carries it
+   once the accent is achromatic. */
+button.link{background:none;border-color:transparent;padding:0;
+  color:var(--accent);text-decoration:underline;
+  text-decoration-thickness:2px;text-underline-offset:2px}
 /* A .link is inline text inside a sentence; scaling it reads as a wobble. */
 button.link:active:not(:disabled){transform:none;opacity:.6}
-button:disabled{opacity:.5;cursor:not-allowed}
+/* THREE RANKS AND A FOURTH THAT IS A WARNING. .primary had EIGHT call sites
+   and no rule at all, and .small had thirty-three; the main action on every
+   tab rendered pixel-identical to the secondary one beside it, which is the
+   largest hierarchy gap left in this file and no test guarded it.
+   FILL MEANS GO, OUTLINE MEANS CAREFUL. The one filled object in a row is
+   achromatic at 9.75:1, so it cannot compete with the lamp; the destructive
+   one is --bad ink inside a --bad border on the page ground, at 7.71:1, and it
+   is NEVER filled. A filled red button would make "press this" and "this went
+   wrong" the same object, which is the collision this palette exists to
+   avoid. */
+.primary{background:var(--accent);color:var(--accent-ink);
+  border-color:transparent;font-weight:600}
+.small{font-size:var(--t-label);padding:.3125rem .625rem;
+  border-radius:var(--radius-s)}
+/* THE JOB ROW'S TWO DELETES CANNOT CARRY THE CLASS. test_escaping.py pins the
+   literal `class="small" data-delaudio=` byte for byte, so the data attribute
+   is the hook there and the class is the hook everywhere else. Same three
+   declarations, one rule, so they cannot drift apart. */
+.danger,.job [data-delaudio],.job [data-forget]{color:var(--bad);
+  border-color:var(--bad);background:var(--panel)}
 /* STANDING RULE: no selector may ever set display:none or visibility:hidden on
    a disabled control. expertFormat(), granularities() and segments() read
    .disabled and .hidden as the authority for what to send, and a control the
@@ -165,7 +505,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
    that vanishes takes its explanation with it. Fifteen defects of that shape
    were fixed once; this is the fence. */
 input:disabled,select:disabled,textarea:disabled{opacity:.5;cursor:not-allowed;
-  background:var(--bg)}
+  background:var(--sunk)}
 /* A GREYED CONTROL GREYS AS A WHOLE FIELD. syncTranscribeControls disables the
    control and left its label and hint at full strength above it, which reads
    as "the label is live and the control is broken" rather than as one
@@ -192,30 +532,40 @@ label{display:block;font-size:var(--t-label);line-height:1.45;color:var(--dim);
 .row.fields{gap:var(--s5);align-items:flex-start}
 .row.fields label{margin-bottom:var(--s2)}
 .actions{display:flex;gap:var(--s2);flex-wrap:wrap;align-items:center}
-.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;
-  overflow:hidden}
-.seg button{border:none;border-radius:0;background:var(--panel);
+.seg{display:inline-flex;border:1px solid var(--line);
+  border-radius:var(--radius-s);overflow:hidden}
+.seg button{border:none;border-radius:0;background:var(--bg);
   padding:.375rem .875rem}
 .seg button[aria-pressed=true]{background:var(--accent);color:var(--accent-ink)}
-.tabs{display:flex;gap:var(--s1);flex:0 0 auto}
-.tabs button{border-radius:999px;background:transparent;border-color:transparent;
-  padding:var(--s1) var(--s3);font-size:var(--t-label);letter-spacing:.005em}
-.tabs button:active:not(:disabled){transform:scale(.96)}
-.tabs button[aria-selected=true]{background:var(--accent);color:var(--accent-ink);
-  border-color:transparent;font-weight:600}
-/* The running-job count, readable from the other two tabs without stopping to
-   parse a parenthesis. :not(:empty) because renderJobs writes "" when nothing
-   is queued and an empty chip is a dot that means nothing. */
-#jobcount:not(:empty){display:inline-block;min-width:1.35em;margin-left:.35em;
-  padding:0 .3em;border-radius:999px;background:var(--accent);
-  color:var(--accent-ink);font-size:var(--t-micro);line-height:1.4;
-  letter-spacing:.02em;text-align:center;font-variant-numeric:tabular-nums}
-.tabs button[aria-selected=true] #jobcount:not(:empty){
-  background:var(--accent-ink);color:var(--accent)}
-/* SURFACE 1. No border in the light theme: the shadow does the separating,
-   and a 1px line plus a shadow is two mechanisms for one job. */
-.card{background:var(--panel);border:1px solid var(--card-line);
-  border-radius:var(--radius);padding:var(--s4);margin-bottom:var(--s3);
+/* WHERE THE SURFACE CANNOT BE SEEN, A PILL COMES BACK. Under forced colours
+   a gradient stroke and an SVG fill are painted over by the system palette,
+   so the selected tab would be distinguished by the risen icon alone -- and
+   a transform is exactly the cue a forced-colours user is most likely to
+   lose. Every word the bead was standing in for comes back with it:
+   .status.running still says Running, .count is still a numeral, the
+   dictation clock is still counting and the transport still shows a
+   timecode. Nothing on this page depends on colour alone, in any mode. */
+@media (forced-colors:active){
+  .dock .skin,.dock .bead,.dock .cast,.bloom{display:none}
+  .dock{background:ButtonFace;border:1px solid ButtonBorder}
+  .tabs button svg{transform:translate(-50%,-50%)}
+  .tabs .label{opacity:1;color:ButtonText}
+  .tabs button[aria-selected=true]{background:Highlight}
+  .tabs button[aria-selected=true] svg{color:HighlightText}
+  .tabs button[aria-selected=true] .label{color:HighlightText}
+  .primary{background:ButtonFace;color:ButtonText;border:1px solid ButtonBorder}
+}
+
+/* SURFACE 1, AND IT IS A HOLE RATHER THAN A BLOCK. The card used to be the
+   --panel slab and the page the --bg ground; they have swapped, so a card is
+   now --bg sunk into the faceplate. Two cues carry the boundary and neither is
+   optional: the 1.14:1 fill step, which a poor display will lose on its own,
+   and the hairline, which survives it. */
+/* THE CORNER IS THE DOCK'S CORNER. A 10px radius under a 15px bar is two
+   different materials in one view; matched, the card and the plate read as cut
+   from the same stock even though one is a recess and the other is raised. */
+.card{background:var(--bg);border:1px solid var(--card-line);
+  border-radius:var(--radius-l);padding:var(--s4);margin-bottom:var(--s3);
   box-shadow:var(--lift)}
 /* ONE OWL RULE replacing the inline margin-tops. The :empty guard is not
    optional: #stt-note, #speak-note, #codeswitch and #clipnote are empty most
@@ -233,13 +583,14 @@ label{display:block;font-size:var(--t-label);line-height:1.45;color:var(--dim);
 /* RECESSED, not a second raised card inside the first. The clone sheet is a
    sub-task within Speak and should read as a well, which is also why its
    inline background:var(--bg) is gone -- the CSS says it now. */
-.card.well{background:var(--bg);border:1px solid var(--line);box-shadow:none}
+.card.well{background:var(--sunk);border:1px solid var(--line);box-shadow:none}
 .hint{font-size:var(--t-label);line-height:1.45;letter-spacing:.005em;
   color:var(--dim);margin-top:var(--s2)}
 .note{font-size:var(--t-label);line-height:1.45;letter-spacing:.005em;
-  border-radius:8px;padding:var(--s2) var(--s3);margin-top:var(--s2)}
+  border-radius:var(--radius-s);padding:var(--s2) var(--s3);margin-top:var(--s2)}
 .note.warn{background:var(--warn-bg);color:var(--warn)}
-.note.bad{background:var(--bad-bg);color:var(--bad)}
+.note.bad{background:var(--bad-bg);color:var(--bad);
+  border-left:2px solid var(--bad)}
 .note.ok{background:var(--good-bg);color:var(--good)}
 /* MARGINALIA, NOT AN ALERT. The four institutional-memory notes in the STT
    panel are there so nobody re-adds denoise or re-copies Resemble's slider
@@ -247,6 +598,19 @@ label{display:block;font-size:var(--t-label);line-height:1.45;color:var(--dim);
    wrong; as a left rule they read as what they are. Not one word is changed. */
 .note.flat{background:none;color:var(--dim);border-left:2px solid var(--line);
   border-radius:0;padding:var(--s1) 0 var(--s1) var(--s3)}
+/* --t-display HAD EXACTLY ONE CONSUMER AND THE BRAND WAS IT. Demoting the
+   wordmark to a silkscreen legend would have taken the top step of the type
+   scale off the page with it, leaving a five-step scale with four steps in
+   use. .lead puts it back where it belongs: on the heading that opens a
+   panel, which is the one string per tab that says what you are looking at.
+   STRUCTURE AND NOT A CLASS, because test_jobs.py pins `<h2 class="tight">
+   Jobs</h2>` byte for byte and a heading that cannot take the class would have
+   left one tab a size below the other three. .well is excluded on purpose: the
+   clone sheet's heading names a SUB-task inside Speak, and giving a recess the
+   same weight as the panel that contains it is the stacking this pass is
+   here to remove. */
+.card:not(.well) > h2,.card:not(.well) > .row > h2{
+  font-size:var(--t-display);line-height:1.15;letter-spacing:-.021em}
 .note .acts{margin-top:var(--s2);display:flex;gap:var(--s2);flex-wrap:wrap}
 /* THE ENGINE PICKER IS A RADIO GROUP AND NOT A SELECT, which is the one place
    this tab departs from the shape of the controls beside it. A closed <select>
@@ -322,23 +686,30 @@ details.jobtext .body{padding:var(--s2) 0 var(--s2) var(--s3);
 /* ---------------------------------------------------------- drop zone -- */
 /* .drop.over swapped the background as well as the border but only the border
    was in the transition list, so the drag state half-changed. */
+/* ARMING IS "PRESS THIS", NOT "LIVE", so the armed border is --accent and
+   never --live: nothing is being captured yet. background:var(--bg) now means
+   the well fills TOWARD the card face as the file comes over it. */
 .drop{border:2px dashed var(--line);border-radius:var(--radius);
-  padding:var(--s5) var(--s3);text-align:center;background:var(--panel);
+  padding:var(--s5) var(--s3);text-align:center;background:var(--sunk);
   transition:border-color .12s ease,background-color .12s ease}
 .drop.over{border-color:var(--accent);background:var(--bg)}
 .drop .big{font-weight:600;margin-bottom:var(--s1)}
 .filechip{display:inline-flex;gap:var(--s2);align-items:center;
-  background:var(--bg);border:1px solid var(--line);border-radius:999px;
+  background:var(--sunk);border:1px solid var(--line);border-radius:999px;
   padding:4px 6px 4px 12px;font-size:var(--t-body);margin-top:var(--s2)}
 
 /* ---------------------------------------------------------- progress --- */
-.bar-track{height:6px;border-radius:999px;background:var(--line);
-  overflow:hidden;margin:var(--s2) 0 var(--s1)}
+.bar-track{height:6px;border-radius:999px;background:var(--sunk);
+  border:1px solid var(--line);overflow:hidden;margin:var(--s2) 0 var(--s1)}
 /* transform, NOT width. Progress animated a layout property on a two-second
    timer; scaleX moves it to the compositor. Both write sites are template
    literals inside an innerHTML string -- renderJobs() and the MeTube download
    bar -- and the 95% cap is now a 0.95 cap. */
-.bar-fill{height:100%;width:100%;background:var(--accent);
+/* --live AND NOT --accent, because a progress bar is the definition of
+   "happening now" and it is the one object in a job row that is moving. It is
+   a bar with no text on it, which is what keeps it on the lamp's side of the
+   line rather than the silkscreen's. */
+.bar-fill{height:100%;width:100%;background:var(--live);
   transform:scaleX(0);transform-origin:left}
 
 /* ------------------------------------------------------- transport ----- */
@@ -351,14 +722,18 @@ details.jobtext .body{padding:var(--s2) 0 var(--s2) var(--s3);
 .scrub{position:relative;flex:1;min-width:8rem;height:14px;display:flex;
   align-items:center;touch-action:none}
 .scrub .lane{position:absolute;left:0;right:0;height:6px;border-radius:999px;
-  background:var(--line);overflow:hidden}
+  background:var(--sunk);border:1px solid var(--line);overflow:hidden}
 .scrub .made,.scrub .played{position:absolute;inset:0;transform:scaleX(0);
   transform-origin:left}
 /* WHAT EXISTS, BEHIND, and it is the reason the seek cannot outrun the model:
    the pale band is exactly the region a drag is clamped to, so the limit is
    visible rather than a correction that happens after the thumb is let go. */
+/* A GRAPHITE KNOB RIDING A RED SIGNAL IS A FADER OVER A METER, which is the
+   single most console-like object on this page and it costs one colour swap.
+   The played extent is where the ear is RIGHT NOW, so it is the lamp; the
+   thumb is the thing you hold, so it is the instrument. */
 .scrub .made{background:var(--dim);opacity:.4}
-.scrub .played{background:var(--accent)}
+.scrub .played{background:var(--live)}
 .seekbar{position:absolute;inset:0;width:100%;height:14px;margin:0;
   background:transparent;-webkit-appearance:none;appearance:none;cursor:pointer}
 .seekbar::-webkit-slider-runnable-track{background:transparent;height:14px}
@@ -373,19 +748,38 @@ details.jobtext .body{padding:var(--s2) 0 var(--s2) var(--s3);
 /* Tabular so the digits do not jitter the row as the seconds tick over. */
 .tnum{font-family:var(--mono);font-size:var(--t-micro);color:var(--dim);
   font-variant-numeric:tabular-nums;white-space:nowrap}
-.job{border:1px solid var(--line);border-radius:var(--radius);
-  padding:var(--s3);margin-bottom:var(--s2);background:var(--panel)}
+/* HAIRLINE-DIVIDED ROWS IN ONE RECESS, not a stack of bordered boxes inside a
+   bordered box. Three nested rectangles was the stacking the owner rejected,
+   drawn once per job. */
+.job{border:0;border-top:1px solid var(--line);border-radius:0;
+  padding:var(--s3) 0;margin-bottom:0;background:transparent}
+#joblist > .job:first-child{border-top:0;padding-top:0}
 .job.expired{opacity:.55}
 .job .top{display:flex;gap:var(--s2);align-items:baseline;flex-wrap:wrap}
 .job .id{font-family:var(--mono);font-size:var(--t-micro);letter-spacing:.02em;
   color:var(--dim)}
 .job .acts{display:flex;gap:var(--s1);margin-top:var(--s2);flex-wrap:wrap}
 .status{font-size:var(--t-micro);line-height:1.3;letter-spacing:.02em;
-  padding:1px 7px;border-radius:999px;background:var(--bg);
+  padding:1px 7px;border-radius:999px;background:var(--sunk);
   border:1px solid var(--line)}
-.status.running{background:var(--warn-bg);color:var(--warn);border-color:transparent}
+/* RUNNING IS A LAMP BESIDE A WORD, NOT A YELLOW WASH. It borrowed --warn,
+   which said "something needs your attention" about a job doing exactly what
+   was asked of it, and it spent the warning colour on the commonest state on
+   the tab. The dot is the lamp, the word is the word, and --warn is free again
+   for actual warnings.
+   FAILED KEEPS THE WASH AND GAINS A RULE. --live and --bad are 1.48:1 apart
+   and a deuteranope sees one red, so the separation is never hue: live is a
+   small filled object that moves, failed is dark ink resting in a pale wash
+   with a 2px rule down its left edge. It never glows, never fills, never
+   moves, and no selector carrying --bad may give it a transition, an
+   animation or a shadow. */
+.status.running{background:var(--bg);color:var(--ink);border-color:var(--line)}
+.status.running::before{content:"";display:inline-block;width:6px;height:6px;
+  margin-right:.4em;vertical-align:.08em;border-radius:50%;
+  background:var(--live)}
 .status.done{background:var(--good-bg);color:var(--good);border-color:transparent}
-.status.failed{background:var(--bad-bg);color:var(--bad);border-color:transparent}
+.status.failed{background:var(--bad-bg);color:var(--bad);border-color:transparent;
+  border-left:2px solid var(--bad);border-radius:2px 999px 999px 2px}
 
 /* -------------------------------------------------------------- modal -- */
 /* SURFACE 2, and the only one. This is the page's one blocking task, so it is
@@ -395,7 +789,8 @@ details.jobtext .body{padding:var(--s2) 0 var(--s2) var(--s3);
    rather than a rectangle fading up. Written as longhands because the
    transition shorthand carrying `allow-discrete` is dropped whole by older
    parsers; without @starting-style a browser gets today's instant dialog. */
-dialog{border:1px solid var(--line);border-radius:14px;background:var(--panel);
+dialog{border:1px solid var(--line);border-radius:var(--radius-l);
+  background:var(--panel);
   color:var(--ink);padding:0;max-width:32.5rem;width:calc(100% - 2rem);
   box-shadow:0 24px 64px -24px rgba(0,0,0,.45);
   opacity:0;transform:scale(.96);
@@ -431,8 +826,8 @@ dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
    max-height in em rather than px so the pane holds a constant number of lines
    and grows with the reader's text setting, as details.jobtext .body already
    did. */
-.out{white-space:pre-wrap;word-break:break-word;background:var(--bg);
-  border:1px solid var(--line);border-radius:8px;padding:var(--s3);
+.out{white-space:pre-wrap;word-break:break-word;background:var(--sunk);
+  border:1px solid var(--line);border-radius:var(--radius-s);padding:var(--s3);
   min-height:3.75rem;max-height:26em;overflow:auto;font-size:var(--t-body);
   line-height:1.7;letter-spacing:.003em}
 /* transform, not width, for the same reason as .bar-fill -- but more so: this
@@ -441,12 +836,21 @@ dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
    attack and exponential release. Deliberately NOT a spring: a level meter
    that overshoots reports a peak that was never in the signal, which is a
    control telling a lie about the microphone. */
-.meter{height:8px;border-radius:999px;background:var(--line);overflow:hidden;
-  margin-top:var(--s2)}
-.meter div{height:100%;width:100%;background:var(--good);
-  transform:scaleX(0);transform-origin:0 50%}
+.meter{height:8px;border-radius:999px;background:var(--sunk);
+  border:1px solid var(--line);overflow:hidden;margin-top:var(--s2)}
+/* --live AND NOT --good, AND IT FILLS INBOUND. Green means "it worked"
+   everywhere else on this page, so a level meter that is green while a
+   microphone is open says the recording succeeded before it has happened. And
+   transform-origin moves to the right edge: this is sound coming IN, and a
+   meter that grows away from the speaking end reads as output. */
+.meter div{height:100%;width:100%;background:var(--live);
+  transform:scaleX(0);transform-origin:100% 50%}
+/* A CLOCK RUNNING DOWN DURING A CAPTURE IS THE SIGNAL, not a label about it,
+   so it takes the lamp's colour for as long as it is counting. The size stays
+   deliberately off the type scale: it is a tabular countdown and the loudest
+   number on the screen by design. */
 .ring{font-family:var(--mono);font-size:1.625rem;line-height:1.15;
-  font-weight:700;letter-spacing:-.021em}
+  font-weight:700;letter-spacing:-.021em;color:var(--live)}
 
 /* ------------------------------------------------------ playback ------ */
 /* The playback-speed picker is a SELECT and not a range, unlike the synthesis
@@ -456,7 +860,7 @@ dialog .foot{padding:var(--s3) var(--s5) var(--s4);display:flex;gap:var(--s2);
    otherwise create -- so they are given different shapes as well as different
    names. The second is that listening rates are chosen from a short list;
    nobody wants 1.07x, and a range invites it. */
-.rate{width:auto;min-width:6rem;padding-right:6px}
+.rate{width:auto;min-width:6rem;padding-right:6px;border-radius:var(--radius-s)}
 /* The two job filters sit on the card header beside an h2 and a button, so
    they size to their own longest option rather than taking the width:100%
    every other select on this page is given. Same reason .rate exists. */
@@ -543,10 +947,23 @@ details>summary:active{opacity:.72}
   dialog[open]{transform:none}
   @starting-style{dialog[open]{transform:none}}
   .drop{transition:background-color .12s ease}
+  /* THE LAMP LOSES NOTHING HERE, because it never had a pulse to lose: it is
+     a fill and a halo, and both are states rather than motion.
+     THE BEAD STILL MOVES TO THE SELECTED TAB -- reduced motion means gentler
+     feedback, not none. meniscusTo() reads this query at call time and sets
+     the position directly instead of springing to it, so the bead arrives
+     rather than travelling and the surface never leans. The icon still rises
+     and the label still appears, because both are the answer to "which one is
+     selected" and neither is vestibular. */
+  .tabs button svg{transition:none}
 }
+/* THIS DESIGN COSTS ALMOST NOTHING HERE. Nothing on the page is translucent
+   any more -- the sticky head that needed a backdrop-filter is gone, and the
+   dock is an opaque plate sitting over content rather than a layer letting it
+   through. The ambient wash is the one thing left that is see-through, and it
+   is decoration, so it simply goes. */
 @media (prefers-reduced-transparency:reduce){
-  header{background:var(--panel);
-    -webkit-backdrop-filter:none;backdrop-filter:none}
+  .bloom{display:none}
   dialog::backdrop,dialog[open]::backdrop{
     -webkit-backdrop-filter:none;backdrop-filter:none}
   dialog[open]::backdrop{background-color:rgba(0,0,0,.7)}
@@ -554,74 +971,161 @@ details>summary:active{opacity:.72}
      was the one translucent surface this query did not reach. */
   .band span{background:#000}
 }
+/* WARM REPLACEMENTS, AND THAT IS A BUG FIX RATHER THAN A REPAINT. These four
+   overrides were cool greys chosen against a cool ground; left alone over a
+   warm faceplate they would cast blue on exactly the displays whose owners
+   asked for MORE contrast, not for a second hue. --live darkens rather than
+   disappearing, and the recess relationship stops being a 1.14:1 fill step and
+   becomes a drawn edge. */
 @media (prefers-contrast:more){
-  :root{--line:#8a939e;--dim:#3d4650;--card-line:#8a939e}
-  header{background:var(--panel);
-    -webkit-backdrop-filter:none;backdrop-filter:none;
-    border-bottom:1px solid var(--line)}
+  :root{--line:#837B6D;--dim:#3C372F;--card-line:#837B6D;--live:#A81E12}
+  /* THE PLATE GETS A DRAWN EDGE. Its silhouette is a 1px rim light at 58%
+     white, which is exactly the kind of cue a reader who asked for more
+     contrast is least able to see. */
+  .dock .skin path{stroke:var(--ink);stroke-opacity:1}
+  .bloom{display:none}
   .card,.job{border:1px solid var(--line)}
   .band span{background:#000;border:1px solid #fff}
   details{border:1px solid var(--line);border-radius:var(--radius);
     padding:0 var(--s3)}
   .note.flat{border:1px solid var(--line);border-left-width:2px;
-    border-radius:8px;padding:var(--s2) var(--s3)}
+    border-radius:var(--radius-s);padding:var(--s2) var(--s3)}
+  /* A FILL THAT IS OVERRIDDEN LEAVES AN UNBOUNDED SLAB, and the primary action
+     is the one object on the page that is nothing but a fill. The lamp gets an
+     edge for the same reason: lit and unlit then differ by FILL INSIDE A
+     BORDER, which survives any palette the reader forces on top of this one. */
+  .primary{border:1px solid var(--ink)}
+  /* Lit and unlit then differ by FILL INSIDE A BORDER, which survives any
+     palette the reader forces on top of this one. */
+  .brand .lamp{box-shadow:0 0 0 1px var(--ink)}
+  .dock .bead{box-shadow:0 0 0 2px var(--ink)}
 }
 @media (prefers-contrast:more) and (prefers-color-scheme:dark){
-  :root{--line:#7b8592;--dim:#d3dae2;--card-line:#7b8592}
+  :root{--line:#8F8779;--dim:#DBD5C9;--card-line:#8F8779;--live:#FF9481}
 }
+/* THE STRIP WAS ALREADY GOING TO THE THUMB AT 30rem, and this block is what
+   is left of that: the navigation is a bottom dock at EVERY width now, so
+   there is no layout to switch, only proportions to tighten. Four labels at
+   --t-title plus a two-digit chip was about 340px of strip that nowrap was
+   forbidden to break on a 375px viewport -- the problem this design does not
+   have, because the labels are icons and only the selected one is written
+   out. */
 @media (max-width:30rem){
-  .tabs button{padding:var(--s1) var(--s2)}
+  /* Tracking is size-specific, including when the viewport forces the size. */
+  .brand{letter-spacing:.14em}
+  .tabs button svg{width:22px;height:22px}
+  .tabs .label{font-size:10px}
+  .masthead{padding-top:clamp(1.25rem,4vh,2rem)}
+  .wrap{padding-top:var(--s4)}
 }
 </style>
 </head>
 <body>
 
-<header>
-  <div class="bar">
-    <!-- THE TAGLINE IS GONE. It read "speech in, speech out", under a tab
-         strip reading Transcribe, Speak and Jobs. A slogan that restates the
-         navigation beside it is the first line to cut, and it was also the
-         first line to hide on a narrow viewport -- a string worth hiding at
-         30rem is a string worth deleting at every width. -->
-    <span class="brand">ai-voice</span>
-    <span class="spacer"></span>
-    <!-- THERE WAS AN "EXPERT" CHECKBOX HERE: a global gate over the
-         .expert-only class, which is to say over the three <details> panels at
-         the foot of each tab. They are collapsed, they are titled "Expert —
-         …", and a disclosure triangle already means "this is hidden until you
-         want it". The checkbox was a second control over the same thing, so a
-         setting could be out of sight for two different reasons at once and
-         finding it meant reasoning about both. -->
-    <!-- AND AN API KEY BOX: the browser held the key, put it on every XHR, and
-         this service forwarded it. It is now UI_GATEWAY_API_KEY on the
-         container and the header is added server-side, so there is nothing
-         here to type. Read app/main.py's module docstring before assuming
-         where the trust boundary is — it moved. -->
-    <!-- THE TABS LIVE IN THE HEADER because the header is sticky and they were
-         not: "where am I" scrolled off the screen, on a page whose Transcribe
-         tab is one long scroll. It also gives the sticky bar a reason to exist
-         beyond a wordmark, and reclaims the row the tab strip used to occupy.
-         .bar is flex-wrap:nowrap for this: wrapped, the header would grow to
-         two rows on a phone and eat the space the move gives back.
+<!-- The ambient wash. Its hue is the live accent, written by the dock. -->
+<div class="bloom" aria-hidden="true"></div>
 
-         role="tablist" was already declared here with no panels to point at,
-         which is a control lying about its own structure. aria-controls,
-         role="tabpanel" and the roving Arrow/Home/End handler below finish
-         what the attribute claimed. -->
-    <nav class="tabs" role="tablist" aria-label="Sections">
-      <button role="tab" id="tab-btn-transcribe" data-tab="transcribe"
-              aria-controls="tab-transcribe" aria-selected="true">Transcribe</button>
-      <button role="tab" id="tab-btn-speak" data-tab="speak"
-              aria-controls="tab-speak" aria-selected="false" tabindex="-1">Speak</button>
-      <button role="tab" id="tab-btn-jobs" data-tab="jobs"
-              aria-controls="tab-jobs" aria-selected="false" tabindex="-1">Jobs <span id="jobcount"></span></button>
-      <button role="tab" id="tab-btn-vocab" data-tab="vocab"
-              aria-controls="tab-vocab" aria-selected="false" tabindex="-1">Vocabulary</button>
-    </nav>
+<!-- ======================================================== the dock ==
+     THE NAVIGATION IS THE CENTRAL OBJECT NOW, not a strip along the top of a
+     title bar. It floats at the foot of the viewport, its top edge is a
+     liquid surface, and the selected tab is a bead that surface dips beneath.
+
+     IT COMES FIRST IN THE DOCUMENT even though it is painted last, so a
+     screen reader meets the navigation before the section it names -- which
+     is the order every other site puts them in, and the order "where am I,
+     where can I go" is actually asked in.
+
+     Ported from Meniscus by hasib41 (github.com/hasib41/meniscus-liquid-nav),
+     MIT. The four icons and the accents are this page's; the geometry, the
+     spring and the drag are theirs. -->
+<div class="rail">
+<div class="dock" id="dock">
+  <span class="cast" aria-hidden="true"></span>
+  <svg class="skin" id="skin" aria-hidden="true" focusable="false" preserveAspectRatio="none">
+    <defs>
+      <!-- A whisper of a gradient reads as a lit plate rather than a flat
+           swatch; the rim is the plate's only silhouette against the page. -->
+      <linearGradient id="dock-plate" x1="0" y1="0" x2="0" y2="1">
+        <stop class="plate-hi" offset="0"/><stop class="plate-lo" offset="1"/>
+      </linearGradient>
+      <linearGradient id="dock-rim" x1="0" y1="0" x2="0" y2="1">
+        <stop class="rim-hi" offset="0"/><stop class="rim-lo" offset="1"/>
+      </linearGradient>
+    </defs>
+    <path id="skinfill"/>
+  </svg>
+  <!-- Decorative: which tab is selected is already carried by aria-selected
+       and by the label, so a screen reader gains nothing from the bead and
+       would only have to skip it. -->
+  <span class="bead" id="bead" aria-hidden="true"></span>
+
+  <div class="tabs" role="tablist" aria-label="Sections" id="tabs">
+    <!-- EACH TAB CARRIES ITS OWN ACCENT and the script reads it from here, so
+         the stylesheet stays the one place the palette is written down. They
+         are one warm ramp, red through rose: red is what a hundred years of
+         recording hardware means by "this is live", and the four steps stay
+         inside that family so the page never stops looking like one thing. -->
+    <button role="tab" id="tab-btn-transcribe" data-tab="transcribe"
+            aria-controls="tab-transcribe" aria-selected="true" type="button"
+            style="--acc:#FF4438">
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <rect x="9" y="2.8" width="6" height="11" rx="3"/>
+        <path d="M5.4 11.4a6.6 6.6 0 0 0 13.2 0"/><path d="M12 18v3.2"/>
+      </svg><span class="label">Transcribe</span></button>
+
+    <button role="tab" id="tab-btn-speak" data-tab="speak"
+            aria-controls="tab-speak" aria-selected="false" tabindex="-1" type="button"
+            style="--acc:#FF7A3D">
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M3.4 9.4h3.3L11.6 5v14L6.7 14.6H3.4z"/>
+        <path d="M15.6 9.5a3.9 3.9 0 0 1 0 5"/><path d="M18.4 6.8a7.7 7.7 0 0 1 0 10.4"/>
+      </svg><span class="label">Speak</span></button>
+
+    <button role="tab" id="tab-btn-jobs" data-tab="jobs"
+            aria-controls="tab-jobs" aria-selected="false" tabindex="-1" type="button"
+            style="--acc:#FFB03A">
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <circle cx="4.6" cy="6.8" r="1.5"/><path d="M9 6.8h10.4"/>
+        <circle cx="4.6" cy="12" r="1.5"/><path d="M9 12h10.4"/>
+        <circle cx="4.6" cy="17.2" r="1.5"/><path d="M9 17.2h6.2"/>
+      </svg><span class="label">Jobs</span><span class="count" id="jobcount"></span></button>
+
+    <button role="tab" id="tab-btn-vocab" data-tab="vocab"
+            aria-controls="tab-vocab" aria-selected="false" tabindex="-1" type="button"
+            style="--acc:#FF5F7E">
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M12 6.8C10.3 5.3 8.2 4.7 4.8 4.7a.8.8 0 0 0-.8.8v11.9a.8.8 0 0 0 .8.8c3.4 0 5.5.6 7.2 2 1.7-1.4 3.8-2 7.2-2a.8.8 0 0 0 .8-.8V5.5a.8.8 0 0 0-.8-.8c-3.4 0-5.5.6-7.2 2.1Z"/>
+        <path d="M12 6.8v13.4"/>
+      </svg><span class="label">Vocabulary</span></button>
   </div>
-</header>
+</div>
+</div>
+<!-- ==================================================== /the dock ==== -->
 
-<div class="wrap">
+<!-- CALLIOPE. Two things at once, and both of them are this product:
+     Kalliope, "beautiful-voiced", the muse who speaks; and a calliope, the
+     steam organ, a machine that makes a voice out of pressure.
+
+     THE MARK IS THE LAMP, which is the one signal this page has and the only
+     saturated thing above the fold. Dark glass at rest so you learn where the
+     indicator is before it ever lights, filled and haloed while anything is
+     running. It is a disc: it survives 16px, it is the favicon in this page's
+     head unchanged, and it will be the app icon. A mark that has to be
+     explained is a mark that was invented; this one is already on screen. -->
+<div class="masthead">
+  <p class="brand" id="brand"><span class="lamp" aria-hidden="true"></span>Calliope</p>
+  <!-- ONE <h1>, AND IT NAMES THE SECTION YOU ARE ON. The page used to have no
+       first-level heading at all, then had one that said the product name --
+       a string nobody navigates by. The four panels write this between them
+       rather than carrying an <h1> each, so the document never has two. -->
+  <h1 class="word" id="word">Transcribe</h1>
+  <p class="tagline" id="tagline">Speech in, text out.</p>
+</div>
+
+<!-- A LANDMARK, WHICH THIS PAGE ALSO DID NOT HAVE. <div class="wrap"> meant
+     "skip to content" had nothing to skip to and the four tabpanels lived in
+     no region at all. -->
+<main class="wrap">
 
   <!-- ================================================== TRANSCRIBE == -->
   <section id="tab-transcribe" role="tabpanel" aria-labelledby="tab-btn-transcribe">
@@ -1321,7 +1825,7 @@ details>summary:active{opacity:.72}
   <section id="tab-vocab" role="tabpanel" aria-labelledby="tab-btn-vocab" hidden>
     <div class="card">
       <h2 class="tight">Vocabulary profiles</h2>
-<div id="glossman" hidden>
+      <div id="glossman" hidden>
           <div class="row" style="align-items:center">
             <div class="seg tight" id="glossnames"></div>
             <span class="spacer"></span>
@@ -1360,7 +1864,7 @@ details>summary:active{opacity:.72}
                    since the refusal it answers. -->
               <button class="small" id="glossforce" type="button" hidden>Save anyway</button>
               <span class="spacer"></span>
-              <button class="small" id="glossdelete" type="button">Delete</button>
+              <button class="small danger" id="glossdelete" type="button">Delete</button>
             </div>
           </div>
 
@@ -1374,12 +1878,11 @@ details>summary:active{opacity:.72}
                to say is that the deployment cannot write at all, and that is
                true with no profile open. -->
           <div id="glossnote" aria-live="polite"></div>
-        </div>
       </div>
     </div>
   </section>
 
-</div>
+</main>
 
 <!-- ============================================ CONFIRM BEFORE FETCH == -->
 <dialog id="confirm">
@@ -1924,7 +2427,314 @@ function speechPlan(engine, text) {
    heap dump, and no header to attach. api() above is a plain fetch for exactly
    that reason. */
 
+/* ========================================================== the dock ===== */
+/*
+  THE ONE PLACE ON THIS PAGE THAT CARRIES MOMENTUM, and the reason --spring's
+  comment does not describe the whole file. Everything else here is clicked,
+  so it is critically damped and does not overshoot; this is a surface being
+  dragged from one tab to another, and a surface that stops dead at its
+  destination is the one thing a liquid never does.
+
+  Ported from Meniscus by hasib41 (github.com/hasib41/meniscus-liquid-nav),
+  MIT: "Use it in anything." The geometry, the spring constants and the drag
+  below are theirs and are deliberately NOT reinterpreted -- the previous
+  attempt at this cut the trough into the bottom edge of a top strip with no
+  bead riding it, which is the component upside down, and it was rejected on
+  sight. When in doubt here, match the reference.
+
+  Four moving parts:
+    1 dockMeasure  derives every dimension from the measured bar and writes
+                   them back as custom properties, so the CSS and the path
+                   always agree about where the bead is.
+    2 dockTrough   the bar's outline as ONE closed path whose socket is
+                   parametric -- centre, half-width, depth, and two
+                   independent shoulder radii. Because the socket is computed
+                   rather than assembled it can lean into the travel and
+                   shallow out at speed.
+    3 dockLoop     one rAF, one spring. The bead's own velocity drives the
+                   lean, the widening and its squash. It stops when settled.
+    4 the lamp     meniscusLevel and meniscusBusy keep their names and their
+                   signatures because a dozen call sites use them; what they
+                   drive moved from a bead in the tab strip to the disc in
+                   the masthead, which is the mark.
+*/
+document.documentElement.classList.add("js");
+
+const DOCK  = $("dock"), DOCKSKIN = $("skin"), DOCKFILL = $("skinfill"),
+      DOCKBEAD = $("bead"), DOCKTABS = Array.from(document.querySelectorAll("[role=tab]"));
+
+/* `level` is how loud the microphone is, `mic` and `busy` are the two
+   independent reasons the lamp can be lit, and `calm` is the reduced-motion
+   query held once rather than rebuilt on every frame of the meter. */
+const MENISCUS = { level: 0, mic: false, busy: new Set(),
+  calm: matchMedia("(prefers-reduced-motion: reduce)") };
+
+const dclamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+const dsmooth = t => t * t * (3 - 2 * t);
+
+/* Each tab's accent is read from the stylesheet rather than written here, so
+   the palette has exactly one home. Bare channels, because mixing an accent
+   toward `transparent` through color-mix runs it toward transparent BLACK and
+   it goes milky on the way. */
+const dhex = s => {
+  const h = (s || "").trim().replace("#", "") || "C42A1E";
+  const n = parseInt(h.length === 3 ? h.replace(/./g, "$&$&") : h, 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+};
+const DOCKACC = DOCKTABS.map(t => dhex(getComputedStyle(t).getPropertyValue("--acc")));
+const dmix = (a, b, t) => Math.round(a[0] + (b[0] - a[0]) * t) + " "
+  + Math.round(a[1] + (b[1] - a[1]) * t) + " "
+  + Math.round(a[2] + (b[2] - a[2]) * t);
+
+/* ---------------------------------------------------------- 1 geometry -- */
+const G = { W: 0, H: 0, R: 17, D: 52, RB: 32, S: 11, CY: 0, slots: [], span: 80 };
+
+/* Half-width of a socket built from a shoulder of radius s tangent to the top
+   edge and a bowl of radius rb centred at (., by). Falls straight out of the
+   external-tangency condition |C1C2| = s + rb. */
+const dreach = (s, rb, by) => Math.sqrt(Math.max((s + rb) ** 2 - (s - by) ** 2, 1));
+
+function dockMeasure() {
+  if (!DOCK) return false;
+  const r = DOCK.getBoundingClientRect();
+  const W = Math.round(r.width), H = Math.round(r.height);
+  if (W < 40 || H < 30) return false;
+  G.slots = DOCKTABS.map(t => {
+    const b = t.getBoundingClientRect();
+    return b.left - r.left + b.width / 2;
+  });
+  G.span = G.slots.length > 1 ? G.slots[1] - G.slots[0] : W;
+  G.W = W; G.H = H;
+  G.R = dclamp(H * 0.20, 13, 20);
+  G.CY = 0;                                /* the bead rides ON the surface */
+  let D = Math.min(H * 0.68, G.span * 0.78);
+  /* The outer shoulder has to clear the bar's own corner, so shrink the bead
+     until the whole socket fits between the first tab's centre and the arc. */
+  const room = G.slots[0] - G.R - 6;
+  for (let i = 0; i < 3; i++) {
+    const hw = dreach(D * 0.22, D / 2 + 6, G.CY);
+    if (hw <= room) break;
+    D *= room / hw;
+  }
+  G.D = Math.max(Math.round(D), 30);
+  G.S = G.D * 0.22;
+  G.RB = G.D / 2 + 6;
+  DOCKSKIN.setAttribute("viewBox", "0 0 " + W + " " + H);
+  DOCK.style.setProperty("--dock-r", G.R.toFixed(1) + "px");
+  DOCK.style.setProperty("--bead-d", G.D + "px");
+  DOCK.style.setProperty("--bead-cy", G.CY + "px");
+  DOCK.style.setProperty("--rise", (H / 2 - G.CY).toFixed(1) + "px");
+  return true;
+}
+
+/* ---------------------------------------------------------- 2 the skin -- */
+/* ONE CLOSED PATH. Along the top edge the flat run is interrupted by a socket
+   built from three tangent arcs: a convex shoulder that turns the edge down, a
+   concave bowl that wraps the bead, and a second shoulder back up. Because the
+   arcs are solved for tangency rather than eyeballed with Beziers, the bowl
+   hugs the bead exactly and the joins are invisible at any size.
+
+   THE TWO SHOULDER RADII ARE INDEPENDENT, and that is where the liquid lives:
+   a longer trailing radius and a shorter leading one make the surface visibly
+   drag behind the weight that is moving through it. */
+function dockTrough(bx, by, rb, sL, sR) {
+  const W = G.W, H = G.H, R = G.R;
+  /* The shoulder's centre sits radius-s below the top edge, so its arc leaves
+     the flat run tangentially; solve its x from external tangency. */
+  const wing = (s, side) => {
+    const L = s + rb, half = dreach(s, rb, by), sx = bx + side * half;
+    return { sx: sx, tx: sx + ((bx - sx) / L) * s, ty: s + ((by - s) / L) * s };
+  };
+  const A = wing(sL, -1), B = wing(sR, +1);
+  /* The bowl runs from A's tangent point to B's the short way, under the bead. */
+  const a0 = Math.atan2(A.ty - by, A.tx - bx), a1 = Math.atan2(B.ty - by, B.tx - bx);
+  let sweep = (a0 - a1) * 180 / Math.PI;
+  while (sweep < 0) sweep += 360;
+  const large = sweep > 180 ? 1 : 0, n = v => v.toFixed(2);
+  return "M0 " + n(R) + "A" + n(R) + " " + n(R) + " 0 0 1 " + n(R) + " 0"
+    + "L" + n(dclamp(A.sx, R, W - R)) + " 0"
+    + "A" + n(sL) + " " + n(sL) + " 0 0 1 " + n(A.tx) + " " + n(A.ty)
+    + "A" + n(rb) + " " + n(rb) + " 0 " + large + " 0 " + n(B.tx) + " " + n(B.ty)
+    + "A" + n(sR) + " " + n(sR) + " 0 0 1 " + n(dclamp(B.sx, R, W - R)) + " 0"
+    + "L" + n(W - R) + " 0" + "A" + n(R) + " " + n(R) + " 0 0 1 " + n(W) + " " + n(R)
+    + "L" + n(W) + " " + n(H - R) + "A" + n(R) + " " + n(R) + " 0 0 1 " + n(W - R) + " " + n(H)
+    + "L" + n(R) + " " + n(H) + "A" + n(R) + " " + n(R) + " 0 0 1 0 " + n(H - R) + "Z";
+}
+
+/* -------------------------------------------------- 3 one rAF, one spring */
+let dx = 0, dv = 0, dtarget = 0, ddragging = false, draf = 0, dlast = 0;
+
+function dockPaint() {
+  if (!G.W) return;
+  /* q is signed travel, -1..1. Everything liquid is a function of it. The
+     normaliser is set so a hop to the next tab reads about half strength and a
+     sweep across the whole bar saturates. */
+  const q = dclamp(dv / 1100, -1, 1) * (ddragging ? 0.5 : 1), mag = Math.abs(q);
+  const sL = dclamp(G.S * (1 + 0.06 * mag + 0.40 * q), G.S * 0.55, G.S * 2.1);
+  const sR = dclamp(G.S * (1 + 0.06 * mag - 0.40 * q), G.S * 0.55, G.S * 2.1);
+  DOCKFILL.setAttribute("d", dockTrough(dx, G.CY, G.RB, sL, sR));
+  /* Volume-preserving squash along the direction of travel. */
+  const sx = 1 + 0.07 * mag;
+  DOCKBEAD.style.transform = "translate3d(" + dx.toFixed(2) + "px,0,0) scale("
+    + sx.toFixed(3) + "," + (1 / sx).toFixed(3) + ")";
+  /* Icons rise into the bead as it passes over them, so a drag reads as
+     liquid instead of stepped, and the accent is whatever is under the bead. */
+  let near = 0, nd = Infinity;
+  for (let i = 0; i < DOCKTABS.length; i++) {
+    const gap = Math.abs(dx - G.slots[i]);
+    if (gap < nd) { nd = gap; near = i; }
+    DOCKTABS[i].style.setProperty("--t",
+      dsmooth(dclamp(1 - gap / (G.span * 0.55), 0, 1)).toFixed(3));
+  }
+  const side = dx >= G.slots[near] ? 1 : -1;
+  const other = dclamp(near + side, 0, DOCKTABS.length - 1);
+  const t = other === near ? 0 : dclamp(Math.abs(dx - G.slots[near]) / G.span, 0, 1);
+  document.documentElement.style.setProperty("--glow-rgb",
+    dmix(DOCKACC[near], DOCKACC[other], t));
+}
+
+function dockLoop(now) {
+  draf = 0;
+  const step0 = Math.min((now - dlast) / 1000, 1 / 30);
+  dlast = now;
+  /* A tap travels 1.5x slower than a drag so the socket has time to read. K
+     scales by 1/1.5^2 and C by 1/1.5, which holds the damping ratio at .81 --
+     same overshoot, same settle, just stretched. Dragging stays stiff so the
+     surface tracks the finger. */
+  const K = ddragging ? 900 : 142, C = ddragging ? 52 : 19.3;
+  let step = step0;
+  while (step > 0) {                            /* substep, for stability */
+    const h = Math.min(step, 1 / 240);
+    dv += (-K * (dx - dtarget) - C * dv) * h;
+    dx += dv * h;
+    step -= h;
+  }
+  dockPaint();
+  if (Math.abs(dx - dtarget) > 0.05 || Math.abs(dv) > 0.6 || ddragging) dockRun();
+  else { dx = dtarget; dv = 0; dockPaint(); }
+}
+function dockRun() {
+  if (draf) return;
+  dlast = performance.now();
+  draf = requestAnimationFrame(dockLoop);
+}
+
+/* THE PUBLIC NAME IS UNCHANGED. A dozen call sites say meniscusTo(true) and
+   there is nothing to gain from renaming them along with the component. */
+function meniscusTo(animate) {
+  if (!DOCK || !G.slots.length) return;
+  const on = DOCKTABS.find(b => b.getAttribute("aria-selected") === "true") || DOCKTABS[0];
+  dtarget = G.slots[DOCKTABS.indexOf(on)] || 0;
+  /* REDUCED MOTION IS NOT NO FEEDBACK. The bead still moves to the selected
+     tab, it simply arrives rather than travelling, and with no velocity there
+     is nothing to make the surface lean. */
+  if (!animate || MENISCUS.calm.matches) { dx = dtarget; dv = 0; dockPaint(); return; }
+  dockRun();
+}
+
+/* --------------------------------------------------------- 4 the masthead */
+/* The <h1> and the line under it belong to whichever tab is selected. They
+   live here rather than one per panel so the document never has two <h1>s,
+   and the strings sit beside the tabs they name. */
+const MASTHEAD = {
+  transcribe: ["Transcribe", "Speech in, text out."],
+  speak:      ["Speak", "Text in, a voice out."],
+  jobs:       ["Jobs", "Everything this stack has run, where it ran, and how long it took."],
+  vocab:      ["Vocabulary", "The words this box keeps getting wrong, and what they should be."]
+};
+function dockMasthead(button) {
+  const said = MASTHEAD[button && button.dataset ? button.dataset.tab : ""];
+  if (!said) return;
+  const w = $("word"), t = $("tagline");
+  if (w) w.textContent = said[0];
+  if (t) t.textContent = said[1];
+}
+
+/* ------------------------------------------------------------- the lamp -- */
+/* THE LAMP HAS TWO STATES AND IT IS DARK IN ONE OF THEM. A mark that is
+   permanently red spends the page's one colour before anything has happened,
+   which turns "this is being captured" into "this is the brand". Unlit it is
+   dark red glass, so you learn where the indicator is before it ever lights.
+   Fill and a halo, never a pulse: a half-hertz oscillation above a transcript
+   somebody is reading is the hazard the house standard names. */
+function meniscusLamp() {
+  const b = $("brand");
+  if (b) b.classList.toggle("lit", MENISCUS.mic || MENISCUS.busy.size > 0);
+}
+function meniscusLevel(level, lit) {
+  MENISCUS.level = MENISCUS.calm.matches ? 0 : dclamp(level || 0, 0, 1);
+  MENISCUS.mic = !!lit;
+  meniscusLamp();
+}
+function meniscusBusy(source, on) {
+  if (on) MENISCUS.busy.add(source); else MENISCUS.busy.delete(source);
+  meniscusLamp();
+}
+
+/* ------------------------------------------------------------- the drag -- */
+/* The bead can be dragged: the surface follows the finger and snaps to the
+   nearest tab on release. 7px of hysteresis before it commits to a drag, so a
+   tap with a shaky finger is still a tap. */
+let dstartX = 0, dpid = null, dsuppress = false;
+if (DOCK) {
+  DOCK.addEventListener("pointerdown", e => {
+    if (e.button !== 0 && e.pointerType === "mouse") return;
+    dpid = e.pointerId; dstartX = e.clientX; dsuppress = false;
+  });
+  DOCK.addEventListener("pointermove", e => {
+    if (e.pointerId !== dpid) return;
+    if (!ddragging && Math.abs(e.clientX - dstartX) < 7) return;
+    if (!ddragging) {
+      ddragging = true; dsuppress = true;
+      DOCK.classList.add("dragging"); DOCK.setPointerCapture(dpid);
+    }
+    e.preventDefault();
+    const left = DOCK.getBoundingClientRect().left;
+    dtarget = dclamp(e.clientX - left, G.slots[0], G.slots[G.slots.length - 1]);
+    dockRun();
+  });
+  const drelease = e => {
+    if (e.pointerId !== dpid) return;
+    dpid = null;
+    if (!ddragging) return;
+    ddragging = false;
+    DOCK.classList.remove("dragging");
+    let near = 0, nd = Infinity;
+    G.slots.forEach((s, i) => { const g = Math.abs(dtarget - s); if (g < nd) { nd = g; near = i; } });
+    /* Land it through the page's own tab handler, so the panel swap, the
+       masthead and the poller all happen exactly as they do on a click. */
+    DOCKTABS[near].click();
+    setTimeout(() => { dsuppress = false; }, 0);
+  };
+  DOCK.addEventListener("pointerup", drelease);
+  DOCK.addEventListener("pointercancel", drelease);
+}
+
+/* ---------------------------------------------------------------- boot --- */
+function dockLayout(animate) {
+  if (!dockMeasure()) return;
+  meniscusTo(animate);
+  DOCK.classList.add("ready");
+}
+if (DOCK) {
+  dockLayout(false);
+  if (typeof ResizeObserver === "function") {
+    new ResizeObserver(() => dockLayout(false)).observe(DOCK);
+  }
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => dockLayout(false));
+  DOCKTABS.forEach(b => b.addEventListener("click", () => {
+    if (dsuppress) return;
+    dockMasthead(b);
+  }));
+  dockMasthead(DOCKTABS.find(b => b.getAttribute("aria-selected") === "true") || DOCKTABS[0]);
+}
+
 const TABS = Array.from(document.querySelectorAll('[role=tab]'));
+/* THE SURFACE IS MEASURED, NEVER ASSUMED -- and dockLayout is where that
+   happens now: it re-measures the bar and then places the bead, so the two
+   can never disagree. The observer that used to live here watched the tab
+   strip and only re-placed the bead; the dock's own observer measures first,
+   which is what a change of tab widths actually requires. */
 TABS.forEach(button => {
   button.addEventListener("click", () => {
     /* Re-selecting the selected tab is not a state change, so it gets no
@@ -1936,6 +2746,21 @@ TABS.forEach(button => {
          the tablist pattern exists to avoid. */
       b.tabIndex = b === button ? 0 : -1;
     });
+    /* THE BEAD MOVES SYNCHRONOUSLY, AND IT USED NOT TO. This was
+       `requestAnimationFrame(() => meniscusTo(true))` fired BEFORE the loop
+       above -- so the placement depended on one frame callback landing, and it
+       read the attributes it was racing. A frame that never comes is not
+       hypothetical on this page: a tab throttled in the background still runs
+       timers and still finishes jobs, and the bead would then be sitting under
+       a tab that is no longer the selected one, which is the single thing the
+       navigation exists to say.
+
+       There is nothing to defer for. meniscusTo reads G.slots, which
+       dockMeasure already filled in, so it touches no layout -- it only sets
+       the spring's target. The travel itself is still a spring, still
+       interruptible, and still arrives rather than jumping under reduced
+       motion; what is gone is the frame between the click and the intent. */
+    meniscusTo(changed);
     /* FROM THE BUTTONS, NOT A LIST WRITTEN OUT HERE. This was
        ["transcribe","speak","jobs"], so adding a fourth tab gave you a button
        that set aria-selected, hid the old panel and never showed the new one:
@@ -2017,15 +2842,12 @@ TABS.forEach(button => {
   });
 });
 
-/* A SCROLL EDGE, NOT A DIVIDER. The header's line now exists only while there
-   is something underneath it, which is the point of a translucent bar: a
-   permanent 1px rule under it says "chrome" whether or not anything is being
-   covered. Passive, because a listener on scroll must never be able to hold
-   one up. */
-const scrollEdge = () =>
-  document.body.classList.toggle("scrolled", window.scrollY > 4);
-addEventListener("scroll", scrollEdge, { passive: true });
-scrollEdge();
+/* THE SCROLL EDGE IS GONE WITH THE THING IT EDGED. It toggled body.scrolled
+   so a translucent sticky header could grow a shadow only while something was
+   actually underneath it. There is no sticky header now -- the navigation is
+   an opaque plate fixed at the foot of the viewport -- so the listener drew a
+   line on nothing. This page now has NO scroll listener at all, which is the
+   strongest form of the rule it was written to obey. */
 
 /* KEPT, THOUGH THE STATUS PILLS IT USED TO DRAW ARE GONE. HEALTH is not
    decoration: rate.clone() reads tts_long's live realtime_factor out of it,
@@ -5934,6 +6756,7 @@ function audioSink(ctx, plan) {
     },
     close() {
       closed = true;
+      meniscusBusy("speak", false);
       $("speak-progress").hidden = true;
       /* THE GRAPH OUTLIVES THE RESPONSE, which is exactly what "playing as it
          is made" means at the end: the last delta lands, the body finishes,
@@ -6002,6 +6825,7 @@ function textSink(plan) {
     commit() {},
     close() {
       clearInterval(timer); timer = 0;
+      meniscusBusy("speak", false);
       $("speak-progress").hidden = true;
       $("speak-stop").hidden = false;
     },
@@ -6137,6 +6961,7 @@ async function speakNow(voice, text, listen) {
      idempotent, so the two calls the streaming branch already makes are
      unaffected. */
   if (sink) sink.open();
+  meniscusBusy("speak", true);
   try {
     /* THIS PAGE READS THE CHUNK SCHEDULE, AND SAYS SO. tts-stack plans a
        streamed request's chunk sizes against the rule this file enforces: a
@@ -6755,6 +7580,11 @@ function renderJobs() {
      stopping to parse it. The CSS hides the chip when this is "". */
   const running = all.filter(j => j.status === "queued" || j.status === "running").length;
   $("jobcount").textContent = running ? String(running) : "";
+  /* THE COUNT SAYS HOW MANY AND THE LAMP SAYS WHETHER ANY OF THEM IS MOVING.
+     A bare numeral cannot tell a queue of two waiting from a queue of two
+     running, and those are the two states the whole tab is about. */
+  $("jobcount").classList.toggle("live", running > 0);
+  meniscusBusy("jobs", running > 0);
   $("jobsafe").hidden = !running;
 
   if (!list.length) {
@@ -6774,7 +7604,7 @@ function renderJobs() {
       : `${what}.${total
           ? ` ${total} ${total === 1 ? "record is" : "records are"} hidden by this filter.`
           : " Choose Everything to see the rest."}`}</div>`;
-    document.title = "ai-voice";
+    document.title = "Calliope";
     return;
   }
 
@@ -6970,7 +7800,7 @@ function renderJobs() {
 
   /* The answer on a background tab, without needing the tab. */
   document.title = soonest !== null && soonest > 0
-    ? `${Math.max(1, Math.round(soonest / 60))}m left · ai-voice` : "ai-voice";
+    ? `${Math.max(1, Math.round(soonest / 60))}m left · calliope` : "calliope";
 
   $("joblist").querySelectorAll("[data-play]").forEach(b =>
     b.addEventListener("click", () => playJob(b.dataset.play)));
@@ -7616,12 +8446,17 @@ function meter(bar, analyser, data) {
     const target = Math.min(1, peak * 1.6);
     shown = target > shown ? target : shown + (target - shown) * 0.25;
     bar.style.transform = "scaleX(" + shown.toFixed(3) + ")";
+    /* THE SAME NUMBER REACHES THE SEAM, and it is the same number rather than
+       a second reading of the same signal: two analysers disagreeing about how
+       loud a room is would be the control contradicting itself. */
+    meniscusLevel(shown, true);
     frame = requestAnimationFrame(paint);
   };
   frame = requestAnimationFrame(paint);
   return () => {
     cancelAnimationFrame(frame);
     bar.style.transform = "scaleX(0)";
+    meniscusLevel(0, false);
   };
 }
 

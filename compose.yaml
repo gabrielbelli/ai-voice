@@ -12,13 +12,13 @@
 # WHAT CHANGED WHEN THE FIVE REPOSITORIES BECAME ONE. The image names, and
 # nothing else:
 #
-#   ghcr.io/gabrielbelli/stt-stack      ->  ghcr.io/gabrielbelli/ai-voice-stt
-#   ghcr.io/gabrielbelli/tts-stack      ->  ghcr.io/gabrielbelli/ai-voice-tts
-#   ghcr.io/gabrielbelli/tts-long       ->  ghcr.io/gabrielbelli/ai-voice-tts-long
-#   ghcr.io/gabrielbelli/voice-gateway  ->  ghcr.io/gabrielbelli/ai-voice-gateway
+#   ghcr.io/gabrielbelli/stt-stack      ->  ghcr.io/gabrielbelli/calliope-stt
+#   ghcr.io/gabrielbelli/tts-stack      ->  ghcr.io/gabrielbelli/calliope-tts
+#   ghcr.io/gabrielbelli/tts-long       ->  ghcr.io/gabrielbelli/calliope-tts-long
+#   ghcr.io/gabrielbelli/voice-gateway  ->  ghcr.io/gabrielbelli/calliope-gateway
 #
 # services/ui joined later and was never a separate repository, so it has no
-# old name: ghcr.io/gabrielbelli/ai-voice-ui.
+# old name: ghcr.io/gabrielbelli/calliope-ui.
 #
 # The SERVICE names below are deliberately NOT renamed to match the directory
 # layout. They are DNS names on the app-internal network: `stt-stack` is what
@@ -69,7 +69,7 @@ services:
   # this file has stopped doing its job.
   voice-gateway:
     container_name: voice-gateway
-    image: ghcr.io/gabrielbelli/ai-voice-gateway:pre
+    image: ghcr.io/gabrielbelli/calliope-gateway:pre
     pull_policy: always
     restart: unless-stopped
     ports:
@@ -93,6 +93,29 @@ services:
       GATEWAY_TTS_LONG_URL: http://tts-long:8002
       GATEWAY_UI_URL: http://voice-ui:8090
 
+      # WHICH `model` STRINGS GO TO tts-long. Default: "chatterbox,tts-long".
+      # Everything else -- including a name nobody recognises -- goes to
+      # tts-stack, which is right for a typo and became a trap the day a SECOND
+      # long-form engine existed: someone types `chatterbox-turbo` at a
+      # deployment that has not enabled it, falls off the end of this set and
+      # gets KOKORO. A different engine, a different voice, no error anywhere.
+      # The gateway therefore knows every name tts-long COULD own, enabled here
+      # or not, and answers 404 naming this variable for the ones that are not.
+      #
+      # THIS SET AND TTS_ENGINES BELOW MUST AGREE, minus the `tts-long` alias.
+      # It is the one place two services' model tables can drift, and
+      # docs/tests/test_deployment.py asserts they have not.
+      #
+      # `voxtral` IS NOT IN THIS SET AND THAT IS THE WHOLE POINT OF THE
+      # PARAGRAPH ABOVE WORKING. It is in the catalogue, it is tested, and this
+      # deployment has retired it -- see
+      # docs/adr/0010-the-third-engine-was-measured-and-retired.md. Because the
+      # gateway knows every name tts-long COULD own, `model=voxtral` here is a
+      # 404 naming this variable rather than a fall-through to Kokoro with a
+      # voice Kokoro has never heard of. A deployment with a bigger card puts
+      # the name back in BOTH this key and TTS_ENGINES, never in one of them.
+      GATEWAY_LONG_MODELS: "chatterbox,tts-long,chatterbox-turbo"
+
       # HTTPS, with the certificate TrueNAS already manages for this host. Not
       # self-signed: a self-signed certificate is one every client is taught to
       # skip verification for, and a client taught to skip it keeps skipping it
@@ -113,9 +136,19 @@ services:
       # that could check a token. Closing the ports without setting this buys
       # one door and no lock: it removes the bypass, not the anonymity.
       #
-      # Set it to a comma-separated list before this is reachable from
-      # anywhere untrusted, and expect the startup WARNING until you do:
-      # GATEWAY_API_KEYS: sk-workstation,sk-laptop
+      # SET. Two keys, so they can be rotated independently: the first is for
+      # clients (an OpenAI-compatible tool, curl, a script), the second is the
+      # one voice-ui presents on the reader's behalf. Revoking the first does
+      # not lock anyone out of the page, and revoking the second does not break
+      # a client mid-run.
+      #
+      # THESE ARE LIVE CREDENTIALS IN A TRACKED FILE. That is the trade this
+      # comment used to warn against, made deliberately and with the reason
+      # written down: this deployment ships compose content to TrueNAS, so a
+      # ${VAR} here resolves to nothing at the far end and load_keys() treats
+      # an empty value as a refusal to start. Before this repository is
+      # published, these two lines are what has to be rotated and moved out.
+      # GATEWAY_API_KEYS: sk-first,sk-second   # see GAB-632 before setting
     # 2 CPUs and 512 MB against the backends' 26 and 18 GB, because this
     # process moves bytes between two sockets and never holds them: uploads and
     # audio responses stream through, and the single buffered body is
@@ -165,7 +198,7 @@ services:
 
   stt-stack:
     container_name: stt-stack
-    image: ghcr.io/gabrielbelli/ai-voice-stt:pre
+    image: ghcr.io/gabrielbelli/calliope-stt:pre
     pull_policy: always
     restart: unless-stopped
     expose:
@@ -175,6 +208,20 @@ services:
       STT_QUANTISATION: int8
       STT_THREADS: "8"
       STT_VAD: "1"
+      # WHERE A FINISHED RUN IS RECORDED, and the reason there is no
+      # depends_on beside it. tts-long keeps the store; this service posts one
+      # record per finished run and forgets it, on a daemon thread with a
+      # bounded queue, so a tts-long that is down or slow costs a record and
+      # never a reply. The argument compose already makes for the gateway
+      # above is stronger here: a log must never be a startup dependency of
+      # the thing it logs. Unset the variable and the whole feature is a None
+      # check on a hot path.
+      RUNLOG_URL: http://tts-long:8002
+      # THE LABEL EVERY RECORD CARRIES. Without it the default is
+      # platform.node(), which inside a container is a random hex id that
+      # changes on every recreate -- so the listing would show a new machine
+      # every deploy. Set it here, once, next to the container it names.
+      AIV_HOST_LABEL: orko
     cpus: 10
     mem_limit: 6g
     volumes:
@@ -205,7 +252,7 @@ services:
       # while it is still root, on every start.
       #
       # THE BUILT-INS ARE NOT IN HERE and must not be. `dictation` and `tech`
-      # ship read-only at /etc/ai-voice/glossaries, and a custom file cannot
+      # ship read-only at /etc/calliope/glossaries, and a custom file cannot
       # take one of their names: the write routes answer 409 and the registry
       # refuses the shadow. This volume holds only what somebody wrote.
       #
@@ -226,7 +273,7 @@ services:
 
   tts-stack:
     container_name: tts-stack
-    image: ghcr.io/gabrielbelli/ai-voice-tts:pre
+    image: ghcr.io/gabrielbelli/calliope-tts:pre
     pull_policy: always
     restart: unless-stopped
     expose:
@@ -241,6 +288,20 @@ services:
       # starved.
       TTS_THREADS: "8"
       TTS_VOICE: bm_george
+      # WHERE A FINISHED RUN IS RECORDED, and the reason there is no
+      # depends_on beside it. tts-long keeps the store; this service posts one
+      # record per finished run and forgets it, on a daemon thread with a
+      # bounded queue, so a tts-long that is down or slow costs a record and
+      # never a reply. The argument compose already makes for the gateway
+      # above is stronger here: a log must never be a startup dependency of
+      # the thing it logs. Unset the variable and the whole feature is a None
+      # check on a hot path.
+      RUNLOG_URL: http://tts-long:8002
+      # THE LABEL EVERY RECORD CARRIES. Without it the default is
+      # platform.node(), which inside a container is a random hex id that
+      # changes on every recreate -- so the listing would show a new machine
+      # every deploy. Set it here, once, next to the container it names.
+      AIV_HOST_LABEL: orko
     # 8, MATCHING TTS_THREADS ABOVE, and both halves are required. ONNX Runtime
     # sizes its pool from the HOST core count, not the cgroup, so a limit on its
     # own leaves the threads fighting for a slice they are not allowed: more
@@ -259,7 +320,7 @@ services:
 
   tts-long:
     container_name: tts-long
-    image: ghcr.io/gabrielbelli/ai-voice-tts-long:pre
+    image: ghcr.io/gabrielbelli/calliope-tts-long:pre
     pull_policy: always
     restart: unless-stopped
     expose:
@@ -276,6 +337,137 @@ services:
       # /voices/gabriel.wav and hands it to Chatterbox as audio_prompt_path;
       # there is no per-request reference field on the wire at any layer.
       TTS_VOICE_DIR: /voices
+
+      # --------------------------------------------------- two engines --
+      #
+      # BASELINE AND TURBO, BOTH ON THE API, BOTH AS JOBS. The engine is the
+      # `model` string on the wire — `chatterbox` and `chatterbox-turbo` — so a
+      # caller can never receive an engine it did not name. It is not a
+      # preference, it is never substituted, and it is not inferred from the
+      # voice. The decision and its measurements are
+      # docs/adr/0008-two-engines-and-both-stay-jobs.md.
+      #
+      # WHY TURBO IS STILL A JOB THOUGH IT PASSES REALTIME, and this is settled
+      # rather than pending. Measured this week on spring's RTX 3070, fp32,
+      # through the shipped path: 1.5426x realtime against baseline's 0.6531x —
+      # 2.36 times quicker, and well past the point where a short request could
+      # be answered down the socket. It stays a job ANYWAY, because 1.54x is the
+      # figure on THAT CARD and that card belongs to somebody who is often using
+      # it. A route that answers in nine seconds when spring is idle and four
+      # minutes when spring is gaming is worse than one that always answers with
+      # a job id. Nobody is to turn this into a synchronous route, a streamed
+      # route, or a special case that sometimes waits.
+      #
+      # WHAT TURBO COSTS, all of it refused BY NAME rather than dropped:
+      #   * ENGLISH ONLY. Its generate() has no language_id parameter at all and
+      #     raises TypeError if handed one. 23 languages collapse to 1.
+      #   * NO `exaggeration` AND NO `cfg_weight`. hp.emotion_adv is False, so
+      #     the conditioning layer is never built and there is no CFG path;
+      #     both values are accepted by generate(), logged as a warning and
+      #     discarded. `temperature` survives and is the only delivery control
+      #     turbo has.
+      #   * QUIETER BY DESIGN, about 11 dB: -27 LUFS normalisation, RMS
+      #     0.070-0.104 against baseline's 0.132-0.170.
+      #   * A LONGER COLD LOAD: 67.5 s against baseline's 22.2 s, both timed on
+      #     spring. See TTS_COLD_LOAD_SECONDS_CHATTERBOX_TURBO below.
+      #   * A 5-SECOND FLOOR ON THE REFERENCE CLIP, which turbo asserts itself.
+      #     GET /voices publishes each clip's length so a short one disables
+      #     turbo on that voice with the reason attached, rather than failing a
+      #     job that already has an id.
+      # TTS_EXAGGERATION and TTS_CFG_WEIGHT above are UNCHANGED and stay set.
+      # They are read only for engines whose catalogue entry declares that
+      # control, so a turbo request never carries them and never 400s on a
+      # value nobody typed.
+      #
+      # ------------------------- and a third that this deployment retired --
+      #
+      # VOXTRAL IS IN THE CATALOGUE AND IS NOT ENABLED HERE. Mistral
+      # Voxtral-4B-TTS-2603, int4, through the github.com/TheMHD1/voxtral-int4
+      # wrapper: twenty preset voices in nine languages, Portuguese among them.
+      # It was built, wired to the wire, tested and measured on this project's
+      # own hardware, and then taken off this deployment for three measured
+      # reasons -- an 8265 MiB load peak on an 8192 MiB card that segfaults
+      # whenever the desktop holds any VRAM, a transcript match against the
+      # script that ranged 1.000 down to 0.682 with whole sentences missing,
+      # and 0.104x realtime with no ability to clone. The evidence is
+      # docs/adr/0010-the-third-engine-was-measured-and-retired.md, which
+      # supersedes 0009-a-third-engine-that-cannot-run-here.md.
+      #
+      # THE ENGINE CODE IS STILL HERE AND IS STILL TESTED. Retiring it is this
+      # line and the gateway's, not a deletion: a machine with a bigger card
+      # enables it by adding `voxtral` to this key AND to GATEWAY_LONG_MODELS,
+      # and by setting TTS_ALLOW_RUNNER_ONLY_ENGINES=1, since it has no local
+      # lane and the boot check refuses that combination by default. Its
+      # runner-side settings are recorded in ADR 0010 rather than left here as
+      # keys nothing reads, because a key that is set and reaches no enabled
+      # engine is the same lie as a lane configured against code that has gone.
+      #
+      # WHICH ENGINES THIS DEPLOYMENT OFFERS. Catalogue ids from
+      # packages/common/voice_common/engines.py and nothing else; a name that is
+      # not in the catalogue is a refusal to start, not a warning. Default:
+      # "chatterbox".
+      TTS_ENGINES: "chatterbox,chatterbox-turbo"
+      # What `tts-long`, an absent `model`, and OpenAI's own three names
+      # (`tts-1`, `tts-1-hd`, `gpt-4o-mini-tts`) all resolve to. Default: the
+      # first name in TTS_ENGINES. Baseline, because it is the engine with no
+      # substitute anywhere — 23 languages and the two expressive controls —
+      # and because every client that reaches this service today gets exactly
+      # what it got yesterday.
+      TTS_DEFAULT_ENGINE: "chatterbox"
+      # WHICH ENGINES THIS CONTAINER CAN RUN ON ITS OWN EIGHT THREADS, and it
+      # must name every engine in TTS_ENGINES or the service refuses to start.
+      # SPRING IS SPEED, NEVER AVAILABILITY. An engine that exists only while
+      # somebody's gaming PC is on is a spring-shaped hole in the API, and the
+      # first Friday evening that hole eats a job. Default: the value of
+      # TTS_ENGINES, so the invariant holds unless somebody switches it off on
+      # purpose with TTS_ALLOW_RUNNER_ONLY_ENGINES=1.
+      #
+      # THIS LINE NAMES EVERY ENGINE IN TTS_ENGINES, so nothing here depends on
+      # spring at all and the opt-out below is not set. It reads as a repetition
+      # of TTS_ENGINES and it is not one: the two keys answer different
+      # questions, and the day they differ is the day an engine can disappear
+      # with somebody's gaming PC.
+      #
+      # VOXTRAL COULD NEVER HAVE JOINED THIS LINE, which is worth keeping
+      # written down now that it is retired: the temptation when re-enabling it
+      # is to add it here too and get availability back. Not "not measured yet"
+      # and not "slow": there is no processor path through this checkpoint at
+      # all. torchao's int4 tile-packed layout calls
+      # torch.cuda.get_device_capability() inside from_hp before any device
+      # dispatch; HQQ is asserted to require exactly that layout; and even the
+      # BF16 escape hatch calls torch.cuda.synchronize() unconditionally on the
+      # decode path. Worse than all three, flow_steps and cfg_alpha exist ONLY
+      # on the fast path -- the standard path is first-order Euler against the
+      # second-order midpoint solver the 32 below was chosen against by ear --
+      # so a processor lane would silently be a DIFFERENT SOLVER at a setting
+      # nobody listened to. The estimate if every wall were solved is
+      # 0.002-0.004x: a twenty-second clip in one and a half to three hours,
+      # holding 8 GB resident and evicting chatterbox from
+      # TTS_LOCAL_RESIDENT_MAX=1 the whole time. Adding it here would be the
+      # `chatterbox-cpu` rung a second time -- a lane configured, published,
+      # and unable to do work.
+      TTS_LOCAL_ENGINES: "chatterbox,chatterbox-turbo"
+      # TWO KEYS THAT BELONG TO A RUNNER-ONLY ENGINE ARE UNSET HERE, and their
+      # absence is the whole of what retiring voxtral cost this file.
+      #
+      # TTS_ALLOW_RUNNER_ONLY_ENGINES was 1. It is the opt-out that lets
+      # TTS_ENGINES name an engine TTS_LOCAL_ENGINES cannot run, and without it
+      # that pairing is a refusal to start. Left set with nothing to excuse, it
+      # would be a disarmed safety catch: the next engine with no local lane
+      # would be added to TTS_ENGINES and boot cleanly instead of stopping. The
+      # shipped default is 0 and this deployment is back on it.
+      #
+      # TTS_RUNNER_ONLY_DEADLINE_SECONDS was 900, which is also app/main.py's
+      # own default. It fails an already-accepted job that has had no eligible
+      # lane for that long -- a clock that can only start for an engine with no
+      # local lane, and there is no such engine here. Re-enabling one is what
+      # makes both keys mean something again.
+      # HOW MANY LOCAL CHECKPOINTS STAY LOADED AT ONCE. Default 1, and this
+      # deployment means it: baseline is ~6.6 GB resident here and turbo adds
+      # 1.83 GB of weights plus an AutoTokenizer on top, against the 10g
+      # mem_limit below. Two resident engines would fit only by luck, and the
+      # thing that breaks when they do not is the OOM killer.
+      TTS_LOCAL_RESIDENT_MAX: "1"
 
       # ------------------------------------------------- an optional GPU --
       #
@@ -318,60 +510,167 @@ services:
       # not in it. Mounted read-only below, mode 0400, owned by the uid this
       # container runs as.
       TTS_RUNNER_API_KEY_FILE: /run/secrets/runner-key
+      # THE idlegpu SERVICE ID PER ENGINE. TTS_RUNNER_SERVICE is the legacy
+      # spelling and now means "the id for the `chatterbox` engine" and nothing
+      # else; TTS_RUNNER_SERVICE_<ENGINE ID, UPPERCASED, HYPHENS TO
+      # UNDERSCORES> is the general form. Both default to the engine id itself.
+      #
+      # SETTING THE TURBO ONE INSTALLS NOTHING. There is one lane and one card:
+      # the agent registers services from its own worker.ini and must be
+      # restarted after `idlegpu service install chatterbox-turbo` on that
+      # machine. Until then the probe reports `no_such_service` for this id,
+      # logs the install command once at WARNING, baseline keeps the card and
+      # every turbo job runs on this container's CPU. That is the designed
+      # first-day state, not a fault.
       TTS_RUNNER_SERVICE: chatterbox
-      TTS_RUNNER_MAX_WAIT: "900"             # then give up and speak it here
+      TTS_RUNNER_SERVICE_CHATTERBOX_TURBO: "chatterbox-turbo"
+      # THERE IS NO THIRD LINE HERE ANY MORE. The runner table is built per
+      # ENABLED engine, so a service id for an engine TTS_ENGINES does not
+      # offer never reaches any lookup: it would be a setting that looks live,
+      # answers no request, and tells the next reader that spring still serves
+      # something it does not. The 12 GB install was deleted from that machine
+      # too; see ADR 0010.
       TTS_RUNNER_POLL: "2"
       # TTS_RUNNER_CA_FILE: ""                 # or a CA bundle, if you have one
+      # UNSET ON PURPOSE, AND THE "900" THAT SAT HERE IS WHY THIS COMMENT IS
+      # LONGER THAN THE LINE. The default in app/remote.py is 300 s. Fifteen
+      # minutes was the right number when a yield stopped the WHOLE SERVICE --
+      # one worker, one job, so giving up on the runner meant re-speaking on
+      # this CPU with everything submitted since queued behind it. Two lanes
+      # ended that: a yield costs the runner lane and this host carries on. So
+      # the trade is no longer "wait or stall the queue", it is fifteen minutes
+      # of a progress bar that has not moved against five. Fifteen reads as a
+      # hang, and the speech that finally arrives reads as an unexplained
+      # restart. An override here would keep the old number in production
+      # while the code says 300, which is exactly what happened.
+      # TTS_RUNNER_MAX_WAIT: "300"
 
-      # ------------------------------------ and that machine's processor --
+      # ------------------------------------------- two lanes, not a ladder --
       #
-      # THE SAME MACHINE, ITS OTHER SERVICE. The runner sells its card and its
-      # processor as two service ids over one host, one port, one certificate
-      # and one key, so this is a service name and not a second address. The
-      # reason it is worth having at all is that they are not the same offer:
-      # a game takes the card and leaves twelve threads idle, and a job that
-      # walked away from those threads would be crossing the LAN to a machine
-      # three times slower for work the runner was about to do.
+      # THERE IS NO `runner_cpu` LANE AND SETTING ONE HERE WOULD BE A LIE THIS
+      # FILE TOLD FOR MONTHS. Naming `runner_cpu` in TTS_BACKEND_ORDER turns on
+      # nothing at all: dispatch.py builds lanes from a fixed set and that name
+      # is not in it. It was documented here as a live rung with live knobs, so
+      # an operator following this file's own advice configured a lane that
+      # silently did no work. Two reasons it went, both in
+      # docs/adr/0007-two-lanes-not-three-rungs.md: measured, the runner's
+      # Ryzen 7 5700X3D ran Chatterbox at 0.271x realtime against 0.230x on
+      # this container's eight Xeon threads -- five per cent, because the model
+      # is autoregressive at batch one -- and the agent on that machine has
+      # only ever registered `echo` and `chatterbox`, so every offer to
+      # `chatterbox-cpu` was `no_such_service` for the whole life of the rung.
       #
-      # MEASURED, AND THE ANSWER IS NOT THE FLATTERING ONE. Chatterbox on the
-      # runner's Ryzen 7 5700X3D ran at 0.24x realtime against 0.23x on this
-      # container's eight Xeon threads: about five per cent, not the two or
-      # three times the core counts suggest. It is autoregressive at batch one,
-      # so it is bound by single-thread latency rather than by throughput. The
-      # runner's processor is therefore a FALLBACK for when its card is busy,
-      # not a faster machine, and the shipped order below says so.
+      # BE EXACT ABOUT WHICH KEYS DIED, because this file got that wrong once
+      # already and a rounded-up deletion is the same class of falsehood as the
+      # rung was. Gone from the code entirely: TTS_RUNNER_CPU_MIN_PCT and
+      # TTS_RUNNER_CPU_WHEN_BACKLOG_S. STILL PARSED, and still reaching a field
+      # nothing can route work to: TTS_RUNNER_CPU_SERVICE (app/remote.py, still
+      # defaulting to `chatterbox-cpu` and still building a second
+      # RunnerClient at startup), TTS_RUNNER_CPU_MAX_WAIT (app/remote.py) and
+      # TTS_REALTIME_FACTOR_RUNNER_CPU (app/main.py, still seeding a rate for a
+      # lane that cannot be chosen). None of the three is set here and none of
+      # them should be: setting one changes nothing a caller can observe except
+      # the `cpu_service` field app/remote.py still publishes on /health, which
+      # names a service the agent on spring has never registered. The honest
+      # fix is in the code, not in this file — see ADR 0007's consequences,
+      # which claimed the deletion that did not happen.
       #
-      # Set to "" to switch the rung off entirely and get exactly the
-      # two-backend behaviour that shipped before it existed.
-      TTS_RUNNER_CPU_SERVICE: chatterbox-cpu
       # Every line below is its documented default, written out because the
       # numbers are the routing policy and a reader should not have to open
       # app/main.py to find them.
       #
-      # Where work is offered, in order. The card first because it is three
-      # times anything else; this host second because it is the floor and is
-      # always willing; the runner's processor last, which makes it reachable
-      # only when a queue forms here -- see TTS_RUNNER_CPU_WHEN_BACKLOG_S.
-      # TTS_BACKEND_ORDER: "runner,local,runner_cpu"
-      # How much of its machine the runner has to be selling before its
-      # processor is worth a network hop. The runner publishes the matrix row
-      # in force, so `available` at 100% and at 5% are the same boolean and a
-      # twenty to one difference in delivered speech. In practice this means it
-      # sells processor time when nobody is signed in or the desktop is locked.
-      # TTS_RUNNER_CPU_MIN_PCT: "50"
-      # ... and the one thing that outranks the comparison: a slower machine
-      # that can start now beats a faster one four minutes deep in a queue.
-      # TTS_RUNNER_CPU_WHEN_BACKLOG_S: "120"
-      # Shorter than the card's 900. The rung below the card is about as fast
-      # as the card's machine, so waiting out a game is worth it; the rung
-      # below the processor is no slower than the processor, so it is not.
-      # TTS_RUNNER_CPU_MAX_WAIT: "300"
+      # WHICH LANES EXIST -- a membership test, not an order. A ladder is what
+      # made a third rung unreachable: `local` is always willing, so nothing
+      # under it was ever asked. Leaving a name out switches that lane off;
+      # "local" alone is local-only.
+      # TTS_BACKEND_ORDER: "runner,local"
+      # How much better the runner has to look before a job crosses the LAN.
+      # Asymmetric on purpose: losing the runner mid-job costs a whole
+      # re-speak, losing the local lane costs only slowness.
+      # TTS_DISPATCH_MARGIN: "1.25"
+      # The fixed price of the handover -- the reference clip, the lease, the
+      # first poll. ADDED, never multiplied, and it is what keeps a
+      # one-second job on this host.
+      # TTS_RUNNER_HOP_S: "8"
+      # How often a background thread asks the runner whether it is free, and
+      # that question's own clock. Nothing asks a runner anything on a job's
+      # thread: a machine that is ASLEEP rather than switched off accepts the
+      # connection and says nothing, and the 30 s job timeout would then be
+      # charged to a job that was always going to run here.
+      # TTS_RUNNER_PROBE_S: "10"
+      # TTS_RUNNER_OFFER_TIMEOUT: "3"
+      # How long the runner lane is left alone after it hands a job back. Its
+      # owner has just sat down; bouncing the next job off the same machine a
+      # second later is how a queue becomes a stampede.
+      # TTS_RUNNER_COOLDOWN_S: "30"
+      # Streamed jobs stay on this host. A yield half way through a stream
+      # cannot be re-run without sending a second file header into the middle
+      # of somebody's file. "1" turns it on for anyone who wants to find out.
+      # TTS_STREAM_ON_RUNNER: "0"
+      # How long shutdown waits for the lanes. What is still running past this
+      # is marked `cancelled`, never `failed`.
+      # TTS_SHUTDOWN_GRACE_S: "20"
       # The seeds each rate starts from, until a finished job replaces them.
-      # /health publishes backend_observations beside them: a count of zero
-      # says the figure next to it is one of these and not a measurement.
-      # TTS_REALTIME_FACTOR_LOCAL: "0.21"        # this container, 8 threads
-      # TTS_REALTIME_FACTOR_RUNNER: "0.70"       # an RTX 3070
-      # TTS_REALTIME_FACTOR_RUNNER_CPU: "0.24"   # a Ryzen 7 5700X3D, 8 threads
+      # /health publishes engine_observations beside them: a count of zero says
+      # the figure next to it is one of these and not a measurement.
+      #
+      # ONE RATE PER (LANE, ENGINE) PAIR, NOT PER LANE, and turbo is why. The
+      # two engines are 2.36x apart on the same card; one average over both
+      # describes no configuration that exists, and _sync_budget reading it
+      # would accept a synchronous request at exactly the wrong moment. The
+      # pair key wins over the lane key wins over the global one, so the two
+      # lines below still mean what they always meant — the `chatterbox` seeds.
+      # TTS_REALTIME_FACTOR_LOCAL: "0.21"        # this container, 8 Xeon threads
+      # TTS_REALTIME_FACTOR_RUNNER: "0.70"       # spring, an RTX 3070
+      #
+      # TURBO'S TWO SEEDS, and only one of them is a measurement.
+      #
+      # 1.54 is measured: 1.5426x realtime on spring's RTX 3070 at fp32, this
+      # week, through the shipped path. fp16 and bf16 were measured too and are
+      # SLOWER — precision is a VRAM lever on an autoregressive model at batch
+      # one, not a speed lever — so there is no precision knob here and there
+      # is not going to be one.
+      TTS_REALTIME_FACTOR_RUNNER_CHATTERBOX_TURBO: "1.54"
+      # 0.45 IS THE ONE NUMBER IN THIS BLOCK THAT NOBODY MEASURED ON THIS BOX.
+      # Turbo on a CPU has never been run on orko. It measured 0.53-0.55 on an
+      # M-series laptop, and turbo is 3.0-3.2x baseline on the same CPU with
+      # the same threads and the same clip, which puts orko somewhere around
+      # 0.5-0.7. Seeded at the bottom of that range ON PURPOSE: a pessimistic
+      # rate defers to a 202 rather than promising a synchronous answer this
+      # container cannot deliver. `engine_observations` will publish 0 beside
+      # it, which is the count saying out loud that it is a hypothesis. ONE
+      # TURBO JOB FINISHED ON THIS HOST REPLACES IT.
+      TTS_REALTIME_FACTOR_LOCAL_CHATTERBOX_TURBO: "0.45"
+      # WHAT A COLD START COSTS THE CALLER WHO TRIGGERS IT, per engine, charged
+      # against the synchronous budget only when that engine is not already
+      # resident on that lane. Baseline's global default is 60 s and covers the
+      # ~3 GB first-ever download as well as the load. Turbo's 68 is the 67.5 s
+      # measured on spring — a 1.83 GB checkpoint plus an AutoTokenizer, against
+      # 20.0 s warm and against baseline's 22.2 s on the same machine. It has
+      # never been timed on this container; 68 is the conservative direction,
+      # which is the right one for a number that decides whether somebody is
+      # made to wait.
+      TTS_COLD_LOAD_SECONDS_CHATTERBOX_TURBO: "68"
+      # THERE IS NO VOXTRAL COLD LOAD, RATE OR QUALITY KEY BELOW, and that is a
+      # deletion rather than an omission. A per-engine key is read only for an
+      # engine TTS_ENGINES names, so with voxtral retired every one of them --
+      # its 63-second cold load, its 0.104x runner rate, its two quality dials
+      # -- would have been set, parsed by nothing and honoured by nothing,
+      # while reading like live configuration. That is the defect this file has
+      # shipped before in the other direction: a lane recommended here after
+      # the code behind it had gone.
+      #
+      # THE SETTINGS THEMSELVES ARE NOT LOST, because losing them would cost
+      # the evenings that were spent listening. They are recorded in
+      # docs/adr/0010-the-third-engine-was-measured-and-retired.md with the
+      # reasoning intact: TTS_COLD_LOAD_SECONDS_VOXTRAL=63,
+      # TTS_REALTIME_FACTOR_RUNNER_VOXTRAL=0.104 and no local rate at all,
+      # TTS_VOXTRAL_FLOW_STEPS=32 (chosen by ear over 16, 8 and 4, against an
+      # upstream default of 8), TTS_VOXTRAL_CFG_ALPHA=1.2 (full guidance; 1.0
+      # is documented upstream as faster and garbled), and the four runner-side
+      # ones that never were keys here -- group_size 32, max_frames 2000,
+      # fade_ms 120 and low_pass_hz 0. Anybody re-enabling the engine on a
+      # bigger card starts from that list and not from the wrapper's defaults.
     cpus: 10
     mem_limit: 10g
     volumes:
@@ -423,7 +722,7 @@ services:
   # passthrough it always was.
   voice-ui:
     container_name: voice-ui
-    image: ghcr.io/gabrielbelli/ai-voice-ui:pre
+    image: ghcr.io/gabrielbelli/calliope-ui:pre
     pull_policy: always
     restart: unless-stopped
     # NO PORTS. The gateway reaches this service on the app-internal network
@@ -462,13 +761,14 @@ services:
       # firewall and it is not one anywhere else. voice-ui logs a WARNING at
       # startup whenever this is set, saying exactly that.
       #
-      # DELIBERATELY LEFT UNSET, like GATEWAY_API_KEYS above and for the same
-      # reason: a key invented in a file that gets deployed is how a
-      # placeholder becomes production credentials. Unset means no header is
-      # added and an inbound one is forwarded as before, so with
-      # GATEWAY_API_KEYS also unset this stack behaves exactly as it does now.
-      # UI_GATEWAY_API_KEY: sk-workstation
-
+      # SET, and it MUST be set now that GATEWAY_API_KEYS is. The page has no
+      # key box any more, so a gateway that requires a token and a UI that
+      # presents none is 401 on every route with nowhere to type a fix.
+      #
+      # This is the SECOND key in GATEWAY_API_KEYS above, never the first: the
+      # one a client holds and the one this container holds are different
+      # secrets so that either can be rotated alone.
+      # UI_GATEWAY_API_KEY: sk-second          # the SECOND key above, never the first
       # MeTube, by HOST ADDRESS. It is a separate TrueNAS app
       # (ix-metube-metube-1) with host_network:false and its web port published
       # on 30097, so it shares no DNS with this app — there is no `metube` name

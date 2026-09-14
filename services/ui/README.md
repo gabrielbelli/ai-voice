@@ -142,7 +142,7 @@ with `UI_GATEWAY_API_KEY` set, "key-checked" means *this container's* key: the
 gate on ingestion is reaching :30081, not knowing a secret.
 
 But **shipping a UI that makes MeTube load-bearing is the moment to close it**:
-after this deploys, an outage or an abuse of port 30097 becomes an ai-voice
+after this deploys, an outage or an abuse of port 30097 becomes an Calliope
 outage. The fix is not in this code. Unpublish 30097, or
 firewall it to the NAS, and point `UI_METUBE_URL` at the LAN IP.
 
@@ -175,7 +175,7 @@ internal host; MeTube documents that exact limitation in its own docstring.
 The impact is *blind* SSRF — the probe's output is parsed into five scalars,
 nothing is written to disk, and no response body is ever returned to a caller.
 **The real backstop is network isolation:** this container has no business
-reaching the NAS's other services, and an egress rule on the ai-voice app is
+reaching the NAS's other services, and an egress rule on the Calliope app is
 the fix. Write it down; do not assume it.
 
 `UI_PROBE=0` removes the probe entirely, at the cost of a title-only confirm
@@ -884,14 +884,14 @@ always confirms: not knowing is the case the dialog exists for.
 
 ```bash
 # Build, from the repository root — the context is the root for every service
-docker build -f services/ui/Containerfile -t ai-voice-ui .
+docker build -f services/ui/Containerfile -t calliope-ui .
 
 # Run, on the network the gateway shares
 docker run -p 30081:8090 \
   -e UI_GATEWAY_URL=http://voice-gateway:8080 \
   -e UI_METUBE_URL=http://192.0.2.10:30097 \
   -v voices:/voices \
-  ai-voice-ui
+  calliope-ui
 ```
 
 `compose.yaml` at the repository root wires all of it, including the healthcheck

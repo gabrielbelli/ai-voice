@@ -42,7 +42,7 @@ publishes `:pre` and never `:latest`.
 ```bash
 docker run -p 8000:8000 -v stt-models:/models \
   --cpus 4 -e STT_THREADS=4 \
-  ghcr.io/gabrielbelli/ai-voice-stt:pre
+  ghcr.io/gabrielbelli/calliope-stt:pre
 ```
 
 First start downloads the selected model into the volume. Later starts are
@@ -345,7 +345,7 @@ decoders tolerate its absence.
 ```bash
 docker run -p 8000:8000 -v stt-models:/models \
   -e STT_API_KEYS="$(openssl rand -hex 32)" \
-  ghcr.io/gabrielbelli/ai-voice-stt:pre
+  ghcr.io/gabrielbelli/calliope-stt:pre
 ```
 
 **Unset means no authentication**, and the service says so at every startup:
@@ -497,7 +497,7 @@ transcript is the product.
 | `STT_MAX_WINDOW_SECONDS` | `300` | Seconds of **speech** per pass through the recogniser. Longer clips are cut at the VAD's pauses and stitched back. `0` disables it. See below |
 | `STT_HOTWORDS` | `1` | `0` disables decode-time biasing entirely, for A/B tests. See below |
 | `STT_MAX_CONCURRENT` | `0` | Transcriptions allowed at once. `0` is no limit; past a limit, `/v1` answers 429 with `Retry-After` |
-| `STT_GLOSSARY_BUILTIN` | `/etc/ai-voice/glossaries` | Read-only profiles baked into the image |
+| `STT_GLOSSARY_BUILTIN` | `/etc/calliope/glossaries` | Read-only profiles baked into the image |
 | `STT_GLOSSARY_DIR` | `/glossaries` | Writable profiles. Mount a volume here or the write routes answer 503 |
 | `STT_GLOSSARY_DEFAULT` | unset | Profiles applied when a request selects none. **Leave it unset.** See below |
 | `STT_GLOSSARY` | unset | One extra file, loaded as a profile named after it. The pre-profile variable |
@@ -648,7 +648,7 @@ Or, for a plain `docker run`:
 
 ```bash
 docker run -v stt-models:/models -v stt-glossaries:/glossaries \
-  -p 8000:8000 ghcr.io/gabrielbelli/ai-voice-stt
+  -p 8000:8000 ghcr.io/gabrielbelli/calliope-stt
 ```
 
 The repository's own `compose.yaml` carries that mount, so the deployed stack
@@ -987,7 +987,7 @@ capped.
 ```bash
 docker run -p 8000:8000 -v stt-models:/models \
   --cpus 4 -e STT_THREADS=4 \
-  ghcr.io/gabrielbelli/ai-voice-stt:pre
+  ghcr.io/gabrielbelli/calliope-stt:pre
 ```
 
 Pin to specific cores when the host is shared, so the service cannot be
@@ -996,7 +996,7 @@ scheduled onto whatever else is busy:
 ```bash
 docker run -p 8000:8000 -v stt-models:/models \
   --cpuset-cpus 0-3 -e STT_THREADS=4 \
-  ghcr.io/gabrielbelli/ai-voice-stt:pre
+  ghcr.io/gabrielbelli/calliope-stt:pre
 ```
 
 Compose:
@@ -1004,7 +1004,7 @@ Compose:
 ```yaml
 services:
   stt:
-    image: ghcr.io/gabrielbelli/ai-voice-stt:pre
+    image: ghcr.io/gabrielbelli/calliope-stt:pre
     ports: ["8000:8000"]
     volumes: ["stt-models:/models"]
     environment:

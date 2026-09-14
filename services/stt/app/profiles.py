@@ -29,7 +29,7 @@ WHERE PROFILES COME FROM
 Three sources, and which one a profile came from is visible in the API rather
 than implied:
 
-    builtin   STT_GLOSSARY_BUILTIN, /etc/ai-voice/glossaries in the image.
+    builtin   STT_GLOSSARY_BUILTIN, /etc/calliope/glossaries in the image.
               Read-only. PUT or DELETE on one of these names is a 409, never a
               silent shadow: a profile whose contents depend on which directory
               won is a profile nobody can reason about.
@@ -85,7 +85,7 @@ ENV = "env"
 # it is CALLED, not when this module is imported. Import-time capture is what
 # makes a setting untestable without a subprocess, and it is the reason the two
 # directories below are the only place these paths appear.
-DEFAULT_BUILTIN_DIR = "/etc/ai-voice/glossaries"
+DEFAULT_BUILTIN_DIR = "/etc/calliope/glossaries"
 DEFAULT_CUSTOM_DIR = "/glossaries"
 
 SUFFIX = ".txt"

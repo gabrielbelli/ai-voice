@@ -10,16 +10,16 @@
 # it downloads into the volume at /models on first start.
 #
 # Build, from the repository root:
-#   docker build -f services/tts/Containerfile -t ai-voice-tts .
+#   docker build -f services/tts/Containerfile -t calliope-tts .
 #
 # Run:
-#   docker run -p 8001:8001 -v tts-models:/models --cpus 4 -e TTS_THREADS=4 ai-voice-tts
+#   docker run -p 8001:8001 -v tts-models:/models --cpus 4 -e TTS_THREADS=4 calliope-tts
 #
 # Run with authentication and TLS:
 #   docker run -p 8001:8001 -v tts-models:/models -v /etc/tts-certs:/certs:ro \
 #     -e TTS_API_KEYS=key-one,key-two \
 #     -e TTS_TLS_CERT=/certs/fullchain.pem -e TTS_TLS_KEY=/certs/privkey.pem \
-#     ai-voice-tts
+#     calliope-tts
 #
 # Both are off when their variables are unset, which is how the service shipped
 # and how it stays on upgrade. The key file must be readable by uid 1000; the
@@ -51,7 +51,7 @@ WORKDIR /srv
 # contain — a context of services/tts has no packages/ in it at all. So every
 # COPY below is repo-relative and the build runs from the root:
 #
-#   docker build -f services/tts/Containerfile -t ai-voice-tts .
+#   docker build -f services/tts/Containerfile -t calliope-tts .
 #
 # Building from inside services/tts fails on the first COPY. That is the
 # failure worth having: a wrong context otherwise surfaces as a pip error about

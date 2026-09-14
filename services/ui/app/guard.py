@@ -66,7 +66,7 @@ parsed into five scalars, none of which is a response body, nothing is written
 to disk, and nothing is returned to the caller but a title, a duration, a size
 and two booleans. The real backstop is not code -- the gateway and this
 container have no business reaching the NAS's other services at all, and an
-egress rule on the ai-voice app is the fix. That belongs in the deployment, and
+egress rule on the calliope app is the fix. That belongs in the deployment, and
 it is written down in this service's README so it cannot be assumed.
 """
 

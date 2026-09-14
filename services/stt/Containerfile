@@ -12,10 +12,10 @@
 # ~460 MB, Whisper large-v3 ~2.9 GB.
 #
 # Build, from the repository root:
-#   docker build -f services/stt/Containerfile -t ai-voice-stt .
+#   docker build -f services/stt/Containerfile -t calliope-stt .
 #
 # Run:
-#   docker run -p 8000:8000 -v stt-models:/models --cpus 4 -e STT_THREADS=4 ai-voice-stt
+#   docker run -p 8000:8000 -v stt-models:/models --cpus 4 -e STT_THREADS=4 calliope-stt
 
 FROM python:3.13-slim-trixie
 
@@ -41,7 +41,7 @@ WORKDIR /srv
 # contain — a context of services/stt has no packages/ in it at all. So every
 # COPY below is repo-relative and the build runs from the root:
 #
-#   docker build -f services/stt/Containerfile -t ai-voice-stt .
+#   docker build -f services/stt/Containerfile -t calliope-stt .
 #
 # Building from inside services/stt fails on the first COPY. That is the
 # failure worth having: a wrong context otherwise surfaces as a pip error about
@@ -73,7 +73,7 @@ COPY services/stt/app/ ./app/
 # So the personal terms left the image entirely (see
 # services/stt/examples/glossaries/personal.txt, which is deliberately NOT
 # copied here) and what remains is opted into per request.
-COPY services/stt/glossaries/ /etc/ai-voice/glossaries/
+COPY services/stt/glossaries/ /etc/calliope/glossaries/
 
 # THERE IS DELIBERATELY NO `mkdir /glossaries` HERE. That directory is where
 # custom profiles are written, and it must exist only because an operator
@@ -102,7 +102,7 @@ ENV HF_HOME=/models \
     VOICE_CHOWN_DIRS="/models /glossaries" \
     STT_MODEL=parakeet \
     STT_QUANTISATION=int8 \
-    STT_GLOSSARY_BUILTIN=/etc/ai-voice/glossaries \
+    STT_GLOSSARY_BUILTIN=/etc/calliope/glossaries \
     STT_GLOSSARY_DIR=/glossaries \
     STT_THREADS=4 \
     STT_VAD=1 \
